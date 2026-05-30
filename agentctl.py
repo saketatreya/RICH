@@ -352,6 +352,54 @@ def check_module_budget(mod: Module, ws: Workspace) -> list[str]:
     return violations
 
 
+# ── M5: Boundary heuristic ─────────────────────────────────────────────────────
+
+import re
+
+_IMPORT_RE = re.compile(
+    r'^\s*(?:from\s+(\w+)|import\s+(\w+))',
+    re.MULTILINE
+)
+
+
+def check_module_boundaries(mod: Module, ws: Workspace) -> list[str]:
+    """Heuristic: scan source files for imports of other module names not in deps.
+
+    Conservative, document false-positive potential. This is defense-in-depth;
+    M3 is the real enforcement.
+    Returns list of warning messages (treated as errors by validate).
+    """
+    warnings: list[str] = []
+    deps = set(mod.contract.dependencies)
+    all_modules = {m.name for m in ws.modules} - {mod.name}
+    src_dir = os.path.join(mod.path, "src")
+
+    if not os.path.isdir(src_dir):
+        return warnings
+
+    for root, dirs, files in os.walk(src_dir):
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath) as f:
+                    content = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            rel = os.path.relpath(fpath, mod.path)
+            for m in _IMPORT_RE.finditer(content):
+                imported = m.group(1) or m.group(2)
+                if imported in all_modules and imported not in deps:
+                    warnings.append(
+                        f"[{mod.name}] boundary: {rel} imports '{imported}' "
+                        f"which is not in declared dependencies"
+                    )
+
+    return warnings
+
+
 # ── Commands ───────────────────────────────────────────────────────────────────
 
 def load_ws() -> Workspace:
@@ -374,6 +422,11 @@ def cmd_validate() -> int:
     for mod in ws.modules:
         budget_violations = check_module_budget(mod, ws)
         errors.extend(budget_violations)
+
+    # M5: boundary heuristic
+    for mod in ws.modules:
+        boundary_warnings = check_module_boundaries(mod, ws)
+        errors.extend(boundary_warnings)
 
     if errors:
         for e in errors:
