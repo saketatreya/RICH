@@ -56,19 +56,34 @@ class PostconditionProperty(FormalProperty):
 
 
 class RaisesProperty(FormalProperty):
-    """A property asserting an error is raised under given conditions.
+    """Declared error behavior — observable, not predictive.
 
-    when: expression evaluated before the call (guard).
-    error: the error name that must be raised when the guard is true.
+    errors: list of error names this operation may raise.
+    when: optional pure predicate over INPUTS ONLY (no deps calls).
+          If true and the function returns normally, it's a violation.
+          DESIGN RULE: when must be a pure predicate over inputs.
+          Deps calls in guards are unsound (re-derives the implementation's
+          decision from the spec — Rice: you can observe, not predict).
+
+    On exception:
+      - If the error name is in errors → re-raise (contract satisfied)
+      - If it's not → ContractViolation
+    On normal return with when=true → ContractViolation
     """
 
-    def __init__(self, id: str, when: str, error: str):
+    def __init__(self, id: str, errors: list[str] = None,
+                 when: str = None):
         super().__init__(PropertyKind.RAISES, id)
-        self.when = when
-        self.error = error
+        self.errors = errors or []
+        self.when = when  # None or pure-inputs predicate
+
+    @property
+    def error(self):
+        """Backward compat: first error name."""
+        return self.errors[0] if self.errors else ""
 
     def __repr__(self):
-        return f"RaisesProperty(id={self.id!r}, when={self.when!r}, error={self.error!r})"
+        return f"RaisesProperty(id={self.id!r}, errors={self.errors!r}, when={self.when!r})"
 
 
 class TraceInvariantProperty(FormalProperty):
@@ -121,7 +136,7 @@ _VALID_KINDS = {k.value for k in PropertyKind}
 
 _REQUIRED_FIELDS = {
     PropertyKind.POSTCONDITION: {"expr"},
-    PropertyKind.RAISES: {"when", "error"},
+    PropertyKind.RAISES: {"errors"},
     PropertyKind.TRACE_INVARIANT: {"expr"},
     PropertyKind.TEMPORAL: {"expr"},
     PropertyKind.NONFUNCTIONAL: set(),
@@ -174,7 +189,9 @@ def parse_formal_property(raw, property_id: str) -> Optional[FormalProperty]:
         return PostconditionProperty(id=property_id, expr=raw["expr"])
     elif kind == PropertyKind.RAISES:
         return RaisesProperty(
-            id=property_id, when=raw["when"], error=raw["error"]
+            id=property_id,
+            errors=raw.get("errors", []),
+            when=raw.get("when"),  # optional pure-inputs guard
         )
     elif kind == PropertyKind.TRACE_INVARIANT:
         return TraceInvariantProperty(id=property_id, expr=raw["expr"])

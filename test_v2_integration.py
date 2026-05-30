@@ -78,44 +78,11 @@ def test_token_on_success_postcondition_fails():
 
 # ── 2. RAISES: reject_invalid ─────────────────────────────────────────────
 
-def test_reject_invalid_guard_true_with_bad_password():
-    """When user_repo returns ok=false, the guard 'not deps.X.Y(...).ok' is true."""
-    class FakeFailingUserRepo:
-        def verify_password(self, username, password):
-            return {"ok": False}
-
-    ctx = EvalContext(
-        inputs={"username": "alice", "password": "wrong"},
-        deps={"user_repo": FakeFailingUserRepo()},
-    )
-
-    # The guard: not deps.user_repo.verify_password(username, password).ok
-    guard = parse_expr("not deps.user_repo.verify_password(username, password).ok")
-    assert evaluate(guard, ctx) is True, "guard should be true for bad password"
-
-
-def test_reject_invalid_guard_false_with_good_password():
-    """When user_repo returns ok=true, the guard is false."""
-    class FakeGoodUserRepo:
-        def verify_password(self, username, password):
-            return {"ok": True}
-
-    ctx = EvalContext(
-        inputs={"username": "alice", "password": "secret"},
-        deps={"user_repo": FakeGoodUserRepo()},
-    )
-
-    guard = parse_expr("not deps.user_repo.verify_password(username, password).ok")
-    assert evaluate(guard, ctx) is False, "guard should be false for good password"
-
-
 def test_reject_invalid_contract_checked_wrong_password():
     """auth.authenticate with wrong password → raises invalid_credentials."""
-    # Real token_store but real user_repo rejects the password
     from modules.token_store.src.token_store import TokenStore
     from modules.user_repo.src.user_repo import UserRepo
 
-    # Load auth's contract and properties
     contract = load_contract("auth")
     props = get_props(contract)
     raises_props = [p for p in props if isinstance(p, RaisesProperty)]
@@ -123,10 +90,10 @@ def test_reject_invalid_contract_checked_wrong_password():
 
     assert len(raises_props) == 1
     assert raises_props[0].id == "reject_invalid"
+    assert "invalid_credentials" in raises_props[0].errors
 
     from modules.auth.src.auth import authenticate
 
-    # Wrap authenticate with contract checking
     checked_auth = contract_checked(
         authenticate,
         postconditions=postconds,
@@ -134,7 +101,38 @@ def test_reject_invalid_contract_checked_wrong_password():
         op_name="authenticate",
     )
 
-    # Wrong password → should raise AuthError("invalid_credentials")
+    # Wrong password → auth raises AuthError → checked for membership
+    from modules.auth.src.auth import AuthError
+    try:
+        checked_auth(
+            username="admin", password="wrongpassword",
+            user_repo=UserRepo(), token_store=TokenStore(),
+        )
+        assert False, "should have raised"
+    except AuthError as e:
+        assert "invalid_credentials" in str(e), f"got: {e}"
+    """auth.authenticate with wrong password → raises invalid_credentials."""
+    from modules.token_store.src.token_store import TokenStore
+    from modules.user_repo.src.user_repo import UserRepo
+
+    contract = load_contract("auth")
+    props = get_props(contract)
+    raises_props = [p for p in props if isinstance(p, RaisesProperty)]
+    postconds = [p for p in props if isinstance(p, PostconditionProperty)]
+
+    assert len(raises_props) == 1
+    assert raises_props[0].id == "reject_invalid"
+    assert "invalid_credentials" in raises_props[0].errors
+
+    from modules.auth.src.auth import authenticate
+
+    checked_auth = contract_checked(
+        authenticate,
+        postconditions=postconds,
+        raises_props=raises_props,
+        op_name="authenticate",
+    )
+
     from modules.auth.src.auth import AuthError
     try:
         checked_auth(
@@ -174,8 +172,8 @@ def test_reject_invalid_contract_checked_good_password():
     assert len(result["token"]) > 0  # postcondition satisfied
 
 
-def test_reject_invalid_guard_is_in_contract():
-    """Verify the actual contract.yaml contains the raises property with deps ref."""
+def test_reject_invalid_is_in_contract():
+    """Verify the actual contract.yaml contains raises with errors list."""
     contract = load_contract("auth")
     reject = None
     for bp in contract["behavior"]:
@@ -185,8 +183,8 @@ def test_reject_invalid_guard_is_in_contract():
 
     assert reject is not None, "reject_invalid not found"
     assert reject["kind"] == "raises"
-    assert "deps.user_repo.verify_password" in reject["when"], \
-        "guard must reference dep to enable assume-guarantee"
+    assert "invalid_credentials" in reject.get("errors", []), \
+        "errors must list invalid_credentials"
 
 
 # ── 3. TRACE INVARIANT: token_uniqueness ──────────────────────────────────

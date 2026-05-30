@@ -30,17 +30,28 @@ def test_parse_postcondition():
 
 
 def test_parse_raises():
-    """A raises property has kind, when, and error."""
+    """A raises property has kind and errors list."""
     raw = {
         "kind": "raises",
-        "when": "not deps.user_repo.verify_password(username, password).ok",
-        "error": "invalid_credentials"
+        "errors": ["invalid_credentials"]
     }
     prop = parse_formal_property(raw, "reject_invalid")
     assert isinstance(prop, RaisesProperty)
     assert prop.kind == PropertyKind.RAISES
-    assert prop.when == "not deps.user_repo.verify_password(username, password).ok"
-    assert prop.error == "invalid_credentials"
+    assert prop.errors == ["invalid_credentials"]
+
+
+def test_parse_raises_with_when():
+    """A raises property can have an optional when guard (pure-inputs)."""
+    raw = {
+        "kind": "raises",
+        "errors": ["bad_input"],
+        "when": "x < 0"
+    }
+    prop = parse_formal_property(raw, "reject_negative")
+    assert isinstance(prop, RaisesProperty)
+    assert prop.when == "x < 0"
+    assert prop.errors == ["bad_input"]
 
 
 def test_parse_trace_invariant():
@@ -93,24 +104,14 @@ def test_reject_postcondition_missing_expr():
         assert "expr" in str(e)
 
 
-def test_reject_raises_missing_when():
-    """Raises without when raises PropertyParseError."""
-    raw = {"kind": "raises", "error": "bad"}
+def test_reject_raises_missing_errors():
+    """Raises without errors raises PropertyParseError."""
+    raw = {"kind": "raises"}
     try:
         parse_formal_property(raw, "bad")
         assert False, "should have raised"
     except PropertyParseError as e:
-        assert "when" in str(e)
-
-
-def test_reject_raises_missing_error():
-    """Raises without error raises PropertyParseError."""
-    raw = {"kind": "raises", "when": "true"}
-    try:
-        parse_formal_property(raw, "bad")
-        assert False, "should have raised"
-    except PropertyParseError as e:
-        assert "error" in str(e)
+        assert "errors" in str(e)
 
 
 def test_kind_enum_values():

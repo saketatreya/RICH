@@ -321,16 +321,18 @@ def contract_checked(
         # Extract inputs from kwargs (this is what the evaluator will see)
         inputs = dict(kwargs)
 
-        # ── Evaluate raises guards BEFORE the call ──
+        # ── Evaluate raises WHEN guards BEFORE the call (pure-inputs only) ──
         pre_ctx = EvalContext(inputs=inputs)
         expected_errors = []
+        should_raise_props = []  # props whose when-guard is true
         for rp in raises_props:
-            guard = parse_expr(rp.when)
-            try:
-                if evaluate(guard, pre_ctx):
-                    expected_errors.append(rp)
-            except ContractViolation:
-                pass  # guard evaluation failure → skip this property
+            if rp.when:
+                guard = parse_expr(rp.when)
+                try:
+                    if evaluate(guard, pre_ctx):
+                        should_raise_props.append(rp)
+                except ContractViolation:
+                    pass  # guard evaluation failure → skip this property
 
         # ── Call the real function ──
         error_raised = None
@@ -339,27 +341,34 @@ def contract_checked(
             result = fn(**kwargs)
         except Exception as e:
             error_raised = str(e)
-            # Check if the raised error matches any expected error
-            matched = False
-            for rp in expected_errors:
-                if rp.error in error_raised:
-                    matched = True
-                    break
-            if expected_errors and not matched:
-                raise ContractViolation(
-                    expected_errors[0].id, "raises", "dep",
-                    f"expected error '{expected_errors[0].error}' "
-                    f"but got '{error_raised}'"
-                )
-            if not expected_errors and error_raised:
-                # Unexpected error — let it propagate
-                raise
 
-        # ── If we expected an error but none was raised ──
-        if expected_errors and error_raised is None:
+            # Check membership: is the raised error in any declared errors list?
+            matched = False
+            for rp in raises_props:
+                for err_name in rp.errors:
+                    if err_name in error_raised:
+                        matched = True
+                        break
+                if matched:
+                    break
+
+            if raises_props and not matched:
+                all_errors = []
+                for rp in raises_props:
+                    all_errors.extend(rp.errors)
+                raise ContractViolation(
+                    raises_props[0].id, "raises", "this module",
+                    f"raised '{error_raised}' which is not in declared errors: {all_errors}"
+                ) from e
+
+            # Error is declared → re-raise (contract satisfied)
+            raise
+
+        # ── If a when-guard was true but no error was raised ──
+        if should_raise_props and error_raised is None:
             raise ContractViolation(
-                expected_errors[0].id, "raises", "dep",
-                f"expected error '{expected_errors[0].error}' "
+                should_raise_props[0].id, "raises", "this module",
+                f"guard '{should_raise_props[0].when}' was true "
                 f"but function returned normally"
             )
 

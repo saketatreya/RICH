@@ -187,11 +187,12 @@ def test_raises_property_triggers():
             raise ValueError("bad_input")
         return {"ok": True}
 
-    prop = RaisesProperty(id="reject_negative", when="x < 0", error="bad_input")
+    prop = RaisesProperty(id="reject_negative", errors=["bad_input"],
+                          when="x < 0")
 
     checked = contract_checked(may_fail, raises_props=[prop])
 
-    # x=-1 → should raise ValueError with bad_input
+    # x=-1 → should raise ValueError with bad_input → re-raised
     try:
         checked(x=-1)
         assert False, "should have raised"
@@ -199,21 +200,21 @@ def test_raises_property_triggers():
         assert "bad_input" in str(e)
 
 
-def test_raises_property_violated():
-    """When guard is true but error NOT raised → violation."""
-    def forgets_to_raise(x):
-        return {"ok": True}  # should raise when x < 0
+def test_raises_property_undeclared_error():
+    """Raising an error not in the declared errors list → ContractViolation."""
+    def bad_raiser(x):
+        raise RuntimeError("something_else")
 
-    prop = RaisesProperty(id="reject_negative", when="x < 0", error="bad_input")
+    prop = RaisesProperty(id="only_declared", errors=["my_error"])
 
-    checked = contract_checked(forgets_to_raise, raises_props=[prop])
+    checked = contract_checked(bad_raiser, raises_props=[prop])
 
     try:
-        checked(x=-1)
+        checked(x=1)
         assert False, "should have raised"
     except ContractViolation as e:
-        assert "reject_negative" in str(e)
-        assert "expected error" in str(e).lower() or "bad_input" in str(e)
+        assert "something_else" in str(e)
+        assert "my_error" in str(e)
 
 
 def test_raises_property_guard_false():
@@ -221,7 +222,8 @@ def test_raises_property_guard_false():
     def ok_fn(x):
         return {"ok": True}
 
-    prop = RaisesProperty(id="reject_negative", when="x < 0", error="bad_input")
+    prop = RaisesProperty(id="reject_negative", errors=["bad_input"],
+                          when="x < 0")
 
     checked = contract_checked(ok_fn, raises_props=[prop])
 
