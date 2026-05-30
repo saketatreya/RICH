@@ -83,6 +83,21 @@ class BinaryOp(Expr):
     def __repr__(self):
         return f"BinaryOp({self.op!r}, {self.left!r}, {self.right!r})"
 
+class HistoryAccess(Expr):
+    def __init__(self, field: Optional[str] = None):
+        self.field = field  # None means whole history list
+    def __repr__(self):
+        return f"HistoryAccess({self.field!r})"
+
+
+class AggregateCall(Expr):
+    def __init__(self, agg: str, expr: Expr):
+        self.agg = agg     # "distinct", "count", "all", "any"
+        self.expr = expr   # expression to aggregate over history entries
+    def __repr__(self):
+        return f"AggregateCall({self.agg!r}, {self.expr!r})"
+
+
 class FuncCall(Expr):
     def __init__(self, func: str, arg: Expr):
         self.func = func
@@ -100,8 +115,10 @@ TOKEN_RE = re.compile(r"""
       | (and|or|not)\b
       | (true|false)\b
       | (result)\b
+      | (history)\b
       | (len)\b
       | (deps)\b
+      | (distinct|count|all|any)\b
       | ([+\-*/])
       | ([(),.])
       # Literals
@@ -117,14 +134,16 @@ TOKEN_CMP = 1
 TOKEN_LOGIC = 2
 TOKEN_BOOL_LIT = 3
 TOKEN_RESULT = 4
-TOKEN_FUNC = 5
-TOKEN_DEPS = 6
-TOKEN_ADDOP = 7
-TOKEN_DELIM = 8
-TOKEN_STRING = 9
-TOKEN_FLOAT = 10
-TOKEN_INT = 11
-TOKEN_IDENT = 12
+TOKEN_HISTORY = 5
+TOKEN_FUNC = 6
+TOKEN_DEPS = 7
+TOKEN_AGGREGATE = 8
+TOKEN_ADDOP = 9
+TOKEN_DELIM = 10
+TOKEN_STRING = 11
+TOKEN_FLOAT = 12
+TOKEN_INT = 13
+TOKEN_IDENT = 14
 
 
 class Token:
@@ -139,7 +158,7 @@ class Token:
 def tokenize(text: str) -> list[Token]:
     tokens = []
     for m in TOKEN_RE.finditer(text):
-        for i in range(1, 13):
+        for i in range(1, 15):
             val = m.group(i)
             if val is not None:
                 tokens.append(Token(i, val, m.start()))

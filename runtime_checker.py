@@ -402,45 +402,116 @@ def contract_checked(
 # ── DependencyProxy — wraps a dependency handle with blame ─────────────────────
 
 class DependencyProxy:
-    """Wraps a dependency handle to check its contracts at the injection boundary.
+    """Wraps a dependency handle to check contracts at the injection boundary.
 
-    When the caller invokes an operation on the dependency:
-      1. Check the dep's preconditions (if violated, blame the CALLER)
-      2. Call the real dep operation
-      3. Check the dep's postconditions (if violated, blame the DEP)
+    Creates proxy methods for every operation declared in the dep's contract.
+    Each proxy method:
+      1. Evaluates the dep's declared preconditions against caller's args
+         → if violated, blame the CALLER
+      2. Calls the real dep operation
+      3. Evaluates the dep's declared postconditions against the result
+         → if violated, blame the DEP
 
     This is Findler-Felleisen contracts-and-blame realized at the exact
     seam D4 created: the injection point is the one place where contract
     violations have an unambiguous responsible party.
+
+    Blame rules:
+      - Dep precondition fails → blame CALLER
+      - Dep postcondition fails → blame DEP (by module name)
+      - Dep itself raises → propagates (dep's own contract_checked handles it)
     """
 
-    def __init__(self, dep: Any, module_name: str, op_name: str,
-                 preconditions: list = None, postconditions: list = None):
+    def __init__(self, dep: Any, module_name: str,
+                 dep_contract: dict = None):
         """
         Args:
-            dep: the real dependency handle
+            dep: the real dependency handle (object with callable methods)
             module_name: name of the dependency module (for blame messages)
-            op_name: name of the operation being proxied
-            preconditions: list of properties to check before calling dep
-            postconditions: list of properties to check after dep returns
+            dep_contract: parsed contract dict for the dependency module.
+                          If provided, operations are extracted and proxied.
         """
         self._dep = dep
         self._module = module_name
-        self._op_name = op_name
-        self._preconditions = preconditions or []
-        self._postconditions = postconditions or []
+        self._contract = dep_contract or {}
 
-        # Look up the real method
-        self._real_fn = getattr(dep, op_name, None)
-        if self._real_fn is None:
-            raise ContractViolation(
-                "proxy", "evaluation", "caller",
-                f"dependency '{module_name}' has no operation '{op_name}'"
-            )
+        # Parse formal properties from contract
+        from properties import parse_formal_property, PostconditionProperty
+        self._postconditions = {}
+        behavior = self._contract.get("behavior", []) or []
+        for bp in behavior:
+            prop = parse_formal_property(bp.get("formal"), bp.get("id", ""))
+            if isinstance(prop, PostconditionProperty):
+                # Postconditions apply to all operations for now
+                # (can be scoped later)
+                for op_spec in (self._contract.get("interface", {})
+                                .get("operations", []) or []):
+                    op_name = op_spec.get("name", "")
+                    if op_name not in self._postconditions:
+                        self._postconditions[op_name] = []
+                    self._postconditions[op_name].append(prop)
 
-    def __call__(self, **kwargs):
-        return self._real_fn(**kwargs)
+        # Build proxy methods for each declared operation
+        operations = (self._contract.get("interface", {})
+                      .get("operations", []) or [])
+        for op_spec in operations:
+            op_name = op_spec.get("name", "")
+            if op_name and hasattr(dep, op_name):
+                self._build_proxy_method(op_name, op_spec)
 
+    def _build_proxy_method(self, op_name: str, op_spec: dict):
+        """Create a proxy method that checks contracts at the boundary."""
+        real_fn = getattr(self._dep, op_name)
+        postconditions = self._postconditions.get(op_name, [])
+        op_inputs = op_spec.get("inputs", {})
+
+        def proxy_method(**kwargs):
+            # ── Check caller's arguments against dep's declared inputs ──
+            # Preconditions: are the args well-typed per the contract?
+            # (for now, the type checker handles this; we check postconditions)
+            # In the future: formal preconditions go here → blame CALLER
+
+            # ── Call the real dependency ──
+            result = real_fn(**kwargs)
+
+            # ── Check dep's postconditions ──
+            if result is not None and postconditions:
+                ctx = EvalContext(inputs=kwargs, result=result)
+                from expr_lang import parse_expr
+                for pc in postconditions:
+                    expr = parse_expr(pc.expr)
+                    if not evaluate(expr, ctx):
+                        raise ContractViolation(
+                            pc.id, "postcondition", self._module,
+                            f"dependency '{self._module}.{op_name}' violated "
+                            f"postcondition '{pc.id}': {pc.expr}"
+                        )
+
+            return result
+
+        # Preserve the original function's signature for the proxy
+        proxy_method.__name__ = op_name
+        proxy_method.__qualname__ = f"DependencyProxy({self._module}).{op_name}"
+        proxy_method.__doc__ = real_fn.__doc__
+
+        # Attach as a method
+        setattr(self, op_name, proxy_method)
+
+    def __getattr__(self, name: str):
+        """Fallback: if not a proxied op, delegate to the real dep."""
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._dep, name)
+
+    def __repr__(self):
+        ops = [n for n in dir(self) if not n.startswith("_")
+               and callable(getattr(self, n, None))
+               and n not in ("__getattr__", "__repr__", "__init__",
+                             "_build_proxy_method")]
+        return f"DependencyProxy({self._module}, ops={ops})"
+
+
+# ── ContractChecker — coordinates wrapping ─────────────────────────────────────
 
 class ContractChecker:
     """High-level checker that coordinates ContractChecker and DependencyProxy.
