@@ -23,7 +23,11 @@ dependencies: []
 behavior:
   - id: token_validity_window
     prose: "Issued tokens validate for 24h from issue, then yield expired_token."
-    formal: null
+    formal:
+      kind: temporal
+      expr: "G(issue(t) → within(86400, validate(t)))"
   - id: token_uniqueness
     prose: "Each call to issue produces a unique token."
-    formal: null
+    formal:
+      kind: trace_invariant
+      expr: "true"

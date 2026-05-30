@@ -15,6 +15,12 @@ interface:
 dependencies: []
 
 behavior:
+  - id: correct_user_verified
+    prose: "Correct password returns ok: true."
+    formal:
+      kind: postcondition
+      expr: "result.ok == true"
   - id: constant_time_compare
     prose: "Passwords are never compared in plaintext; comparison is constant-time over a stored hash."
-    formal: null
+    formal:
+      kind: nonfunctional

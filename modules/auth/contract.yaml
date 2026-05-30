@@ -19,7 +19,12 @@ dependencies:
 behavior:
   - id: token_on_success
     prose: "On valid credentials, returns a token that token_store.validate accepts."
-    formal: null
+    formal:
+      kind: postcondition
+      expr: "len(result.token) > 0"
   - id: reject_invalid
     prose: "On invalid credentials, raises invalid_credentials and issues no token."
-    formal: null
+    formal:
+      kind: raises
+      when: "not deps.user_repo.verify_password(username, password).ok"
+      error: "invalid_credentials"
