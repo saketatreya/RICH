@@ -30,4 +30,4 @@ behavior:
     prose: "Each call to issue produces a unique token."
     formal:
       kind: trace_invariant
-      expr: "true"
+      expr: "distinct(result.token) == count(result.token)"

@@ -18,7 +18,8 @@ from typing import Any, Callable, Optional
 
 from expr_lang import (
     Expr, Literal, Variable, ResultAccess, DepCall,
-    UnaryOp, BinaryOp, FuncCall, parse_expr,
+    UnaryOp, BinaryOp, FuncCall, HistoryAccess, AggregateCall,
+    parse_expr,
 )
 from properties import (
     FormalProperty, PropertyKind,
@@ -164,6 +165,44 @@ def evaluate(node: Expr, ctx: EvalContext) -> Any:
             return len(arg)
         raise ContractViolation("eval", "evaluation", "caller",
                                 f"unknown function: {node.func}")
+
+    elif isinstance(node, HistoryAccess):
+        if node.field is None:
+            return ctx.history
+        if not ctx.history:
+            return []
+        # Collect a specific field from all history entries
+        field_values = []
+        for record in ctx.history:
+            if hasattr(record, node.field):
+                field_values.append(getattr(record, node.field))
+            elif isinstance(record.result, dict) and node.field in record.result:
+                field_values.append(record.result[node.field])
+        return field_values
+
+    elif isinstance(node, AggregateCall):
+        # Evaluate the inner expression against each history entry
+        values = []
+        for record in ctx.history:
+            # Create a sub-context for this history entry
+            sub_ctx = EvalContext(
+                inputs=record.inputs if hasattr(record, 'inputs') else {},
+                result=record.result if hasattr(record, 'result') else {},
+                history=list(ctx.history),
+                deps=ctx.deps,
+            )
+            values.append(evaluate(node.expr, sub_ctx))
+
+        if node.agg == "distinct":
+            return len(set(str(v) for v in values))
+        elif node.agg == "count":
+            return len(values)
+        elif node.agg == "all":
+            return all(values)
+        elif node.agg == "any":
+            return any(values)
+        raise ContractViolation("eval", "evaluation", "caller",
+                                f"unknown aggregate: {node.agg}")
 
     raise ContractViolation("eval", "evaluation", "caller",
                             f"unknown node type: {type(node)}")
@@ -465,18 +504,30 @@ class DependencyProxy:
         postconditions = self._postconditions.get(op_name, [])
         op_inputs = op_spec.get("inputs", {})
 
-        def proxy_method(**kwargs):
-            # ── Check caller's arguments against dep's declared inputs ──
-            # Preconditions: are the args well-typed per the contract?
-            # (for now, the type checker handles this; we check postconditions)
-            # In the future: formal preconditions go here → blame CALLER
+        def proxy_method(*args, **kwargs):
+            # ── Merge positional args with param names ──
+            import inspect
+            try:
+                sig = inspect.signature(real_fn)
+                param_names = list(sig.parameters.keys())
+                # Remove injected dep params (those after * in D4 pattern)
+                # Actually, the proxy's real_fn is the dep's method, not the caller's
+                all_args = {}
+                for i, arg in enumerate(args):
+                    if i < len(param_names):
+                        all_args[param_names[i]] = arg
+                all_args.update(kwargs)
+            except (ValueError, TypeError):
+                all_args = kwargs
+                for i, arg in enumerate(args):
+                    all_args[f"arg{i}"] = arg
 
             # ── Call the real dependency ──
-            result = real_fn(**kwargs)
+            result = real_fn(*args, **kwargs)
 
             # ── Check dep's postconditions ──
             if result is not None and postconditions:
-                ctx = EvalContext(inputs=kwargs, result=result)
+                ctx = EvalContext(inputs=all_args, result=result)
                 from expr_lang import parse_expr
                 for pc in postconditions:
                     expr = parse_expr(pc.expr)

@@ -301,13 +301,14 @@ class Parser:
         # "result" keyword
         if t.kind == TOKEN_RESULT:
             self.advance()
-            field = None
-            if self.peek() and self.peek().kind == TOKEN_DELIM and \
-               self.peek().value == ".":
-                self.advance()
-                field_tok = self.expect(TOKEN_IDENT)
-                field = field_tok.value
+            field = self._parse_field()
             return ResultAccess(field)
+
+        # "history" keyword
+        if t.kind == TOKEN_HISTORY:
+            self.advance()
+            field = self._parse_field()
+            return HistoryAccess(field)
 
         # "deps" keyword
         if t.kind == TOKEN_DEPS:
@@ -319,7 +320,6 @@ class Parser:
             op_tok = self.expect(TOKEN_IDENT)
             operation = op_tok.value
 
-            # Optional: args in parens
             args = []
             if self.peek() and self.peek().kind == TOKEN_DELIM and \
                self.peek().value == "(":
@@ -327,18 +327,19 @@ class Parser:
                 args = self.parse_args()
                 self.expect(TOKEN_DELIM, ")")
 
-            # Optional: .field access
-            field = None
-            if self.peek() and self.peek().kind == TOKEN_DELIM and \
-               self.peek().value == ".":
-                self.advance()
-                field_tok = self.expect(TOKEN_IDENT)
-                field = field_tok.value
-
+            field = self._parse_field()
             return DepCall(module, operation, args, field)
 
+        # Aggregate functions: distinct(expr), count(expr), all(expr), any(expr)
+        if t.kind == TOKEN_AGGREGATE:
+            agg = self.advance().value
+            self.expect(TOKEN_DELIM, "(")
+            arg = self.parse_or()
+            self.expect(TOKEN_DELIM, ")")
+            return AggregateCall(agg, arg)
+
         # "len" function call
-        if t.kind == TOKEN_FUNC:
+        if t.kind == TOKEN_FUNC and t.value == "len":
             self.advance()
             self.expect(TOKEN_DELIM, "(")
             arg = self.parse_or()
@@ -352,6 +353,23 @@ class Parser:
             return Variable(name)
 
         raise ExprParseError(f"unexpected token: {t.value!r}", t.pos)
+
+    def _parse_field(self) -> Optional[str]:
+        """Parse optional .field access after result/history/deps. Handles keyword collision."""
+        if self.peek() and self.peek().kind == TOKEN_DELIM and \
+           self.peek().value == ".":
+            self.advance()
+            # After a dot, ANY token that looks like an identifier is a field name
+            t = self.peek()
+            if t is None:
+                raise ExprParseError("expected field name after '.'")
+            # Accept identifiers AND keywords (they become field names after dot)
+            if t.kind in (TOKEN_IDENT, TOKEN_RESULT, TOKEN_HISTORY, TOKEN_DEPS,
+                         TOKEN_FUNC, TOKEN_AGGREGATE, TOKEN_BOOL_LIT):
+                self.advance()
+                return t.value
+            raise ExprParseError(f"expected field name after '.', got {t.value!r}", t.pos)
+        return None
 
     def parse_args(self) -> list[Expr]:
         args = []
