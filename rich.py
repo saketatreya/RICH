@@ -1264,6 +1264,32 @@ def cmd_demo() -> int:
     return 0
 
 
+# ── Orchestrator command ───────────────────────────────────────────────────────
+
+def cmd_orchestrate(api_key: str = None, model: str = None,
+                    module: str = None, task: str = None,
+                    parallel: bool = False) -> int:
+    """Spawn one bounded LLM agent per module.
+
+    Each agent runs inside a ModuleSession — it can only read its own
+    source + dep contracts. All tool calls are mediated through the harness.
+    """
+    from orchestrator import Orchestrator
+
+    orch = Orchestrator(".", api_key=api_key, model=model)
+
+    if module:
+        result = orch.run_one(module, task=task)
+        if "error" in result:
+            print(f"Error: {result['error']}", file=sys.stderr)
+            return 1
+        return 0
+
+    results = orch.run_all(task=task, parallel=parallel)
+    errors = sum(1 for r in results.values() if "error" in r)
+    return 1 if errors > 0 else 0
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1301,6 +1327,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     sub.add_parser("demo", help="Scripted walkthrough of all constraints")
 
+    p_orch = sub.add_parser("orchestrate", help="Spawn one bounded LLM agent per module")
+    p_orch.add_argument("--api-key", help="OpenRouter API key (or set OPENROUTER_API_KEY)")
+    p_orch.add_argument("--model", help="Model to use (default: anthropic/claude-sonnet-4)")
+    p_orch.add_argument("--module", help="Run on a single module instead of all")
+    p_orch.add_argument("--task", help="Task description", default="Implement this module per its contract")
+    p_orch.add_argument("--parallel", action="store_true", help="Run agents in parallel")
+
     args = parser.parse_args(argv)
 
     try:
@@ -1322,6 +1355,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             return cmd_run(args.module, args.task)
         elif args.command == "demo":
             return cmd_demo()
+        elif args.command == "orchestrate":
+            return cmd_orchestrate(
+                api_key=args.api_key,
+                model=args.model,
+                module=args.module,
+                task=args.task,
+                parallel=args.parallel,
+            )
     except RichError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
