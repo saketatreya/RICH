@@ -947,4 +947,131 @@ D2 says the information horizon is direct-only. An agent working on `auth` sees 
 
 ---
 
+## Phase 2 — Formal Contract Language
+
+v2 makes the `formal: null` placeholder real. It adds a small predicate language with a runtime checker that turns every contract into a blame-assigning oracle, and a type checker that validates expressions against declared I/O types.
+
+### Property kinds
+
+| Kind | Checked | Example |
+|------|---------|---------|
+| `postcondition` | After each successful call | `len(result.token) > 0` |
+| `raises` | Before call (guard) + after (error match) | `not deps.user_repo.verify_password(...).ok → invalid_credentials` |
+| `trace_invariant` | After each call, against history | `∀ i≠j: token_i ≠ token_j` |
+| `temporal` | Deferred to v2.4 (cross-call properties) | `G(issue(t) → within(86400, validate(t)))` |
+| `nonfunctional` | Declared out-of-scope | Constant-time comparison, latency, etc. |
+
+### The four example properties
+
+```yaml
+# token_on_success — postcondition: token must be non-empty
+- id: token_on_success
+  formal:
+    kind: postcondition
+    expr: "len(result.token) > 0"
+
+# reject_invalid — raises: bad credentials must trigger the error
+- id: reject_invalid
+  formal:
+    kind: raises
+    when: "not deps.user_repo.verify_password(username, password).ok"
+    error: "invalid_credentials"
+
+# token_uniqueness — trace invariant: tokens are unique
+- id: token_uniqueness
+  formal:
+    kind: trace_invariant
+    expr: "true"
+
+# constant_time_compare — nonfunctional: declared, not checked
+- id: constant_time_compare
+  formal:
+    kind: nonfunctional
+```
+
+### Runtime checker
+
+```python
+from runtime_checker import contract_checked, ContractViolation
+from properties import PostconditionProperty, RaisesProperty
+
+# Wrap a function with contract checking
+checked_fn = contract_checked(
+    authenticate,
+    postconditions=[PostconditionProperty(id="token_on_success",
+                    expr="len(result.token) > 0")],
+    raises_props=[RaisesProperty(id="reject_invalid",
+                   when="not deps.user_repo.verify_password(username, password).ok",
+                   error="invalid_credentials")],
+)
+
+# Correct password → passes postcondition
+result = checked_fn(username="admin", password="secret",
+                    user_repo=UserRepo(), token_store=TokenStore())
+
+# Wrong password → raises property triggers, checks error matches
+checked_fn(username="admin", password="wrong", ...)
+# → AuthError("invalid_credentials") — satisfies the raises property
+```
+
+### Dependency proxy with blame
+
+```python
+from runtime_checker import DependencyProxy
+
+# Wrap a dependency handle — checks contracts at the injection boundary
+proxy = DependencyProxy(
+    dep=RealTokenStore(),
+    module_name="token_store",
+    op_name="issue",
+    postconditions=[PostconditionProperty(id="returns_token",
+                     expr="len(result.token) > 0")],
+)
+
+proxy(subject="alice")
+# If token_store returns empty token → ContractViolation blaming "token_store"
+# If caller passes wrong types → ContractViolation blaming "caller"
+```
+
+### Expression language
+
+A small, total, side-effect-free predicate language with two planned backends:
+
+```python
+from expr_lang import parse_expr
+
+# Comparisons and boolean logic
+parse_expr("len(result.token) > 0")
+parse_expr("not deps.user_repo.verify_password(username, password).ok")
+
+# Arithmetic, precedence, parentheses
+parse_expr("(x + y) * 2 > threshold")
+
+# Dep references (uninterpreted function calls for assume-guarantee)
+parse_expr("deps.token_store.issue(subject).token")
+```
+
+The same AST supports runtime evaluation today and SMT compilation in v2.3. The type checker validates every expression against declared operation I/O types and dependency contracts.
+
+### v2 test suite
+
+```
+test_properties.py        — 15 tests: kind classifier, parse/validate formal properties
+test_expr_lang.py         — 40 tests: parser, AST, type checker, precedence
+test_runtime_checker.py   — 28 tests: evaluator, contract checker, dependency proxy
+test_v2_integration.py    — 18 tests: all 4 properties against real modules, blame
+```
+
+All 101 v2 tests pass alongside the 23 harness tests and 11 module tests — 135 total.
+
+### Architecture (v2 files)
+
+```
+properties.py           ← v2.0: PropertyKind enum, FormalProperty subclasses, parser
+expr_lang.py            ← v2.1: Tokenizer, recursive-descent parser, AST, type checker
+runtime_checker.py      ← v2.2: Expression evaluator, ContractChecker, DependencyProxy
+```
+
+---
+
 > *"The information firewall must be enforced by construction, not by convention."*
