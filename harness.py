@@ -4,7 +4,7 @@
 This is the ACTUAL harness: it sits between an agent and its tools,
 enforcing the information firewall on every operation.
 
-While agentctl.py does static validation (schema, DAG, budgets),
+While rich.py does static validation (schema, DAG, budgets),
 harness.py does runtime enforcement (every read/write/search mediated).
 
 Usage:
@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 # Import the core library — everything we already built
-from agentctl import (
+from rich import (
     load_workspace, parse_module,
     build_dep_graph,
     get_effective_budget, check_module_budget, estimate_tokens,
@@ -491,11 +491,11 @@ class Harness:
 
     def validate(self) -> bool:
         """Run static validation. Returns True if clean."""
-        from agentctl import validate_workspace, detect_cycles
+        from rich import validate_workspace, detect_cycles
         errors = validate_workspace(self.ws)
         cycles = detect_cycles(self.ws.modules)
         for c in cycles:
-            from agentctl import format_cycle_path
+            from rich import format_cycle_path
             errors.append(f"[DAG] cycle detected: {format_cycle_path(c)}")
         for m in self.ws.modules:
             errors.extend(check_module_budget(m, self.ws))

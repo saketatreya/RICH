@@ -1,8 +1,10 @@
 ---
-name: agentctl
-description: Runtime harness for agent-native software — enforces information firewalls, dependency injection, and complexity budgets on every agent tool call. Use this skill whenever working on or with the agentctl project.
+name: rich
+description: RICH — Rishav's Insane Coding Harness. Runtime enforcement of information firewalls, dependency injection, and complexity budgets on every agent tool call. Use this skill whenever working on or with the rich project.
 triggers:
-  - agentctl
+  - rich
+  - RICH
+  - Rishav
   - firewall
   - harness
   - ModuleSession
@@ -12,7 +14,7 @@ triggers:
   - information firewall
 ---
 
-# agentctl — Runtime Harness for Agent-Native Software
+# RICH — Rishav's Insane Coding Harness
 
 ## What it is
 
@@ -29,7 +31,7 @@ The harness sits between the agent and its tools. Operations that cross module b
 ```
 /home/zaphod/dev/rich/
 ├── harness.py          ← RUNTIME: ModuleSession mediates every agent tool call
-├── agentctl.py         ← ADMIN CLI: static validate, context, graph, wrap, init
+├── rich.py             ← ADMIN CLI: static validate, context, graph, wrap, init
 ├── test_harness.py     ← 23/23 test suite proving every constraint
 ├── agentnative.yaml    ← workspace config (module_root, budgets)
 ├── modules/            ← example project
@@ -39,56 +41,62 @@ The harness sits between the agent and its tools. Operations that cross module b
 └── .agentctl/          ← generated workspace trees (gitignored)
 ```
 
-## How to use the harness
+## CLI
 
-### Creating a session
+```bash
+rich init             # Scaffold workspace (agentnative.yaml + modules/ + .gitignore)
+rich validate         # Schema, DAG, budgets, boundaries — exit non-zero on failure
+rich context <module> # Materialize firewall tree for a module
+rich graph            # Print dependency DAG (--dot for Graphviz)
+rich wrap <file> --name <name>  # Scaffold module around existing code
+```
+
+## How to use the harness
 
 ```python
 from harness import Harness, FirewallBlocked, BudgetWarning
 
 h = Harness(".")
-session = h.session("auth")  # agent works on 'auth'
+session = h.session("auth")
 ```
 
-### What the agent may read
+### Allowed
 
-- `modules/<module>/src/*` — own source code
-- `modules/<module>/tests/*` — own test files
-- `modules/<module>/contract.yaml` — own contract
-- `modules/<dep>/contract.yaml` — dependency contracts (INTERFACE ONLY, no source)
+- `session.read_file("modules/auth/src/*")` — own source
+- `session.read_file("modules/auth/tests/*")` — own tests
+- `session.read_file("modules/auth/contract.yaml")` — own contract
+- `session.read_file("modules/token_store/contract.yaml")` — dep contract ONLY
+- `session.write_file("modules/auth/src/*")` — own source (import scanned)
+- `session.write_file("modules/auth/tests/*")` — own tests
+- `session.search_files("pattern", "modules/auth/")` — scoped to boundary
 
-### What the agent may write
+### Blocked
 
-- `modules/<module>/src/*` — own source (imports of any module are scanned and blocked)
-- `modules/<module>/tests/*` — own test files
+- `session.read_file("modules/token_store/src/*")` — dep source → FirewallBlocked
+- `session.read_file("modules/user_repo/src/*")` — sibling source → FirewallBlocked
+- `session.read_file("/etc/passwd")` — outside workspace → FirewallBlocked
+- `session.write_file("modules/token_store/src/evil.py")` — dep source → FirewallBlocked
+- `session.write_file("...", "import token_store")` — import violation → FirewallBlocked
+- `session.write_file("...", "from user_repo import ...")` — import violation → FirewallBlocked
+- `session.search_files("def issue", "modules/token_store/src")` — out of bounds → FirewallBlocked
 
-### What is BLOCKED
+### Info methods
 
-- Reading dependency source (`modules/token_store/src/*`)
-- Reading sibling module source (`modules/user_repo/src/*`)
-- Reading anything outside the workspace
-- Writing dependency source
-- Writing with `import <module>` or `from <module> import ...` — even declared deps
+- `session.context()` — full system prompt for the agent
+- `session.boundary_summary()` — what the agent may/may not access
+- `session.budget_status()` — current budget consumption
+- `session.stats_summary()` — operations allowed vs blocked
 
-### Getting context
-
-```python
-session.context()           # Full system prompt for the agent
-session.boundary_summary()  # What the agent may/may not access
-session.budget_status()     # Current budget consumption
-session.stats_summary()     # Operations allowed vs blocked
-```
-
-## Key conventions (DO NOT VIOLATE)
+## Key conventions
 
 ### D4: Dependency Injection
 
 ```python
-# ❌ WRONG — will be blocked by the harness
+# ❌ BLOCKED by the harness
 import token_store
 from user_repo import UserRepo
 
-# ✅ CORRECT — dependencies arrive by injection
+# ✅ CORRECT
 def authenticate(username, password, *, user_repo, token_store):
     result = user_repo.verify_password(username, password)
     return token_store.issue(username)
@@ -96,16 +104,15 @@ def authenticate(username, password, *, user_repo, token_store):
 
 ### D2: Direct-only dependencies
 
-An agent editing `auth` sees the contracts of `auth`'s **direct** dependencies — never their source, never transitive dependencies. The information horizon is one dependency deep.
+An agent editing `auth` sees the contracts of `auth`'s **direct** dependencies — never their source, never transitive dependencies.
 
 ### D3: Contracts must be complete enough to code against blind
 
-If an agent must peek at a dependency's implementation to call it correctly, the firewall has already failed. Every dependency's `contract.yaml` must specify: `name`, typed `inputs`, typed `outputs`, enumerated `errors`.
+Every dependency's `contract.yaml` must specify: `name`, typed `inputs`, typed `outputs`, enumerated `errors`.
 
 ### Tests use fakes, never real implementations
 
 ```python
-# ✅ CORRECT
 class FakeTokenStore:
     def issue(self, subject):
         return {"token": f"fake-{subject}"}
@@ -119,74 +126,45 @@ def test_auth():
 ## Running tests
 
 ```bash
-# Harness test suite (proves all 3 constraints)
-python3 test_harness.py
+python3 test_harness.py                          # 23/23 harness tests
+rich.py validate                                  # static validation
+rich.py graph                                     # DAG visualization
 
 # Module unit tests
 PYTHONPATH=modules/token_store/src python3 -m pytest modules/token_store/tests/ -v
 PYTHONPATH=modules/user_repo/src python3 -m pytest modules/user_repo/tests/ -v
 PYTHONPATH=modules/auth/src python3 -m pytest modules/auth/tests/ -v
-
-# Static validation
-python3 agentctl.py validate
-
-# Visualize dependency graph
-python3 agentctl.py graph
-python3 agentctl.py graph --dot
 ```
 
 ## Contract format
 
 ```yaml
-name: <module_name>         # Must match directory name
+name: <module_name>
 version: 0.1.0
-
-interface:                  # Machine-readable (enforced now)
+interface:
   operations:
     - name: <op_name>
-      inputs:
-        <param>: <type>     # string, int, float, bool, list<T>
-      outputs:
-        <param>: <type>
-      errors:
-        - <error_name>
-
-dependencies:               # Direct deps by name — defines the firewall
-  - <dep_name>
-
-behavior:                   # Progressively formalizable (prose now, formal later)
+      inputs: {<param>: <type>}
+      outputs: {<param>: <type>}
+      errors: [<error_name>]
+dependencies: [<dep_name>]
+behavior:
   - id: <stable_id>         # v2 fills formal: in place
     prose: "<description>"
     formal: null
 ```
 
-## Type vocabulary (v1)
+Types: `string`, `int`, `float`, `bool`, `list<string>`, `list<int>`, `list<float>`, `list<bool>`
 
-`string`, `int`, `float`, `bool`, `list<string>`, `list<int>`, `list<float>`, `list<bool>`
+## Editing rules
 
-## When editing harness.py
-
-- `ModuleSession.__init__` builds whitelists from workspace + module + deps
-- `_build_whitelists` sets readable and writable paths based on contracts
-- `read_file`, `write_file`, `search_files`, `terminal` all call `_is_under_whitelist`
-- `_scan_imports` blocks ALL module imports (even declared deps) per D4
-- `_IMPORT_RE` catches both `import X` and `from X import Y`
-- `FirewallBlocked` and `BudgetWarning` are the two blocking exceptions
-
-## When editing agentctl.py (CLI)
-
-- Single file, Python 3.10+, stdlib + PyYAML only
-- Dataclasses: `Budget`, `Operation`, `Contract`, `Module`, `Workspace`
-- `load_workspace` discovers modules from `agentnative.yaml`
-- `validate_workspace` runs schema checks (name match, types, ids, deps exist)
-- `detect_cycles` uses DFS with 3-coloring
-- `check_module_budget` counts non-blank LOC, files, estimated tokens
-- `check_module_boundaries` scans for imports of sibling modules not in deps (static check, less strict than harness)
-- `estimate_tokens` is `ceil(len/4)` — single function for future tokenizer replacement
+- `harness.py`: `_scan_imports` blocks ALL module imports (even declared deps) per D4
+- `rich.py`: static boundary check only flags undeclared deps — less strict than harness
+- `estimate_tokens` is `ceil(len/4)` — single function, replace with real tokenizer later
+- `_generative_context_md` is unused by the harness (which uses `_generate_context_str`) but kept for the CLI `context` command
 
 ## Pitfalls
 
-- The static boundary check in `agentctl.py` only flags undeclared deps. The harness in `harness.py` blocks ALL module imports. These intentionally differ — the harness is stricter (D4 full enforcement).
-- `search_files` in harness scopes to whitelisted directories only. Searching from a path outside the whitelist raises `FirewallBlocked`.
-- `terminal` in harness does heuristic path scanning, not full enforcement. For strong terminal isolation, use `bwrap` or `chroot` on a materialized workspace tree.
-- When adding new modules, remember to create `src/` and `tests/` directories — the harness whitelists them even if empty.
+- Harness `terminal` is heuristic path scanning, not full enforcement. Use `bwrap`/`chroot` for strong isolation.
+- `search_files` in harness scopes to whitelist only — searching from an out-of-bounds path raises `FirewallBlocked`.
+- The CLI `context` command materializes a tree; the harness enforces boundaries in-process — two different mechanisms, same contract structure.

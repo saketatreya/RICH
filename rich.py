@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agentctl v1 — Agent-native software harness.
+"""rich — Rishav's Insane Coding Harness.
 
 Enforces three properties on a codebase:
   1. Information firewalls (materialized, not conventional)
@@ -83,8 +83,8 @@ def estimate_tokens(text: str) -> int:
 
 # ── Error ──────────────────────────────────────────────────────────────────────
 
-class AgentCtlError(Exception):
-    """User-visible agentctl error."""
+class RichError(Exception):
+    """User-visible rich error."""
     pass
 
 
@@ -95,7 +95,7 @@ def load_workspace(root: str = ".") -> Workspace:
     root = os.path.abspath(root)
     config_path = os.path.join(root, "agentnative.yaml")
     if not os.path.isfile(config_path):
-        raise AgentCtlError(f"No agentnative.yaml found in {root} — run `agentctl init`")
+        raise RichError(f"No agentnative.yaml found in {root} — run `rich init`")
 
     with open(config_path) as f:
         config = yaml.safe_load(f)
@@ -117,7 +117,7 @@ def load_workspace(root: str = ".") -> Workspace:
                 mod = parse_module(mod_dir, contract_file)
                 ws.modules.append(mod)
             except yaml.YAMLError as e:
-                raise AgentCtlError(f"YAML error in {contract_file}: {e}")
+                raise RichError(f"YAML error in {contract_file}: {e}")
 
     return ws
 
@@ -608,7 +608,7 @@ def cmd_graph(dot: bool) -> int:
     ws = load_ws()
 
     if dot:
-        print("digraph agentnative {")
+        print("digraph rich {")
         print('  rankdir=LR;')
         print('  node [shape=box, style=rounded];')
         for mod in ws.modules:
@@ -800,7 +800,7 @@ def cmd_init(target_dir: str = ".") -> int:
     print(f"  agentnative.yaml  — workspace config")
     print(f"  modules/          — module directory")
     print(f"  .gitignore        — ignores .agentctl/")
-    print(f"\nNext: create a module with `agentctl wrap <file> --name <name>`")
+    print(f"\nNext: create a module with `rich wrap <file> --name <name>`")
     return 0
 
 
@@ -808,8 +808,8 @@ def cmd_init(target_dir: str = ".") -> int:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="agentctl",
-        description="Agent-native software harness — v1",
+        prog="rich",
+        description="Rishav's Insane Coding Harness",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -843,7 +843,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return cmd_graph(args.dot)
         elif args.command == "wrap":
             return cmd_wrap(args.path, args.name)
-    except AgentCtlError as e:
+    except RichError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     return 0
