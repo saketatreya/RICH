@@ -11,7 +11,7 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+import shutil
 from typing import Optional
 
 import yaml
@@ -326,17 +326,160 @@ def cmd_validate() -> int:
 
 
 def cmd_context(module_name: str, out_dir: Optional[str], list_only: bool) -> int:
-    """M3: Materialize firewall tree."""
+    """M3: Materialize firewall tree for a module.
+
+    Output (per §5.4):
+        {out_dir}/
+        ├── CONTEXT.md
+        ├── contract.yaml       # module's own contract
+        ├── src/                # module's own source
+        ├── tests/              # module's own tests
+        └── deps/
+            └── <dep>/
+                └── contract.yaml   # CONTRACT ONLY — NO src
+    """
     ws = load_ws()
-    # Validate first — refuse to materialize if there are errors
-    errors = validate_workspace(ws)
-    if errors:
-        print(f"Cannot materialize context: {len(errors)} validation error(s)")
-        for e in errors:
-            print(f"  ✗ {e}")
+
+    # Find the target module
+    target = None
+    for m in ws.modules:
+        if m.name == module_name:
+            target = m
+            break
+    if target is None:
+        print(f"Error: module '{module_name}' not found", file=sys.stderr)
         return 1
-    print(f"context {module_name}: not yet implemented")
+
+    # Determine output directory
+    if out_dir:
+        dest_root = os.path.abspath(out_dir)
+    else:
+        config = ws.config
+        # Use .agentctl/workspaces/<module> (in repo root, not module_root)
+        dest_root = os.path.join(ws.root, ".agentctl", "workspaces", module_name)
+
+    # Resolve dependency modules
+    dep_modules: list[Module] = []
+    dep_names = set(target.contract.dependencies)
+    for m in ws.modules:
+        if m.name in dep_names:
+            dep_modules.append(m)
+            dep_names.discard(m.name)
+    if dep_names:
+        print(f"Warning: unresolved dependencies: {', '.join(dep_names)}", file=sys.stderr)
+
+    # ── Dry-run mode ──
+    if list_only:
+        print(f"[dry-run] Would materialize context for '{module_name}' to {dest_root}")
+        print(f"\n  Own files:")
+        print(f"    contract.yaml  ({target.contract_path})")
+        src_dir = os.path.join(target.path, "src")
+        tests_dir = os.path.join(target.path, "tests")
+        if os.path.isdir(src_dir):
+            for f in sorted(os.listdir(src_dir)):
+                print(f"    src/{f}")
+        if os.path.isdir(tests_dir):
+            for f in sorted(os.listdir(tests_dir)):
+                print(f"    tests/{f}")
+        print(f"\n  Dep contracts (CONTRACT ONLY):")
+        for dm in dep_modules:
+            print(f"    deps/{dm.name}/contract.yaml  ({dm.contract_path})")
+        print(f"\n  Generated:")
+        print(f"    CONTEXT.md")
+        print(f"\n  ⚠  No dependency source is included.")
+        return 0
+
+    # ── Materialize ──
+    # Clean and recreate destination
+    if os.path.exists(dest_root):
+        shutil.rmtree(dest_root)
+    os.makedirs(dest_root, exist_ok=True)
+
+    # Copy own contract
+    shutil.copy2(target.contract_path, os.path.join(dest_root, "contract.yaml"))
+
+    # Copy own src/ and tests/
+    for sub in ["src", "tests"]:
+        src_sub = os.path.join(target.path, sub)
+        if os.path.isdir(src_sub):
+            shutil.copytree(src_sub, os.path.join(dest_root, sub))
+
+    # Copy each direct dependency's contract.yaml ONLY into deps/<dep>/
+    deps_dir = os.path.join(dest_root, "deps")
+    os.makedirs(deps_dir, exist_ok=True)
+    for dm in dep_modules:
+        dep_dest = os.path.join(deps_dir, dm.name)
+        os.makedirs(dep_dest, exist_ok=True)
+        shutil.copy2(dm.contract_path, os.path.join(dep_dest, "contract.yaml"))
+
+    # Generate CONTEXT.md
+    _generate_context_md(target, dep_modules, dest_root)
+
+    print(f"Materialized context for '{module_name}' → {dest_root}")
+    _print_tree_summary(dest_root, module_name)
     return 0
+
+
+def _generate_context_md(target: Module, deps: list[Module], dest_root: str) -> None:
+    """Generate CONTEXT.md in the materialized tree."""
+    contract = target.contract
+    lines = []
+    lines.append(f"# Context: {target.name}\n")
+    lines.append(f"**Module:** `{target.name}`")
+    lines.append(f"**Version:** {contract.version}\n")
+
+    # Contract summary
+    lines.append("## Contract\n")
+    for op in contract.interface.operations:
+        inputs = ", ".join(f"{k}: {v}" for k, v in op.inputs.items())
+        outputs = ", ".join(f"{k}: {v}" for k, v in op.outputs.items())
+        errs = ", ".join(op.errors) if op.errors else "none"
+        lines.append(f"- **{op.name}**({inputs}) → ({outputs})  errors: {errs}")
+
+    lines.append("")
+    if contract.behavior:
+        lines.append("## Behavioral Properties\n")
+        for bp in contract.behavior:
+            lines.append(f"- **{bp.id}**: {bp.prose}")
+        lines.append("")
+
+    # Dependencies info
+    if deps:
+        lines.append("## Dependencies (contracts only)\n")
+        for dm in deps:
+            lines.append(f"- **{dm.name}** — see `deps/{dm.name}/contract.yaml`")
+        lines.append("")
+    else:
+        lines.append("## Dependencies\n")
+        lines.append("None.\n")
+
+    # Rules for the agent
+    lines.append("## Agent Instructions\n")
+    lines.append("- **You may edit:** `src/` and `tests/` only.")
+    lines.append("- **You may read:** everything in this tree, including `deps/*/contract.yaml`.")
+    lines.append("- **You may NOT access:** dependency implementations — they are intentionally "
+                   "absent from this tree.")
+    lines.append("- **Dependencies are received by injection, never imported.** "
+                   "Code against the dependency's interface (defined in its contract.yaml), "
+                   "and receive dependency handles as injected arguments.")
+    lines.append("- **Write tests against fakes** that satisfy the dependency contracts — "
+                   "do not import or reach for real dependency implementations.")
+    lines.append("")
+
+    with open(os.path.join(dest_root, "CONTEXT.md"), "w") as f:
+        f.write("\n".join(lines))
+
+
+def _print_tree_summary(dest_root: str, module_name: str) -> None:
+    """Print a quick summary of the materialized tree."""
+    print(f"\n  Tree structure:")
+    for root, dirs, files in sorted(os.walk(dest_root)):
+        depth = root.replace(dest_root, "").count(os.sep)
+        label = os.path.basename(root) or module_name
+        indent = "  " + "  " * depth
+        print(f"{indent}{label}/")
+        for f in sorted(files):
+            print(f"{indent}  {f}")
 
 
 def cmd_graph(dot: bool) -> int:
