@@ -640,14 +640,167 @@ def cmd_graph(dot: bool) -> int:
 
 
 def cmd_wrap(path: str, name: str) -> int:
-    """M6: Scaffold module around existing code."""
-    print(f"wrap {path} -> {name}: not yet implemented")
+    """M6: Scaffold a module around existing code.
+
+    Creates modules/<name>/{src,tests}/, copies code into src/,
+    generates best-effort contract.yaml skeleton.
+    """
+    ws = load_ws()
+    module_root = ws.config.get("module_root", "modules")
+    modules_dir = os.path.join(ws.root, module_root)
+
+    mod_dir = os.path.join(modules_dir, name)
+    if os.path.exists(mod_dir):
+        print(f"Error: module '{name}' already exists at {mod_dir}", file=sys.stderr)
+        return 1
+
+    os.makedirs(os.path.join(mod_dir, "src"))
+    os.makedirs(os.path.join(mod_dir, "tests"))
+
+    # Copy/move source file(s) into src/
+    src_path = os.path.abspath(path)
+    if not os.path.exists(src_path):
+        print(f"Error: path '{path}' does not exist", file=sys.stderr)
+        return 1
+
+    if os.path.isfile(src_path):
+        shutil.copy2(src_path, os.path.join(mod_dir, "src", os.path.basename(src_path)))
+    elif os.path.isdir(src_path):
+        for fname in os.listdir(src_path):
+            sf = os.path.join(src_path, fname)
+            if os.path.isfile(sf):
+                shutil.copy2(sf, os.path.join(mod_dir, "src", fname))
+
+    # Best-effort contract skeleton: scan Python files for function defs
+    operations = _infer_operations(mod_dir)
+    contract = {
+        "name": name,
+        "version": "0.1.0",
+        "interface": {
+            "operations": operations,
+        },
+        "dependencies": [],
+        "behavior": [
+            {"id": "placeholder", "prose": "[fill in]", "formal": None},
+        ],
+    }
+
+    contract_path = os.path.join(mod_dir, "contract.yaml")
+    with open(contract_path, "w") as f:
+        yaml.dump(contract, f, default_flow_style=False, sort_keys=False)
+
+    print(f"Wrapped '{path}' → module '{name}'")
+    print(f"  Created: {mod_dir}/")
+    print(f"    src/   — source files copied here")
+    print(f"    tests/ — empty (add tests here)")
+    print(f"    contract.yaml — skeleton (REVIEW AND FILL IN)")
+    if operations:
+        print(f"  Inferred {len(operations)} operation(s) from function signatures")
     return 0
 
 
-def cmd_init(target_dir: str) -> int:
-    """M6: Scaffold new workspace."""
-    print("init: not yet implemented")
+def _infer_operations(mod_dir: str) -> list[dict]:
+    """Infer operation names/signatures from Python files in src/."""
+    ops = []
+    src_dir = os.path.join(mod_dir, "src")
+    if not os.path.isdir(src_dir):
+        return ops
+
+    # Simple regex for top-level function defs
+    func_re = re.compile(
+        r'^\s*def\s+(\w+)\s*\((.*?)\)\s*(?:->\s*(\w+))?\s*:',
+        re.MULTILINE
+    )
+
+    TYPE_MAP = {"str": "string", "int": "int", "float": "float", "bool": "bool", "list": "list<string>"}
+
+    for fname in sorted(os.listdir(src_dir)):
+        if not fname.endswith(".py"):
+            continue
+        fpath = os.path.join(src_dir, fname)
+        try:
+            with open(fpath) as f:
+                content = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        for m in func_re.finditer(content):
+            func_name = m.group(1)
+            if func_name.startswith("_"):
+                continue  # skip private functions
+            params_raw = m.group(2) or ""
+            return_type = m.group(3)
+
+            # Crude param parsing
+            inputs = {}
+            if params_raw.strip():
+                for param in params_raw.split(","):
+                    param = param.strip()
+                    if not param or "=" in param:
+                        continue  # skip defaults, *args, **kwargs
+                    if ":" in param:
+                        pname, _, ptype = param.partition(":")
+                        pname = pname.strip()
+                        ptype = ptype.strip()
+                        inputs[pname] = TYPE_MAP.get(ptype, "string")
+                    else:
+                        inputs[param] = "string"
+
+            outputs = {}
+            if return_type:
+                outputs["result"] = TYPE_MAP.get(return_type, "string")
+
+            ops.append({
+                "name": func_name,
+                "inputs": inputs,
+                "outputs": outputs,
+                "errors": [],
+            })
+
+    return ops
+
+
+def cmd_init(target_dir: str = ".") -> int:
+    """M6: Scaffold a new workspace.
+
+    Writes agentnative.yaml, modules/, .gitignore.
+    """
+    target = os.path.abspath(target_dir)
+    config_path = os.path.join(target, "agentnative.yaml")
+
+    if os.path.exists(config_path):
+        print(f"Error: agentnative.yaml already exists in {target}", file=sys.stderr)
+        return 1
+
+    # agentnative.yaml
+    config = {
+        "module_root": "modules",
+        "source_dir": "src",
+        "tests_dir": "tests",
+        "budget": {
+            "max_loc": 5000,
+            "max_files": 100,
+            "max_context_tokens": 100000,
+        },
+    }
+    with open(config_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+    # modules/
+    modules_dir = os.path.join(target, "modules")
+    os.makedirs(modules_dir, exist_ok=True)
+
+    # .gitignore
+    gi_path = os.path.join(target, ".gitignore")
+    if not os.path.exists(gi_path):
+        with open(gi_path, "w") as f:
+            f.write(".agentctl/\n__pycache__/\n*.pyc\n")
+
+    print(f"Workspace scaffolded at {target}")
+    print(f"  agentnative.yaml  — workspace config")
+    print(f"  modules/          — module directory")
+    print(f"  .gitignore        — ignores .agentctl/")
+    print(f"\nNext: create a module with `agentctl wrap <file> --name <name>`")
     return 0
 
 
