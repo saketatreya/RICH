@@ -18,6 +18,7 @@ from typing import Optional
 
 class PropertyKind(str, Enum):
     """Discriminator for formal property types."""
+    PRECONDITION = "precondition"
     POSTCONDITION = "postcondition"
     RAISES = "raises"
     TRACE_INVARIANT = "trace_invariant"
@@ -39,6 +40,21 @@ class FormalProperty:
 
     def __repr__(self):
         return f"{self.__class__.__name__}(id={self.id!r}, kind={self.kind.value})"
+
+
+class PreconditionProperty(FormalProperty):
+    """A predicate checked before each call.
+
+    expr: expression over inputs, evaluated before the call.
+    If violated, blame the CALLER (at the injection boundary).
+    """
+
+    def __init__(self, id: str, expr: str):
+        super().__init__(PropertyKind.PRECONDITION, id)
+        self.expr = expr
+
+    def __repr__(self):
+        return f"PreconditionProperty(id={self.id!r}, expr={self.expr!r})"
 
 
 class PostconditionProperty(FormalProperty):
@@ -135,6 +151,7 @@ class NonfunctionalProperty(FormalProperty):
 _VALID_KINDS = {k.value for k in PropertyKind}
 
 _REQUIRED_FIELDS = {
+    PropertyKind.PRECONDITION: {"expr"},
     PropertyKind.POSTCONDITION: {"expr"},
     PropertyKind.RAISES: {"errors"},
     PropertyKind.TRACE_INVARIANT: {"expr"},
@@ -185,7 +202,9 @@ def parse_formal_property(raw, property_id: str) -> Optional[FormalProperty]:
             f"[{property_id}] kind '{kind_str}' requires fields: {sorted(missing)}"
         )
 
-    if kind == PropertyKind.POSTCONDITION:
+    if kind == PropertyKind.PRECONDITION:
+        return PreconditionProperty(id=property_id, expr=raw["expr"])
+    elif kind == PropertyKind.POSTCONDITION:
         return PostconditionProperty(id=property_id, expr=raw["expr"])
     elif kind == PropertyKind.RAISES:
         return RaisesProperty(

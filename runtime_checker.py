@@ -172,26 +172,31 @@ def evaluate(node: Expr, ctx: EvalContext) -> Any:
         if not ctx.history:
             return []
         # Collect a specific field from all history entries
+        # Skip records where the field doesn't exist (different op types)
         field_values = []
         for record in ctx.history:
             if hasattr(record, node.field):
                 field_values.append(getattr(record, node.field))
             elif isinstance(record.result, dict) and node.field in record.result:
                 field_values.append(record.result[node.field])
+            # else: skip — this record is from a different operation
         return field_values
 
     elif isinstance(node, AggregateCall):
         # Evaluate the inner expression against each history entry
+        # Skip records where evaluation fails (different op types)
         values = []
         for record in ctx.history:
-            # Create a sub-context for this history entry
             sub_ctx = EvalContext(
                 inputs=record.inputs if hasattr(record, 'inputs') else {},
                 result=record.result if hasattr(record, 'result') else {},
                 history=list(ctx.history),
                 deps=ctx.deps,
             )
-            values.append(evaluate(node.expr, sub_ctx))
+            try:
+                values.append(evaluate(node.expr, sub_ctx))
+            except ContractViolation:
+                pass  # skip records from different operations
 
         if node.agg == "distinct":
             return len(set(str(v) for v in values))
@@ -475,14 +480,20 @@ class DependencyProxy:
         self._contract = dep_contract or {}
 
         # Parse formal properties from contract
-        from properties import parse_formal_property, PostconditionProperty
+        from properties import parse_formal_property, PostconditionProperty, PreconditionProperty
         self._postconditions = {}
+        self._preconditions = {}  # checked before calling dep → blame CALLER if violated
         behavior = self._contract.get("behavior", []) or []
         for bp in behavior:
             prop = parse_formal_property(bp.get("formal"), bp.get("id", ""))
-            if isinstance(prop, PostconditionProperty):
-                # Postconditions apply to all operations for now
-                # (can be scoped later)
+            if isinstance(prop, PreconditionProperty):
+                for op_spec in (self._contract.get("interface", {})
+                                .get("operations", []) or []):
+                    op_name = op_spec.get("name", "")
+                    if op_name not in self._preconditions:
+                        self._preconditions[op_name] = []
+                    self._preconditions[op_name].append(prop)
+            elif isinstance(prop, PostconditionProperty):
                 for op_spec in (self._contract.get("interface", {})
                                 .get("operations", []) or []):
                     op_name = op_spec.get("name", "")
@@ -510,22 +521,34 @@ class DependencyProxy:
             try:
                 sig = inspect.signature(real_fn)
                 param_names = list(sig.parameters.keys())
-                # Remove injected dep params (those after * in D4 pattern)
-                # Actually, the proxy's real_fn is the dep's method, not the caller's
                 all_args = {}
                 for i, arg in enumerate(args):
                     if i < len(param_names):
                         all_args[param_names[i]] = arg
                 all_args.update(kwargs)
             except (ValueError, TypeError):
-                all_args = kwargs
+                all_args = dict(kwargs)
                 for i, arg in enumerate(args):
                     all_args[f"arg{i}"] = arg
+
+            # ── Check preconditions (blame CALLER) ──
+            preconds = self._preconditions.get(op_name, [])
+            if preconds and all_args:
+                ctx = EvalContext(inputs=all_args)
+                from expr_lang import parse_expr
+                for pc in preconds:
+                    expr = parse_expr(pc.expr)
+                    if not evaluate(expr, ctx):
+                        raise ContractViolation(
+                            pc.id, "precondition", "caller",
+                            f"caller violated precondition '{pc.id}' on "
+                            f"'{self._module}.{op_name}': {pc.expr}"
+                        )
 
             # ── Call the real dependency ──
             result = real_fn(*args, **kwargs)
 
-            # ── Check dep's postconditions ──
+            # ── Check dep's postconditions (blame DEP) ──
             if result is not None and postconditions:
                 ctx = EvalContext(inputs=all_args, result=result)
                 from expr_lang import parse_expr
