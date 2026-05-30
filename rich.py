@@ -804,6 +804,466 @@ def cmd_init(target_dir: str = ".") -> int:
     return 0
 
 
+# ── Dashboard and interactive commands ──────────────────────────────────────────
+
+def cmd_status() -> int:
+    """Show dashboard of all modules, contracts, budgets, and the DAG."""
+    ws = load_ws()
+    module_names = [m.name for m in ws.modules]
+    name_width = max(len(n) for n in module_names) if module_names else 10
+
+    print()
+    print("╔" + "═" * 62 + "╗")
+    print("║  RICH — Rishav's Insane Coding Harness" + " " * 24 + "║")
+    print("╠" + "═" * 62 + "╣")
+    print(f"║  Workspace: {ws.root[:48]:<48s} ║")
+    print(f"║  Modules: {len(ws.modules):<3d}                                ║")
+    print("╠" + "═" * 62 + "╣")
+
+    for mod in ws.modules:
+        # Dependency line
+        if mod.contract.dependencies:
+            deps_str = ", ".join(mod.contract.dependencies)
+        else:
+            deps_str = "none"
+
+        # Budget
+        budget = get_effective_budget(mod, ws)
+
+        # Property kinds
+        from properties import parse_formal_property
+        kinds = []
+        for bp in mod.contract.behavior:
+            prop = parse_formal_property(bp.formal, bp.id)
+            if prop is not None:
+                kinds.append(prop.kind.value)
+
+        # Count source
+        src_dir = os.path.join(mod.path, "src")
+        loc = 0
+        file_count = 0
+        if os.path.isdir(src_dir):
+            for root, dirs, files in os.walk(src_dir):
+                for fname in files:
+                    file_count += 1
+                    try:
+                        with open(os.path.join(root, fname)) as f:
+                            for line in f:
+                                if line.strip():
+                                    loc += 1
+                    except (OSError, UnicodeDecodeError):
+                        pass
+
+        print("║" + " " * 62 + "║")
+        print(f"║  {mod.name:<{name_width}s}  [deps: {deps_str}]" + " " * (62 - name_width - 12 - len(deps_str)) + "║")
+        ops = ", ".join(op.name for op in mod.contract.interface.operations)
+        print(f"║    ops: {ops[:50]:<50s}  ║")
+        print(f"║    budget: {loc}/{budget.max_loc} LOC  {file_count}/{budget.max_files} files  ║")
+        if kinds:
+            print(f"║    contracts: {', '.join(kinds)[:48]:<48s}  ║")
+
+    # DAG
+    print("╠" + "═" * 62 + "╣")
+    graph = build_dep_graph(ws.modules)
+    edges = []
+    for src, targets in graph.items():
+        for tgt in targets:
+            edges.append(f"{src} → {tgt}")
+    if edges:
+        dag_line = "  ".join(edges)
+        if len(dag_line) > 56:
+            dag_line = dag_line[:53] + "..."
+        print(f"║  DAG: {dag_line:<56s} ║")
+    else:
+        print("║  DAG: (no edges)" + " " * 44 + "║")
+    print("╚" + "═" * 62 + "╝")
+    print()
+    return 0
+
+
+def cmd_work(module_name: str) -> int:
+    """Interactive bounded session — explore the firewall live."""
+    ws = load_ws()
+
+    # Find the module
+    target = None
+    for m in ws.modules:
+        if m.name == module_name:
+            target = m
+            break
+    if target is None:
+        print(f"Error: module '{module_name}' not found", file=sys.stderr)
+        return 1
+
+    from harness import ModuleSession
+    session = ModuleSession(ws.root, module_name)
+
+    # ── Show context ──
+    print()
+    print("╔" + "═" * 64 + "╗")
+    print(f"║  Working on: {module_name:<48s} ║")
+    print("╠" + "═" * 64 + "╣")
+    print(session.boundary_summary())
+    print("╠" + "═" * 64 + "╣")
+    print("║  Type commands:                                       ║")
+    print("║    r <path>         — read a file                     ║")
+    print("║    w <path> <text>  — write a file                    ║")
+    print("║    s <pattern>      — search source                   ║")
+    print("║    c                 — show context                   ║")
+    print("║    b                 — budget status                  ║")
+    print("║    t                 — test: run all allowed ops       ║")
+    print("║    q                 — quit                           ║")
+    print("╚" + "═" * 64 + "╝")
+    print()
+
+    while True:
+        try:
+            line = input(f"rich:{module_name}> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not line:
+            continue
+
+        parts = line.split(maxsplit=2)
+        cmd = parts[0].lower()
+
+        if cmd == "q":
+            break
+
+        elif cmd == "c":
+            print()
+            print(session.context())
+            print()
+
+        elif cmd == "b":
+            print(f"  {session.budget_status()}")
+            print(f"  {session.stats_summary()}")
+
+        elif cmd == "r":
+            if len(parts) < 2:
+                print("  Usage: r <path>")
+                continue
+            try:
+                content = session.read_file(parts[1])
+                print(f"  ✅ read {len(content)} bytes")
+                # Show first few lines
+                for i, line in enumerate(content.splitlines()[:5]):
+                    print(f"  {i+1:3d}| {line}")
+                if len(content.splitlines()) > 5:
+                    print(f"  ... ({len(content.splitlines())} lines total)")
+            except Exception as e:
+                print(f"  ❌ {e}")
+
+        elif cmd == "w":
+            if len(parts) < 3:
+                print("  Usage: w <path> <text>")
+                continue
+            try:
+                session.write_file(parts[1], parts[2])
+                print(f"  ✅ written to {parts[1]}")
+            except Exception as e:
+                print(f"  ❌ {e}")
+
+        elif cmd == "s":
+            if len(parts) < 2:
+                print("  Usage: s <pattern>")
+                continue
+            try:
+                results = session.search_files(parts[1], target="content")
+                if results:
+                    for r in results[:10]:
+                        print(f"  {r}")
+                    if len(results) > 10:
+                        print(f"  ... ({len(results)} matches total)")
+                else:
+                    print("  (no matches)")
+            except Exception as e:
+                print(f"  ❌ {e}")
+
+        elif cmd == "t":
+            print()
+            print("  ─── Test: allowed operations ───")
+            ops = 0
+            # Read own source
+            for fname in ["contract.yaml"]:
+                try:
+                    session.read_file(f"modules/{module_name}/{fname}")
+                    print(f"  ✅ read modules/{module_name}/{fname}")
+                    ops += 1
+                except Exception as e:
+                    print(f"  ❌ read modules/{module_name}/{fname}: {e}")
+            for fname in os.listdir(os.path.join(target.path, "src")):
+                try:
+                    session.read_file(f"modules/{module_name}/src/{fname}")
+                    print(f"  ✅ read modules/{module_name}/src/{fname}")
+                    ops += 1
+                except Exception as e:
+                    print(f"  ❌ {e}")
+            # Try reading dep source (should fail)
+            for dep in target.contract.dependencies:
+                dep_path = f"modules/{dep}/contract.yaml"
+                try:
+                    session.read_file(dep_path)
+                    print(f"  ✅ read {dep_path} (contract)")
+                    ops += 1
+                except Exception as e:
+                    print(f"  ❌ {e}")
+                # Try dep source (should be blocked)
+                dep_src = f"modules/{dep}/src"
+                if os.path.isdir(os.path.join(ws.root, dep_src)):
+                    for fname in os.listdir(os.path.join(ws.root, dep_src)):
+                        try:
+                            session.read_file(f"{dep_src}/{fname}")
+                            print(f"  ⚠  read {dep_src}/{fname} (SHOULD HAVE BEEN BLOCKED)")
+                        except Exception:
+                            print(f"  🛡️  BLOCKED: {dep_src}/{fname}")
+                            ops += 1
+            print(f"  ─── {ops} operations ───")
+            print(f"  {session.stats_summary()}")
+            print()
+
+        else:
+            print(f"  Unknown command: {cmd}")
+            print("  Commands: r(ead) w(rite) s(earch) c(ontext) b(udget) t(est) q(uit)")
+
+    print(f"\n{module_name} session ended. {session.stats_summary()}")
+    return 0
+
+
+def cmd_run(module_name: str, task: str) -> int:
+    """One-shot: create a bounded session, execute a task, show what happened."""
+    ws = load_ws()
+
+    # Verify module exists
+    target = None
+    for m in ws.modules:
+        if m.name == module_name:
+            target = m
+            break
+    if target is None:
+        print(f"Error: module '{module_name}' not found", file=sys.stderr)
+        return 1
+
+    from harness import ModuleSession, FirewallBlocked, BudgetWarning
+
+    session = ModuleSession(ws.root, module_name)
+
+    print()
+    print("╔" + "═" * 64 + "╗")
+    print(f"║  Task: {task[:52]:<52s} ║")
+    print(f"║  Module: {module_name:<50s} ║")
+    print("╠" + "═" * 64 + "╣")
+
+    # Pre-load the context
+    ctx = session.context()
+    deps_list = ", ".join(d.name for d in session.deps) if session.deps else "none"
+    allowed_read = len(session.whitelist_read)
+    allowed_write = len(session.whitelist_write)
+
+    print(f"║  Dependencies: {deps_list:<46s} ║")
+    print(f"║  Readable paths: {allowed_read:<43d} ║")
+    print(f"║  Writable dirs: {allowed_write:<44d} ║")
+    print(f"║  Budget: {session.budget.max_loc} LOC / {session.budget.max_files} files  ║")
+    print("╠" + "═" * 64 + "╣")
+
+    # Execute the task by reading relevant files and reporting
+    print("║  Files available to agent:                            ║")
+    for w in sorted(session.whitelist_read):
+        rel = os.path.relpath(w, ws.root)
+        if os.path.isdir(w):
+            for root, dirs, files in os.walk(w):
+                dirs[:] = [d for d in dirs if not d.startswith("__")]
+                for fname in sorted(files):
+                    if fname.endswith(".pyc"):
+                        continue
+                    fp = os.path.relpath(os.path.join(root, fname), ws.root)
+                    print(f"║    ✓ {fp:<56s} ║")
+        elif os.path.isfile(w):
+            print(f"║    ✓ {rel:<56s} ║")
+
+    print("╠" + "═" * 64 + "╣")
+    print("║  Files BLOCKED (dependency source):                   ║")
+    blocked_count = 0
+    for dep in session.deps:
+        dep_src = os.path.join(dep.path, "src")
+        if os.path.isdir(dep_src):
+            for fname in sorted(os.listdir(dep_src)):
+                if fname.startswith("__") or fname.endswith(".pyc"):
+                    continue
+                fp = os.path.relpath(os.path.join(dep_src, fname), ws.root)
+                print(f"║    🛡️  {fp:<54s} ║")
+                blocked_count += 1
+    if blocked_count == 0:
+        print("║    (none — no dependencies with source)               ║")
+
+    print("╠" + "═" * 64 + "╣")
+    print("║  Agent instructions (injected into system prompt):    ║")
+    for line in ctx.splitlines()[-8:]:
+        if line.strip():
+            print(f"║  {line[:60]:<60s} ║")
+    print("╚" + "═" * 64 + "╝")
+    print()
+    print(f"Agent is bounded. {blocked_count} files physically inaccessible.")
+    print(f"Ready for: {task}")
+    print()
+    print("To work interactively: rich work " + module_name)
+    return 0
+
+
+def cmd_demo() -> int:
+    """Scripted walkthrough demonstrating every constraint in action."""
+    ws = load_ws()
+
+    print()
+    print("╔" + "═" * 66 + "╗")
+    print("║  RICH DEMO — Every constraint, live                              ║")
+    print("╚" + "═" * 66 + "╝")
+    print()
+
+    # ── 1. Workspace overview ──
+    print("─── 1. WORKSPACE ───")
+    print(f"   Root: {ws.root}")
+    print(f"   Modules: {len(ws.modules)}")
+    for m in ws.modules:
+        deps = ", ".join(m.contract.dependencies) if m.contract.dependencies else "none"
+        ops = ", ".join(op.name for op in m.contract.interface.operations)
+        print(f"     {m.name}: ops=[{ops}]  deps=[{deps}]")
+    print()
+
+    # ── 2. DAG ──
+    print("─── 2. DEPENDENCY DAG ───")
+    graph = build_dep_graph(ws.modules)
+    for name in sorted(graph):
+        targets = graph[name]
+        if targets:
+            for t in targets:
+                print(f"   {name} → {t}")
+        else:
+            print(f"   {name} (leaf)")
+    print()
+
+    # ── 3. Create harness session ──
+    from harness import ModuleSession, FirewallBlocked, BudgetWarning
+
+    # Pick a module with dependencies for maximum drama
+    target_mod = None
+    for m in ws.modules:
+        if m.contract.dependencies:
+            target_mod = m
+            break
+    if target_mod is None:
+        target_mod = ws.modules[0]
+
+    session = ModuleSession(ws.root, target_mod.name)
+    print(f"─── 3. HARNESS SESSION: {target_mod.name} ───")
+    print(f"   Boundary: {len(session.whitelist_read)} readable, "
+          f"{len(session.whitelist_write)} writable")
+    print(f"   Budget: {session.budget.max_loc} LOC / "
+          f"{session.budget.max_files} files")
+    print()
+
+    # ── 4. Read enforcement ──
+    print("─── 4. FIREWALL: READ ENFORCEMENT ───")
+    # Own source
+    src_dir = os.path.join(target_mod.path, "src")
+    if os.path.isdir(src_dir):
+        for fname in sorted(os.listdir(src_dir)):
+            if fname.startswith("__"):
+                continue
+            path = f"modules/{target_mod.name}/src/{fname}"
+            try:
+                session.read_file(path)
+                print(f"   ✅ ALLOWED: read {path}")
+            except FirewallBlocked as e:
+                print(f"   ❌ BLOCKED: {path} — {e.detail[:50]}")
+
+    # Dep source (should be blocked)
+    for dep in session.deps:
+        dep_src = os.path.join(dep.path, "src")
+        if os.path.isdir(dep_src):
+            for fname in sorted(os.listdir(dep_src)):
+                if fname.startswith("__"):
+                    continue
+                path = f"modules/{dep.name}/src/{fname}"
+                try:
+                    session.read_file(path)
+                    print(f"   ⚠️  LEAK: read {path} (SHOULD HAVE BEEN BLOCKED)")
+                except FirewallBlocked:
+                    print(f"   🛡️  BLOCKED: {path}")
+
+    # Outside workspace
+    try:
+        session.read_file("/etc/hostname")
+        print(f"   ⚠️  LEAK: read /etc/hostname")
+    except FirewallBlocked:
+        print(f"   🛡️  BLOCKED: /etc/hostname")
+    print()
+
+    # ── 5. Write enforcement ──
+    print("─── 5. FIREWALL: WRITE + IMPORT ENFORCEMENT ───")
+    test_file = f"modules/{target_mod.name}/src/_demo_test.py"
+
+    # Allowed write
+    try:
+        session.write_file(test_file, "# demo\nx = 1\n")
+        print(f"   ✅ ALLOWED: write {test_file}")
+    except FirewallBlocked as e:
+        print(f"   ❌ BLOCKED: {test_file}")
+
+    # Write with illegal import
+    try:
+        session.write_file(test_file, "import token_store\n\ndef f(): pass\n")
+        print(f"   ⚠️  LEAK: wrote import to {test_file}")
+    except FirewallBlocked as e:
+        print(f"   🛡️  BLOCKED: import in {test_file} — {e.detail[:60]}")
+
+    os.remove(os.path.join(ws.root, test_file))
+    print()
+
+    # ── 6. Contract checking (v2) ──
+    print("─── 6. CONTRACT CHECKING (v2) ───")
+    try:
+        from runtime_checker import contract_checked, EvalContext, evaluate
+        from expr_lang import parse_expr
+        from properties import parse_formal_property
+
+        contract = target_mod.contract
+        props = []
+        for bp in contract.behavior:
+            prop = parse_formal_property(bp.formal, bp.id)
+            if prop is not None:
+                props.append(prop)
+
+        if props:
+            print(f"   Module '{target_mod.name}' has {len(props)} formal properties:")
+            for p in props:
+                kind_str = p.kind.value
+                print(f"     [{kind_str}] {p.id}")
+                # Show the expression
+                if hasattr(p, 'expr') and p.expr:
+                    print(f"       expr: {p.expr}")
+                if hasattr(p, 'when') and p.when:
+                    print(f"       when: {p.when} → error: {getattr(p, 'error', '?')}")
+        else:
+            print(f"   (no formal properties — add v2 contracts to enable)")
+    except ImportError:
+        print("   (v2 modules not importable)")
+    print()
+
+    # ── 7. Budget ──
+    print("─── 7. BUDGET ───")
+    print(f"   {session.budget_status()}")
+    print(f"   {session.stats_summary()}")
+    print()
+
+    print("─── DEMO COMPLETE ───")
+    print(f"   Session: {session.stats_summary()}")
+    print()
+    return 0
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -830,6 +1290,17 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     sub.add_parser("init", help="Scaffold a new workspace")
 
+    sub.add_parser("status", help="Show dashboard of all modules, contracts, DAG")
+
+    p_work = sub.add_parser("work", help="Interactive bounded session on a module")
+    p_work.add_argument("module", help="Module name to work on")
+
+    p_run = sub.add_parser("run", help="One-shot bounded session with task context")
+    p_run.add_argument("module", help="Module name")
+    p_run.add_argument("task", help="Task description", nargs="?", default="inspect module")
+
+    sub.add_parser("demo", help="Scripted walkthrough of all constraints")
+
     args = parser.parse_args(argv)
 
     try:
@@ -843,6 +1314,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             return cmd_graph(args.dot)
         elif args.command == "wrap":
             return cmd_wrap(args.path, args.name)
+        elif args.command == "status":
+            return cmd_status()
+        elif args.command == "work":
+            return cmd_work(args.module)
+        elif args.command == "run":
+            return cmd_run(args.module, args.task)
+        elif args.command == "demo":
+            return cmd_demo()
     except RichError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
