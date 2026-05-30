@@ -1266,14 +1266,131 @@ def cmd_demo() -> int:
 
 # ── Orchestrator command ───────────────────────────────────────────────────────
 
+def _dry_run_orchestrate(module: str = None, task: str = None) -> int:
+    """Show exactly what the orchestrator will do, agent by agent, without an API key."""
+    from harness import Harness
+
+    h = Harness(".")
+    names = [module] if module else h.module_names()
+
+    if task is None:
+        task = "Implement this module according to its contract.yaml"
+
+    print()
+    print("╔" + "═" * 68 + "╗")
+    print("║  ORCHESTRATOR DRY RUN" + " " * 47 + "║")
+    print("╠" + "═" * 68 + "╣")
+    print(f"║  Modules: {', '.join(names):<54s} ║")
+    print(f"║  Task: {task[:52]:<52s} ║")
+    print(f"║  Agents: {len(names)} (1 per module)" + " " * 38 + "║")
+    print("╚" + "═" * 68 + "╝")
+    print()
+
+    for i, name in enumerate(names):
+        session = h.session(name)
+
+        print(f"┌─ AGENT {i+1}/{len(names)}: {name} " + "─" * (58 - len(name)) + "┐")
+
+        # Dependencies
+        deps = [d.name for d in session.deps]
+        print(f"│  Dependencies: {', '.join(deps) if deps else 'none':<49s} │")
+
+        # What the agent CAN see
+        print(f"│  Can READ ({len(session.whitelist_read)} paths):" + " " * 36 + "│")
+        for w in sorted(session.whitelist_read):
+            rel = os.path.relpath(w, h.workspace_root)
+            if os.path.isdir(w):
+                for root, dirs, files in os.walk(w):
+                    dirs[:] = [d for d in dirs if not d.startswith("__")]
+                    for fname in sorted(files):
+                        if fname.endswith(".pyc"):
+                            continue
+                        fp = os.path.relpath(os.path.join(root, fname), h.workspace_root)
+                        print(f"│    ✓ {fp:<59s} │")
+            elif os.path.isfile(w):
+                print(f"│    ✓ {rel:<59s} │")
+
+        # What the agent CANNOT see
+        blocked = []
+        for dep in session.deps:
+            dep_src = os.path.join(dep.path, "src")
+            if os.path.isdir(dep_src):
+                for fname in os.listdir(dep_src):
+                    if fname.startswith("__") or fname.endswith(".pyc"):
+                        continue
+                    fp = os.path.relpath(os.path.join(dep_src, fname), h.workspace_root)
+                    blocked.append(fp)
+
+        if blocked:
+            print(f"│  BLOCKED ({len(blocked)} files):" + " " * 51 + "│")
+            for fp in blocked:
+                print(f"│    🛡️  {fp:<57s} │")
+
+        # Can write
+        print(f"│  Can WRITE to:" + " " * 54 + "│")
+        for w in sorted(session.whitelist_write):
+            rel = os.path.relpath(w, h.workspace_root)
+            print(f"│    ✎ {rel:<59s} │")
+
+        # Budget
+        print(f"│  Budget: {session.budget.max_loc} LOC / {session.budget.max_files} files / {session.budget.max_context_tokens} tokens" + " " * (58 - len(f"{session.budget.max_loc} LOC / {session.budget.max_files} files / {session.budget.max_context_tokens} tokens")) + " │")
+
+        # Contract summary from context
+        ctx = session.context()
+        contract_lines = []
+        in_contract = False
+        for line in ctx.splitlines():
+            if "## Contract" in line:
+                in_contract = True
+                continue
+            if in_contract and line.startswith("##"):
+                break
+            if in_contract and line.strip():
+                contract_lines.append(line.strip())
+
+        if contract_lines:
+            print(f"│  Contract:" + " " * 57 + "│")
+            for cl in contract_lines[:6]:
+                print(f"│    {cl:<62s} │")
+
+        # Agent instructions summary
+        print(f"│  Agent instructions:" + " " * 48 + "│")
+        for line in ctx.splitlines()[-8:]:
+            if line.strip() and ("may edit" in line or "may NOT" in line or "injection" in line or "fakes" in line):
+                print(f"│    {line.strip()[:60]:<60s} │")
+
+        # Tools
+        print(f"│  Tools available: read_file, write_file, search_files, run_tests, report_done" + " " * (55 - len("Tools available: read_file, write_file, search_files, run_tests, report_done")) + " │")
+        print(f"└" + "─" * 67 + "┘")
+        print()
+
+    print("═" * 69)
+    print(f"  Total agents: {len(names)}")
+    print(f"  Each agent is BOUNDED — cannot read dependency source.")
+    print(f"  Each agent's tool calls are MEDIATED — firewall enforced on every operation.")
+    print()
+    print(f"  To run for real:")
+    print(f"    export OPENROUTER_API_KEY=sk-or-...")
+    print(f"    rich orchestrate --module {names[0] if names else 'auth'} --task \"{task}\"")
+    print(f"  Or all modules:")
+    print(f"    rich orchestrate --task \"{task}\"")
+    print("═" * 69)
+    print()
+    return 0
+
+
 def cmd_orchestrate(api_key: str = None, model: str = None,
                     module: str = None, task: str = None,
-                    parallel: bool = False) -> int:
+                    parallel: bool = False, dry_run: bool = False) -> int:
     """Spawn one bounded LLM agent per module.
 
     Each agent runs inside a ModuleSession — it can only read its own
     source + dep contracts. All tool calls are mediated through the harness.
     """
+    # ── Dry run: show what would happen without an API key ──
+    if dry_run:
+        return _dry_run_orchestrate(module, task)
+
     from orchestrator import Orchestrator
 
     orch = Orchestrator(".", api_key=api_key, model=model)
@@ -1333,6 +1450,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_orch.add_argument("--module", help="Run on a single module instead of all")
     p_orch.add_argument("--task", help="Task description", default="Implement this module per its contract")
     p_orch.add_argument("--parallel", action="store_true", help="Run agents in parallel")
+    p_orch.add_argument("--dry-run", action="store_true", help="Show what would happen without calling LLMs")
 
     args = parser.parse_args(argv)
 
@@ -1362,6 +1480,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 module=args.module,
                 task=args.task,
                 parallel=args.parallel,
+                dry_run=args.dry_run,
             )
     except RichError as e:
         print(f"Error: {e}", file=sys.stderr)
