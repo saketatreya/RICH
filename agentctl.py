@@ -8,9 +8,13 @@ Enforces three properties on a codebase:
 """
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
+
+import yaml
 
 # ── M0: Data models ───────────────────────────────────────────────────────────
 
@@ -58,9 +62,9 @@ class Contract:
 @dataclass
 class Module:
     name: str
-    path: str                     # filesystem path to the module directory
+    path: str
     contract: Contract
-    contract_path: str = ""       # path to contract.yaml
+    contract_path: str = ""
 
 
 @dataclass
@@ -77,32 +81,218 @@ def estimate_tokens(text: str) -> int:
     return max(1, -(len(text.encode('utf-8')) // -4))  # ceil(len/4)
 
 
-# ── CLI skeleton ───────────────────────────────────────────────────────────────
+# ── Error ──────────────────────────────────────────────────────────────────────
 
 class AgentCtlError(Exception):
     """User-visible agentctl error."""
     pass
 
 
-def cmd_validate(ws: Workspace) -> int:
-    """M1: Parse + validate all modules."""
-    print("validate: not yet implemented")
+# ── M1: Workspace loading and validation ───────────────────────────────────────
+
+def load_workspace(root: str = ".") -> Workspace:
+    """Load agentnative.yaml, discover modules, parse contracts."""
+    root = os.path.abspath(root)
+    config_path = os.path.join(root, "agentnative.yaml")
+    if not os.path.isfile(config_path):
+        raise AgentCtlError(f"No agentnative.yaml found in {root} — run `agentctl init`")
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    ws = Workspace(root=root, config=config)
+
+    module_root = config.get("module_root", "modules")
+    modules_dir = os.path.join(root, module_root)
+
+    if os.path.isdir(modules_dir):
+        for entry in sorted(os.listdir(modules_dir)):
+            mod_dir = os.path.join(modules_dir, entry)
+            if not os.path.isdir(mod_dir):
+                continue
+            contract_file = os.path.join(mod_dir, "contract.yaml")
+            if not os.path.isfile(contract_file):
+                continue
+            try:
+                mod = parse_module(mod_dir, contract_file)
+                ws.modules.append(mod)
+            except yaml.YAMLError as e:
+                raise AgentCtlError(f"YAML error in {contract_file}: {e}")
+
+    return ws
+
+
+def parse_module(mod_dir: str, contract_path: str) -> Module:
+    """Parse a module directory and its contract.yaml."""
+    with open(contract_path) as f:
+        raw = yaml.safe_load(f) or {}
+
+    # Parse contract
+    contract = Contract(
+        name=raw.get("name", ""),
+        version=raw.get("version", "0.1.0"),
+        dependencies=raw.get("dependencies", []) or [],
+    )
+
+    # Parse interface
+    iface_raw = raw.get("interface", {}) or {}
+    for op_raw in iface_raw.get("operations", []) or []:
+        op = Operation(
+            name=op_raw.get("name", ""),
+            inputs=op_raw.get("inputs", {}) or {},
+            outputs=op_raw.get("outputs", {}) or {},
+            errors=op_raw.get("errors", []) or [],
+        )
+        contract.interface.operations.append(op)
+
+    # Parse behavior
+    for b_raw in raw.get("behavior", []) or []:
+        bp = BehaviorProperty(
+            id=b_raw.get("id", ""),
+            prose=b_raw.get("prose", ""),
+            formal=b_raw.get("formal"),
+        )
+        contract.behavior.append(bp)
+
+    # Parse module-level budget override
+    if "budget" in raw and raw["budget"] is not None:
+        b = raw["budget"]
+        contract.budget = Budget(
+            max_loc=b.get("max_loc", 5000),
+            max_files=b.get("max_files", 100),
+            max_context_tokens=b.get("max_context_tokens", 100_000),
+        )
+
+    return Module(
+        name=contract.name,
+        path=mod_dir,
+        contract=contract,
+        contract_path=contract_path,
+    )
+
+
+def validate_workspace(ws: Workspace) -> list[str]:
+    """Run all schema validation checks. Returns list of error messages."""
+    errors: list[str] = []
+    module_names = {m.name for m in ws.modules}
+
+    for mod in ws.modules:
+        prefix = f"[{mod.name}]"
+
+        # Name must match directory
+        dir_name = os.path.basename(mod.path.rstrip("/"))
+        if mod.contract.name != dir_name:
+            errors.append(
+                f"{prefix} contract name '{mod.contract.name}' does not match "
+                f"directory name '{dir_name}'"
+            )
+
+        # Name must not be empty
+        if not mod.contract.name:
+            errors.append(f"{prefix} contract name is required")
+            continue
+
+        # Version must be present
+        if not mod.contract.version:
+            errors.append(f"{prefix} version is required")
+
+        # Interface operations
+        seen_ops = set()
+        for op in mod.contract.interface.operations:
+            if not op.name:
+                errors.append(f"{prefix} operation name is required")
+
+            # Validate types
+            for param, ptype in op.inputs.items():
+                if ptype not in V1_TYPES:
+                    errors.append(
+                        f"{prefix} operation '{op.name}' input '{param}': "
+                        f"type '{ptype}' is not in v1 type vocabulary"
+                    )
+            for param, ptype in op.outputs.items():
+                if ptype not in V1_TYPES:
+                    errors.append(
+                        f"{prefix} operation '{op.name}' output '{param}': "
+                        f"type '{ptype}' is not in v1 type vocabulary"
+                    )
+
+            # Duplicate operation names
+            if op.name in seen_ops:
+                errors.append(f"{prefix} duplicate operation name '{op.name}'")
+            seen_ops.add(op.name)
+
+        # Dependencies must reference existing modules
+        for dep in mod.contract.dependencies:
+            if dep not in module_names:
+                errors.append(
+                    f"{prefix} dependency '{dep}' does not reference an existing module"
+                )
+
+        # Behavior properties: ids must be present and unique
+        seen_ids = set()
+        for bp in mod.contract.behavior:
+            if not bp.id:
+                errors.append(f"{prefix} behavior property id is required")
+                continue
+            if bp.id in seen_ids:
+                errors.append(f"{prefix} duplicate behavior property id '{bp.id}'")
+            seen_ids.add(bp.id)
+
+    return errors
+
+
+# ── Commands ───────────────────────────────────────────────────────────────────
+
+def load_ws() -> Workspace:
+    """Load workspace or raise."""
+    return load_workspace(".")
+
+
+def cmd_validate() -> int:
+    """M1/M2/M4/M5: Parse + validate all modules."""
+    ws = load_ws()
+    errors = validate_workspace(ws)
+
+    if errors:
+        for e in errors:
+            print(f"  ✗ {e}")
+        print(f"\n{len(errors)} error(s) found.")
+        return 1
+
+    # Success summary
+    print(f"Workspace: {ws.root}")
+    print(f"Modules: {len(ws.modules)}")
+    for mod in ws.modules:
+        deps = ", ".join(mod.contract.dependencies) if mod.contract.dependencies else "none"
+        ops = len(mod.contract.interface.operations)
+        props = len(mod.contract.behavior)
+        print(f"  ✓ {mod.name}  ops={ops}  deps=[{deps}]  behavior={props}")
+    print("All checks passed.")
     return 0
 
 
-def cmd_context(ws: Workspace, module_name: str, out_dir: Optional[str], list_only: bool) -> int:
+def cmd_context(module_name: str, out_dir: Optional[str], list_only: bool) -> int:
     """M3: Materialize firewall tree."""
+    ws = load_ws()
+    # Validate first — refuse to materialize if there are errors
+    errors = validate_workspace(ws)
+    if errors:
+        print(f"Cannot materialize context: {len(errors)} validation error(s)")
+        for e in errors:
+            print(f"  ✗ {e}")
+        return 1
     print(f"context {module_name}: not yet implemented")
     return 0
 
 
-def cmd_graph(ws: Workspace, dot: bool) -> int:
+def cmd_graph(dot: bool) -> int:
     """M2: Print dependency DAG."""
+    ws = load_ws()
     print("graph: not yet implemented")
     return 0
 
 
-def cmd_wrap(ws: Workspace, path: str, name: str) -> int:
+def cmd_wrap(path: str, name: str) -> int:
     """M6: Scaffold module around existing code."""
     print(f"wrap {path} -> {name}: not yet implemented")
     return 0
@@ -114,6 +304,8 @@ def cmd_init(target_dir: str) -> int:
     return 0
 
 
+# ── Main ───────────────────────────────────────────────────────────────────────
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="agentctl",
@@ -121,26 +313,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # validate
     sub.add_parser("validate", help="Validate all modules (schema, DAG, budgets, boundaries)")
 
-    # context
     p_ctx = sub.add_parser("context", help="Materialize firewall tree for a module")
     p_ctx.add_argument("module", help="Module name")
     p_ctx.add_argument("--out", dest="out_dir", default=None, help="Output directory")
     p_ctx.add_argument("--list", dest="list_only", action="store_true",
                        help="Dry-run: print what would be included")
 
-    # graph
     p_graph = sub.add_parser("graph", help="Print dependency DAG")
     p_graph.add_argument("--dot", action="store_true", help="Output Graphviz DOT format")
 
-    # wrap
     p_wrap = sub.add_parser("wrap", help="Scaffold module around existing code")
     p_wrap.add_argument("path", help="Path to existing code file/dir")
     p_wrap.add_argument("--name", required=True, help="Module name")
 
-    # init
     sub.add_parser("init", help="Scaffold a new workspace")
 
     args = parser.parse_args(argv)
@@ -148,14 +335,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         if args.command == "init":
             return cmd_init(target_dir=".")
-        elif args.command == "context":
-            return cmd_context(None, args.module, args.out_dir, args.list_only)
         elif args.command == "validate":
-            return cmd_validate(None)
+            return cmd_validate()
+        elif args.command == "context":
+            return cmd_context(args.module, args.out_dir, args.list_only)
         elif args.command == "graph":
-            return cmd_graph(None, args.dot)
+            return cmd_graph(args.dot)
         elif args.command == "wrap":
-            return cmd_wrap(None, args.path, args.name)
+            return cmd_wrap(args.path, args.name)
     except AgentCtlError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1

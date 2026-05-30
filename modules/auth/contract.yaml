@@ -1,0 +1,25 @@
+name: auth
+version: 0.1.0
+
+interface:
+  operations:
+    - name: authenticate
+      inputs:
+        username: string
+        password: string
+      outputs:
+        token: string
+      errors:
+        - invalid_credentials
+
+dependencies:
+  - user_repo
+  - token_store
+
+behavior:
+  - id: token_on_success
+    prose: "On valid credentials, returns a token that token_store.validate accepts."
+    formal: null
+  - id: reject_invalid
+    prose: "On invalid credentials, raises invalid_credentials and issues no token."
+    formal: null
