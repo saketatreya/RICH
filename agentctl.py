@@ -241,6 +241,54 @@ def validate_workspace(ws: Workspace) -> list[str]:
     return errors
 
 
+# ── M2: Dependency graph and cycle detection ────────────────────────────────────
+
+def build_dep_graph(modules: list[Module]) -> dict[str, list[str]]:
+    """Build adjacency list from module dependencies."""
+    return {m.name: list(m.contract.dependencies) for m in modules}
+
+
+def detect_cycles(modules: list[Module]) -> list[list[str]]:
+    """DFS with 3-coloring (white/grey/black). Returns list of cycle paths found.
+
+    Each cycle is returned as a list of module names forming the cycle path.
+    """
+    graph = build_dep_graph(modules)
+    WHITE, GREY, BLACK = 0, 1, 2
+    color: dict[str, int] = {m.name: WHITE for m in modules}
+    cycles: list[list[str]] = []
+    parent: dict[str, str | None] = {}
+
+    def dfs(node: str, stack: list[str]) -> None:
+        color[node] = GREY
+        stack.append(node)
+        for neighbor in graph.get(node, []):
+            if neighbor not in color:
+                # Unknown module — schema validation handles this elsewhere
+                continue
+            if color[neighbor] == GREY:
+                # Found a cycle: extract from stack
+                cycle_start = stack.index(neighbor)
+                cycle_path = stack[cycle_start:] + [neighbor]
+                cycles.append(cycle_path)
+            elif color[neighbor] == WHITE:
+                parent[neighbor] = node
+                dfs(neighbor, stack)
+        stack.pop()
+        color[node] = BLACK
+
+    for m in modules:
+        if color[m.name] == WHITE:
+            dfs(m.name, [])
+
+    return cycles
+
+
+def format_cycle_path(cycle: list[str]) -> str:
+    """Pretty-print a cycle path."""
+    return " → ".join(cycle)
+
+
 # ── Commands ───────────────────────────────────────────────────────────────────
 
 def load_ws() -> Workspace:
@@ -252,6 +300,12 @@ def cmd_validate() -> int:
     """M1/M2/M4/M5: Parse + validate all modules."""
     ws = load_ws()
     errors = validate_workspace(ws)
+
+    # M2: cycle detection
+    cycles = detect_cycles(ws.modules)
+    if cycles:
+        for cycle in cycles:
+            errors.append(f"[DAG] cycle detected: {format_cycle_path(cycle)}")
 
     if errors:
         for e in errors:
@@ -288,7 +342,36 @@ def cmd_context(module_name: str, out_dir: Optional[str], list_only: bool) -> in
 def cmd_graph(dot: bool) -> int:
     """M2: Print dependency DAG."""
     ws = load_ws()
-    print("graph: not yet implemented")
+
+    if dot:
+        print("digraph agentnative {")
+        print('  rankdir=LR;')
+        print('  node [shape=box, style=rounded];')
+        for mod in ws.modules:
+            if mod.contract.dependencies:
+                for dep in mod.contract.dependencies:
+                    print(f'  "{dep}" -> "{mod.name}";')
+            else:
+                print(f'  "{mod.name}";')
+        print("}")
+    else:
+        graph = build_dep_graph(ws.modules)
+        if not ws.modules:
+            print("(no modules)")
+            return 0
+        # Find roots (no deps)
+        roots = [m.name for m in ws.modules if not m.contract.dependencies]
+        others = [m.name for m in ws.modules if m.contract.dependencies]
+
+        print("Dependency DAG:")
+        for name in roots:
+            deps = graph.get(name, [])
+            dep_str = ", ".join(deps) if deps else "none"
+            print(f"  [{name}]  ←  deps: {dep_str}")
+        for name in others:
+            deps = graph.get(name, [])
+            print(f"  [{name}]  ←  deps: {', '.join(deps)}")
+
     return 0
 
 
