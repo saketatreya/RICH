@@ -289,6 +289,69 @@ def format_cycle_path(cycle: list[str]) -> str:
     return " → ".join(cycle)
 
 
+# ── M4: Budget checks ──────────────────────────────────────────────────────────
+
+def get_effective_budget(mod: Module, ws: Workspace) -> Budget:
+    """Return the effective budget for a module (module-level overrides workspace-level)."""
+    ws_budget = ws.config.get("budget", {}) or {}
+    defaults = Budget(
+        max_loc=ws_budget.get("max_loc", 5000),
+        max_files=ws_budget.get("max_files", 100),
+        max_context_tokens=ws_budget.get("max_context_tokens", 100_000),
+    )
+    if mod.contract.budget is not None:
+        return Budget(
+            max_loc=mod.contract.budget.max_loc if mod.contract.budget.max_loc else defaults.max_loc,
+            max_files=mod.contract.budget.max_files if mod.contract.budget.max_files else defaults.max_files,
+            max_context_tokens=mod.contract.budget.max_context_tokens if mod.contract.budget.max_context_tokens else defaults.max_context_tokens,
+        )
+    return defaults
+
+
+def check_module_budget(mod: Module, ws: Workspace) -> list[str]:
+    """Count LOC, files, and estimated tokens in a module's src/ directory.
+    Returns list of budget violation messages."""
+    violations: list[str] = []
+    budget = get_effective_budget(mod, ws)
+    src_dir = os.path.join(mod.path, "src")
+
+    loc = 0
+    file_count = 0
+    total_chars = 0
+
+    if os.path.isdir(src_dir):
+        for root, dirs, files in os.walk(src_dir):
+            for fname in files:
+                file_count += 1
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath) as f:
+                        content = f.read()
+                    total_chars += len(content)
+                    # Count non-blank lines
+                    for line in content.splitlines():
+                        if line.strip():
+                            loc += 1
+                except (OSError, UnicodeDecodeError):
+                    pass  # skip binary/unreadable files
+
+    estimated_tokens = estimate_tokens("x" * total_chars) if total_chars > 0 else 0
+
+    prefix = f"[{mod.name}]"
+    ident = f"  {mod.name}"
+    if loc > budget.max_loc:
+        violations.append(
+            f"{prefix} LOC budget exceeded: {loc} > {budget.max_loc}")
+    if file_count > budget.max_files:
+        violations.append(
+            f"{prefix} file count budget exceeded: {file_count} > {budget.max_files}")
+    if estimated_tokens > budget.max_context_tokens:
+        violations.append(
+            f"{prefix} context token budget exceeded: {estimated_tokens} > {budget.max_context_tokens}")
+
+    return violations
+
+
 # ── Commands ───────────────────────────────────────────────────────────────────
 
 def load_ws() -> Workspace:
@@ -306,6 +369,11 @@ def cmd_validate() -> int:
     if cycles:
         for cycle in cycles:
             errors.append(f"[DAG] cycle detected: {format_cycle_path(cycle)}")
+
+    # M4: budget checks
+    for mod in ws.modules:
+        budget_violations = check_module_budget(mod, ws)
+        errors.extend(budget_violations)
 
     if errors:
         for e in errors:
