@@ -42,8 +42,8 @@ def construct_validator():
 def assemble():
     """Deterministic topological fold — inject dependencies by name."""
 
-    validator = construct_validator()
     normalizer = construct_normalizer()
+    validator = construct_validator()
     pipeline_demo = construct_pipeline_demo(normalizer=normalizer, validator=validator)
 
     return pipeline_demo

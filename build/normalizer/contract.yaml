@@ -1,14 +1,14 @@
 id: normalizer
-description: 'Normalize a string: strip whitespace, lowercase'
+description: Reverse a string and return the result
 interface:
   operations:
-  - name: normalize
+  - name: run
     inputs:
       text: string
     outputs:
-      normalized: string
+      result: string
     errors: []
 dependencies: []
 behavior:
-- id: strip_and_lower
-  prose: Normalized text must have no leading/trailing whitespace and be lowercase
+- id: basic
+  prose: Reverse a string and return the result

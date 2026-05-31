@@ -308,8 +308,10 @@ def build(contract: dict) -> Node:
         test_file.write_text(tests_src)
 
         # 3a. IMPLEMENT + verify loop
+        failures = []
         for attempt in range(1, K_IMPL + 1):
-            src = implement(contract, dep_contracts=None, pipeline=False)
+            src = implement(contract, dep_contracts=None, pipeline=False,
+                          prior_failures=failures if failures else None)
             node.src_path().mkdir(parents=True, exist_ok=True)
             src_file = node.src_path() / f"{node_id}.py"
             src_file.write_text(src)
@@ -322,6 +324,7 @@ def build(contract: dict) -> Node:
 
             # Include failures in next attempt's prompt (wired in M-C)
             print(f"  [{node_id}] attempt {attempt}/{K_IMPL} FAILED: {result.get('failures', 'unknown')}")
+            failures = result.get("failures", [])
 
         save_status(node, "failed", reason=f"leaf unsatisfiable after {K_IMPL} attempts")
         raise BuildFailure(node_id, f"leaf unsatisfiable after {K_IMPL} attempts")
@@ -356,8 +359,10 @@ def build(contract: dict) -> Node:
             child_id = dep["id"]
             dep_contracts[dep["name"]] = children_nodes[child_id].contract
 
+        failures = []
         for attempt in range(1, K_WIRE + 1):
-            src = implement(contract, dep_contracts=dep_contracts, pipeline=True)
+            src = implement(contract, dep_contracts=dep_contracts, pipeline=True,
+                          prior_failures=failures if failures else None)
             node.src_path().mkdir(parents=True, exist_ok=True)
             src_file = node.src_path() / f"{node_id}.py"
             src_file.write_text(src)
@@ -380,6 +385,7 @@ def build(contract: dict) -> Node:
                 return node
 
             print(f"  [{node_id}] wiring attempt {attempt}/{K_WIRE} FAILED: {result.get('failures', 'unknown')}")
+            failures = result.get("failures", [])
 
         save_status(node, "failed", reason=f"wiring failed after {K_WIRE} attempts")
         raise BuildFailure(node_id, f"wiring failed after {K_WIRE} attempts")
@@ -420,10 +426,86 @@ ROOT_CONTRACT = {
 
 
 def main():
-    """M-A driver: build the canned pipeline demo. Zero LLM calls."""
+    """M-A through M-C driver."""
+    import argparse
+    parser = argparse.ArgumentParser(description="RICH Build System")
+    parser.add_argument("--test-leaf", type=str, metavar="MODULE_ID",
+                        help="M-C: test single-leaf IMPLEMENT+DERIVE_TESTS with real LLM")
+    parser.add_argument("--contract", type=str, metavar="DESC",
+                        help="Description for --test-leaf contract")
+    args = parser.parse_args()
+
+    if args.test_leaf:
+        test_single_leaf(args.test_leaf, args.contract or f"Implement {args.test_leaf}")
+        return
+
     print("=" * 60)
-    print("M-A: Canned pipeline demo")
+    print("M-A/B: Canned pipeline demo")
     print("=" * 60)
+
+
+def test_single_leaf(module_id: str, description: str):
+    """M-C: Test single-leaf generate+verify loop with real LLM.
+
+    Contract: a single module with one op, no deps.
+    PLAN stays stubbed to is_leaf:true.
+    IMPLEMENT and DERIVE_TESTS call real LLM.
+    """
+    from llm import is_available as llm_available
+
+    print("=" * 60)
+    print(f"M-C: Single-leaf test — {module_id}")
+    print(f"     Description: {description}")
+    print("=" * 60)
+
+    contract = {
+        "id": module_id,
+        "description": description,
+        "interface": {
+            "operations": [
+                {
+                    "name": "run",
+                    "inputs": {"text": "string"},
+                    "outputs": {"result": "string"},
+                    "errors": [],
+                }
+            ]
+        },
+        "dependencies": [],
+        "behavior": [
+            {"id": "basic", "prose": description},
+        ],
+    }
+
+    if not llm_available():
+        print("\n  ⚠ OPENROUTER_API_KEY not set — using canned fallback")
+        print("  Set the env var and re-run to test real LLM calls.\n")
+        contract["id"] = "normalizer"  # Use canned normalizer as demo
+        node = build(contract)
+        print(f"  ✓ Canned fallback: {node.id} verified")
+        return
+
+    print(f"\n  Model: {__import__('llm').RICH_MODEL}")
+    print(f"  Contract: {module_id}")
+    print(f"  K_IMPL: {K_IMPL}")
+
+    if BUILD_ROOT.exists():
+        shutil.rmtree(BUILD_ROOT)
+    BUILD_ROOT.mkdir()
+
+    from node import save_contract
+    node = Node(id=module_id, contract=contract, is_leaf=True)
+    save_contract(node)
+
+    try:
+        node = build(contract)
+        print(f"\n  ✓ M-C: {module_id} built and verified via LLM!")
+        print(f"  Source: {node.src_path()}/{module_id}.py")
+        print(f"  Tests:  {node.tests_path()}/test_{module_id}.py")
+    except BuildFailure as e:
+        print(f"\n  ✗ M-C: {module_id} FAILED after {K_IMPL} attempts")
+        print(f"  Reason: {e.reason}")
+        sys.exit(1)
 
     # Clean build dir
     if BUILD_ROOT.exists():
