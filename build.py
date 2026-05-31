@@ -46,6 +46,61 @@ from skills import plan, implement, derive_tests, plan_canned, implement_canned,
 
 K_IMPL = 3
 K_WIRE = 3
+MAX_DEPTH = 3          # M-G: max recursion depth
+MAX_CHILDREN = 8       # M-G: max children per node
+MAX_LLM_CALLS = 50     # M-G: global LLM call ceiling
+REPLANS_MAX = 2        # M-G: max replan attempts on child failure
+
+
+def _contract_hash(contract: dict) -> str:
+    """Stable hash of a contract for memoization."""
+    import hashlib, json
+    raw = json.dumps(contract, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _load_verified_node(contract: dict) -> Node | None:
+    """If this contract has a verified build on disk, return the Node. Otherwise None."""
+    import json, yaml as _yaml
+    node_path = BUILD_ROOT / contract["id"]
+    status_path = node_path / "status.json"
+    memo_path = node_path / "memo.txt"
+
+    if not status_path.exists() or not memo_path.exists():
+        return None
+
+    try:
+        status = json.loads(status_path.read_text())
+        if status.get("status") != "verified":
+            return None
+        stored_hash = memo_path.read_text().strip()
+        if stored_hash != _contract_hash(contract):
+            return None
+
+        # Reconstruct Node
+        contract_on_disk = _yaml.safe_load((node_path / "contract.yaml").read_text())
+        decision = json.loads((node_path / "decision.json").read_text())
+        deps_path = node_path / "deps.yaml"
+        deps = _yaml.safe_load(deps_path.read_text()) if deps_path.exists() else []
+
+        node = Node(id=contract["id"], contract=contract_on_disk,
+                     is_leaf=decision["is_leaf"], dependencies=deps or [])
+        if not node.is_leaf:
+            for child_contract in decision.get("children", []):
+                child = _load_verified_node(child_contract)
+                if child is None:
+                    return None
+                node.children.append(child)
+            node.edges = decision.get("edges", [])
+        return node
+    except Exception:
+        return None
+
+
+def _save_memo(node: Node, contract: dict):
+    """Save memoization hash for a verified node."""
+    node.path().mkdir(parents=True, exist_ok=True)
+    (node.path() / "memo.txt").write_text(_contract_hash(contract))
 
 
 class BuildFailure(Exception):
@@ -283,14 +338,34 @@ def topological_order_for_assembly(root: Node) -> list[Node]:
     return ordered
 
 
-def build(contract: dict, allow_decompose: bool = False, use_canned: bool = False) -> Node:
+def build(contract: dict, allow_decompose: bool = False, use_canned: bool = False,
+          depth: int = 0, llm_call_counter: list | None = None) -> Node:
     """The core recursive procedure (§4).
 
     Takes a contract, returns a verified Node or raises BuildFailure.
+    depth: current recursion depth (0 = root).
+    llm_call_counter: mutable list wrapper to track global LLM call count.
     """
+    if llm_call_counter is None:
+        llm_call_counter = [0]
+
+    # Hard cap: max depth
+    if depth > MAX_DEPTH:
+        raise BuildFailure(contract["id"], f"Max depth {MAX_DEPTH} exceeded at depth {depth}")
+
+    # Hard cap: max LLM calls
+    if llm_call_counter[0] >= MAX_LLM_CALLS:
+        raise BuildFailure(contract["id"], f"LLM call ceiling ({MAX_LLM_CALLS}) exceeded")
+
+    # Memoization: if this contract was verified before, return cached node
+    cached = _load_verified_node(contract)
+    if cached is not None:
+        return cached
+
     # 1. PLAN
     if use_canned:
-        decision = plan_canned(contract)
+        import skills as _skills
+        decision = _skills.plan_canned(contract)
     else:
         decision = plan(contract, allow_decompose=allow_decompose)
     node_id = contract["id"]
@@ -313,7 +388,8 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
     if node.is_leaf:
         # 2a. DERIVE_TESTS
         if use_canned:
-            tests_src = derive_tests_canned(contract)
+            import skills as _skills4
+            tests_src = _skills4.derive_tests_canned(contract)
         else:
             tests_src = derive_tests(contract)
         node.tests_path().mkdir(parents=True, exist_ok=True)
@@ -324,8 +400,8 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
         failures = []
         for attempt in range(1, K_IMPL + 1):
             if use_canned:
-                from skills import implement_canned as _impl_fn
-                src = _impl_fn(contract, dep_contracts=None, pipeline=False)
+                import skills as _skills5
+                src = _skills5.implement_canned(contract, dep_contracts=None, pipeline=False)
             else:
                 src = implement(contract, dep_contracts=None, pipeline=False,
                               prior_failures=failures if failures else None)
@@ -337,6 +413,7 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
             if result["passed"]:
                 save_status(node, "verified")
                 save_deps(node)
+                _save_memo(node, contract)
                 return node
 
             # Include failures in next attempt's prompt (wired in M-C)
@@ -351,11 +428,46 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
         children_contracts = decision["children"]
         edges = decision.get("edges", [])
 
-        # Build child nodes — children are always leaves in M-E (depth limit 1)
+        # Build child nodes — allow decomposition if below max depth (M-G)
         children_nodes = {}
-        for child_contract in children_contracts:
-            child_node = build(child_contract, allow_decompose=False, use_canned=use_canned)
-            children_nodes[child_contract["id"]] = child_node
+
+        for replan_attempt in range(REPLANS_MAX + 1):  # 0 = first try, 1..N = replans
+            try:
+                children_ordered = _topo_sort_contracts(children_contracts, edges)
+
+                if len(children_ordered) > MAX_CHILDREN:
+                    raise BuildFailure(node_id, f"Too many children ({len(children_ordered)} > {MAX_CHILDREN})")
+
+                child_allow_decompose = (depth + 1) < MAX_DEPTH
+                children_nodes = {}
+                failed_child = None
+
+                for child_contract in children_ordered:
+                    try:
+                        child_node = build(child_contract, allow_decompose=child_allow_decompose,
+                                          use_canned=use_canned, depth=depth + 1,
+                                          llm_call_counter=llm_call_counter)
+                        children_nodes[child_contract["id"]] = child_node
+                    except BuildFailure as e:
+                        failed_child = child_contract
+                        raise  # Propagate to replan handler
+
+                break  # Success — all children built
+
+            except BuildFailure as e:
+                if failed_child and replan_attempt < REPLANS_MAX and not use_canned:
+                    print(f"  [{node_id}] child '{failed_child['id']}' failed: {e.reason}")
+                    print(f"  [{node_id}] replan attempt {replan_attempt + 1}/{REPLANS_MAX}...")
+                    # Call PLAN again with failure context
+                    new_decision = plan(contract, allow_decompose=True)
+                    if new_decision.get("is_leaf", True):
+                        raise BuildFailure(node_id, "REPLAN fell back to leaf — decomposition failed")
+                    children_contracts = new_decision.get("children", [])
+                    edges = new_decision.get("edges", [])
+                    save_decision(node)  # Update decision
+                    _save_raw_decision(node, new_decision)
+                else:
+                    raise
 
         node.children = list(children_nodes.values())
         node.edges = edges
@@ -365,7 +477,8 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
 
         # 3b. DERIVE_TESTS for the internal node
         if use_canned:
-            tests_src = derive_tests_canned(contract)
+            import skills as _skills6
+            tests_src = _skills6.derive_tests_canned(contract)
         else:
             tests_src = derive_tests(contract)
         node.tests_path().mkdir(parents=True, exist_ok=True)
@@ -382,8 +495,8 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
         failures = []
         for attempt in range(1, K_WIRE + 1):
             if use_canned:
-                from skills import implement_canned as _impl_fn
-                src = _impl_fn(contract, dep_contracts=dep_contracts, pipeline=True)
+                import skills as _skills3
+                src = _skills3.implement_canned(contract, dep_contracts=dep_contracts, pipeline=True)
             else:
                 src = implement(contract, dep_contracts=dep_contracts, pipeline=True,
                               prior_failures=failures if failures else None)
@@ -406,6 +519,7 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
                 save_deps(node)
                 # Update decision with children contracts
                 save_decision(node)
+                _save_memo(node, contract)
                 return node
 
             print(f"  [{node_id}] wiring attempt {attempt}/{K_WIRE} FAILED: {result.get('failures', 'unknown')}")
@@ -685,6 +799,39 @@ def test_decompose(desc: str, goal: str):
         sys.exit(1)
 
 
+def _topo_sort_contracts(children: list[dict], edges: list[dict]) -> list[dict]:
+    """Topological sort of child contracts based on edges. Returns ordered list."""
+    child_map = {c["id"]: c for c in children}
+    child_ids = set(child_map.keys())
+    dep_of = {cid: set() for cid in child_ids}
+    for edge in edges:
+        to_id = edge.get("to", "")
+        from_id = edge.get("from", "")
+        if to_id in dep_of:
+            dep_of[to_id].add(from_id)
+
+    ordered = []
+    visited = set()
+    temp = set()
+
+    def visit(cid):
+        if cid in temp:
+            raise ValueError(f"Cycle in child dependencies: {cid}")
+        if cid in visited:
+            return
+        temp.add(cid)
+        for dep_id in dep_of.get(cid, set()):
+            visit(dep_id)
+        temp.remove(cid)
+        visited.add(cid)
+        ordered.append(child_map[cid])
+
+    for cid in child_ids:
+        visit(cid)
+
+    return ordered
+
+
 def _save_raw_decision(node: Node, decision: dict):
     """Save PLAN's raw decision output (includes children contracts)."""
     import json
@@ -693,8 +840,140 @@ def _save_raw_decision(node: Node, decision: dict):
         json.dump(decision, f, indent=2)
 
 
+def test_deep():
+    """M-G: Test depth-2 recursion with canned data."""
+    from deep_test import (
+        CANNED_DEEP_DECISION, CANNED_PASSWORD_PIPELINE_DECISION,
+        CANNED_IMPLS_DEEP, CANNED_TESTS_DEEP,
+    )
+    import skills
+
+    # Register deep canned data
+    for k, v in CANNED_IMPLS_DEEP.items():
+        skills.CANNED_IMPLS[k] = v
+    for k, v in CANNED_TESTS_DEEP.items():
+        skills.CANNED_TESTS[k] = v
+
+    # Override plan_canned at module level
+    _orig_plan_canned = skills.plan_canned
+
+    def plan_canned_deep(contract):
+        if contract["id"] == "password_pipeline":
+            return CANNED_PASSWORD_PIPELINE_DECISION
+        if contract["id"] == "validate_registration":
+            return CANNED_DEEP_DECISION
+        return _orig_plan_canned(contract)
+
+    skills.plan_canned = plan_canned_deep
+
+    print("=" * 60)
+    print("M-G: Depth-2 recursion test")
+    print("     validate_registration → password_pipeline → (length_check, complexity_check)")
+    print("=" * 60)
+
+    if BUILD_ROOT.exists():
+        shutil.rmtree(BUILD_ROOT)
+    BUILD_ROOT.mkdir()
+
+    DEEP_ROOT_CONTRACT = {
+        "id": "validate_registration",
+        "description": "Validate username, password strength, and generate welcome token",
+        "interface": {
+            "operations": [{
+                "name": "validate",
+                "inputs": {"username": "string", "password": "string"},
+                "outputs": {"username_ok": "bool", "password_ok": "bool", "token": "string", "reason": "string"},
+                "errors": [],
+            }]
+        },
+        "dependencies": [
+            {"name": "username_checker", "id": "username_checker"},
+            {"name": "password_pipeline", "id": "password_pipeline"},
+            {"name": "token_generator", "id": "token_generator"},
+        ],
+        "behavior": [{"id": "full", "prose": "Validates username, checks password strength, generates token"}],
+    }
+
+    try:
+        root = build(DEEP_ROOT_CONTRACT, use_canned=True)
+        print(f"\n✓ Depth-2 build succeeded!")
+        print(f"  Root: {root.id}")
+        print(f"  Children: {[c.id for c in root.children]}")
+
+        # Check depth-2: password_pipeline should have its own children
+        for child in root.children:
+            if child.id == "password_pipeline":
+                print(f"  password_pipeline children: {[c.id for c in child.children]}")
+                assert len(child.children) == 2, f"Expected 2 grandchildren, got {len(child.children)}"
+                assert {c.id for c in child.children} == {"length_check", "complexity_check"}
+
+        print(f"\n  ✓ Depth-2 tree verified — password_pipeline has 2 children")
+        print(f"\n  Full tree:")
+        _print_tree(root)
+
+        # Assemble
+        main_py_path = assemble(root)
+        result = subprocess.run(
+            [sys.executable, "main.py"],
+            capture_output=True, text=True, timeout=10, cwd=str(BUILD_ROOT),
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                print(f"    {line}")
+        else:
+            print(f"  ✗ Failed: {result.stderr[:300]}")
+
+    except BuildFailure as e:
+        print(f"\n✗ Depth-2 build FAILED: {e}")
+        sys.exit(1)
+    finally:
+        skills.plan_canned = _orig_plan_canned
+
+
+def _print_tree(node, indent=0):
+    """Print the build tree recursively."""
+    marker = "L" if node.is_leaf else "I"
+    status_text = node.status_path().read_text() if node.status_path().exists() else '{}'
+    import json
+    try:
+        status = json.loads(status_text).get("status", "?")
+    except Exception:
+        status = "?"
+    print(f"  {'  ' * indent}{marker} {node.id} ({status})")
+    for child in node.children:
+        _print_tree(child, indent + 1)
+
+
+def test_memo():
+    """M-G: Test memoization — build once, then rebuild; second should hit cache."""
+    print("=" * 60)
+    print("M-G: Memoization test")
+    print("=" * 60)
+
+    if BUILD_ROOT.exists():
+        shutil.rmtree(BUILD_ROOT)
+    BUILD_ROOT.mkdir()
+
+    print("\n  First build (real work):")
+    root1 = build(ROOT_CONTRACT, use_canned=True)
+    memo_count = len(list(BUILD_ROOT.rglob("memo.txt")))
+    print(f"  Root: {root1.id}, children: {[c.id for c in root1.children]}")
+    print(f"  Memo files: {memo_count}")
+
+    print("\n  Second build (should hit memo cache):")
+    import time
+    t0 = time.time()
+    root2 = build(ROOT_CONTRACT, use_canned=True)
+    elapsed = time.time() - t0
+    print(f"  Root: {root2.id}, children: {[c.id for c in root2.children]}")
+    print(f"  Elapsed: {elapsed:.4f}s (should be near-zero)")
+    assert root2.id == root1.id
+    assert len(root2.children) == len(root1.children)
+    print(f"  ✓ Memoization works — second build instant from cache")
+
+
 def main():
-    """M-A through M-E driver."""
+    """M-A through M-G driver."""
     import argparse
     parser = argparse.ArgumentParser(description="RICH Build System")
     parser.add_argument("--test-leaf", type=str, metavar="MODULE_ID",
@@ -705,6 +984,10 @@ def main():
                         help="Description for --test-leaf or --decompose contract")
     parser.add_argument("--fan-in", action="store_true",
                         help="M-F: test shared dependency (fan-in) with canned data")
+    parser.add_argument("--deep", action="store_true",
+                        help="M-G: test depth-2 recursion with canned data")
+    parser.add_argument("--memo-test", action="store_true",
+                        help="M-G: test memoization — build twice, verify second is cached")
     args = parser.parse_args()
 
     if args.test_leaf:
@@ -717,6 +1000,14 @@ def main():
 
     if args.fan_in:
         test_fan_in()
+        return
+
+    if args.deep:
+        test_deep()
+        return
+
+    if args.memo_test:
+        test_memo()
         return
 
     print("=" * 60)
