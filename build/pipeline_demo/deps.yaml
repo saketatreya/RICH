@@ -1,2 +1,4 @@
-- name: normalized
+- name: normalizer
+  id: normalizer
+- name: validator
   id: validator

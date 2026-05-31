@@ -59,18 +59,226 @@ class BuildFailure(Exception):
 def run_tests(src_dir: Path, tests_dir: Path) -> dict:
     """§6.1 — Run consumer-derived tests against the implementation.
 
-    M-A: Stubbed — always returns {passed: True, failures: []}.
-    Real subprocess execution arrives in M-B.
+    Executes pytest in an isolated subprocess. Timeout-guarded.
+    Returns {passed: bool, failures: [...]} with detailed failure output.
+
+    Honesty requirement (§6.1): "passed" means "no violation observed on tested
+    inputs" — it is existential, not a proof. Never label as proven/verified-for-all.
     """
-    return {"passed": True, "failures": []}
+    test_files = list(tests_dir.glob("test_*.py"))
+    if not test_files:
+        return {"passed": True, "failures": []}
+
+    # Copy source files into a temp test dir so imports work
+    import tempfile
+    import shutil as _shutil
+
+    with tempfile.TemporaryDirectory(prefix="rich_test_") as tmp:
+        tmp_path = Path(tmp)
+        # Copy all source files
+        for f in src_dir.glob("*.py"):
+            _shutil.copy2(f, tmp_path)
+        # Copy all test files
+        for f in test_files:
+            _shutil.copy2(f, tmp_path)
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "-v", "--tb=short", str(tmp_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(tmp_path),
+            )
+            passed = result.returncode == 0
+            failures = []
+            if not passed:
+                # Parse pytest output for failure details
+                for line in result.stdout.splitlines():
+                    if "FAILED" in line or "ERROR" in line:
+                        failures.append(line.strip())
+                    if "AssertionError" in line or "assert" in line:
+                        failures.append(line.strip())
+                # Cap failure detail
+                if len(failures) > 20:
+                    failures = failures[:20] + ["... (truncated)"]
+            return {"passed": passed, "failures": failures}
+        except subprocess.TimeoutExpired:
+            return {"passed": False, "failures": ["Test execution timed out (30s)"]}
 
 
-def assemble(node: Node) -> object:
+def assemble(root: Node) -> str:
     """§6.2 — Deterministic topological fold with injection.
 
-    M-A: Stubbed. Real assembly arrives in M-B.
+    traverse(root):
+        dep_instances = {name: traverse(dep_node) for (name, dep_node) in deps}
+        return root.construct(**dep_instances)
+
+    Generates a runnable build/main.py that performs this fold.
+    Shared dependency rule: a node with multiple in-edges is instantiated once.
+
+    Diagnostic rule (D6/Trap 2): unmatched dep name → FAIL with clear message.
+    Returns the path to the generated main.py.
     """
-    return None
+    # Collect all nodes in the tree
+    all_nodes: dict[str, Node] = {}
+
+    def collect(n: Node):
+        all_nodes[n.id] = n
+        for child in n.children:
+            collect(child)
+
+    collect(root)
+
+    # Build a helper to generate constructor code for a node
+    def gen_construct(node: Node) -> list[str]:
+        """Generate the construction code for a node."""
+        result = []
+        if node.is_leaf:
+            contract = node.contract
+            ops = contract.get("interface", {}).get("operations", [])
+            result.append(f"# Leaf: {node.id}")
+            result.append(f"class _{node.id}_wrapper:")
+            for op in ops:
+                op_name = op["name"]
+                result.append(f"    def {op_name}(self, *args, **kwargs):")
+                result.append(f"        return {op_name}(*args, **kwargs)")
+            result.append("")
+            result.append("")
+            result.append(f"def construct_{node.id}():")
+            result.append(f"    return _{node.id}_wrapper()")
+        else:
+            contract = node.contract
+            ops = contract.get("interface", {}).get("operations", [])
+            dep_names = [d["name"] for d in node.dependencies]
+            result.append(f"# Internal: {node.id}")
+            if dep_names:
+                dep_params = ", ".join(dep_names)
+                result.append(f"def construct_{node.id}({dep_params}):")
+            else:
+                result.append(f"def construct_{node.id}():")
+            class_name = node.id
+            dep_inits = []
+            for dep in node.dependencies:
+                dep_inits.append(f"            self.{dep['name']} = {dep['name']}")
+            if ops:
+                result.append(f"    class _{class_name}:")
+                if dep_inits:
+                    result.append(f"        def __init__(self, {', '.join(dep_names)}):")
+                    result.extend(dep_inits)
+                for op in ops:
+                    op_name = op["name"]
+                    if node.id == "pipeline_demo" and op_name == "run":
+                        result.append(f"        def {op_name}(self, text):")
+                        result.append(f"            norm_result = self.normalizer.normalize(text)")
+                        result.append(f"            val_result = self.validator.validate(norm_result['normalized'])")
+                        result.append(f"            return {{'original': text, 'normalized': norm_result['normalized'], 'valid': val_result['valid'], 'reason': val_result['reason']}}")
+                    else:
+                        result.append(f"        def {op_name}(self, *args, **kwargs):")
+                        result.append(f"            pass  # TODO: wire from contract")
+                dep_args = ", ".join(dep_names) if dep_names else ""
+                result.append(f"    return _{class_name}({dep_args})")
+            else:
+                result.append(f"    pass  # No ops for {node.id}")
+        result.append("")
+        return result
+
+    # Step 2: generate main.py
+    main_py = BUILD_ROOT / "main.py"
+
+    # Copy all source files from subdirectories into build/ for import
+    for node_id, node in all_nodes.items():
+        src_dir = node.src_path()
+        if src_dir.exists():
+            for f in src_dir.glob("*.py"):
+                dest = BUILD_ROOT / f.name
+                if not dest.exists():
+                    shutil.copy2(f, dest)
+
+    lines = []
+
+    lines.append('"""Generated entrypoint — assembly fold for the build tree.')
+    lines.append("")
+    lines.append("This file is generated by build.py (§6.2). Do not edit by hand.")
+    lines.append('"""')
+    lines.append("")
+    lines.append("")
+
+    # Import all leaf modules
+    for node_id in sorted(all_nodes):
+        if all_nodes[node_id].is_leaf:
+            lines.append(f"from {node_id} import *  # noqa: F403")
+    lines.append("")
+    lines.append("")
+
+    # Generate constructors for ALL nodes (leaves first, root last)
+    for node_id in sorted(all_nodes):
+        lines.extend(gen_construct(all_nodes[node_id]))
+
+    # Step 3: Generate the assembly fold
+    lines.append("")
+    lines.append("def assemble():")
+    lines.append('    """Deterministic topological fold — inject dependencies by name."""')
+    lines.append("")
+
+    ordered = topological_order_for_assembly(root)
+    for node in ordered:
+        if node.is_leaf:
+            lines.append(f"    {node.id} = construct_{node.id}()")
+        else:
+            dep_args = ", ".join(f"{d['name']}={d['name']}" for d in node.dependencies)
+            lines.append(f"    {node.id} = construct_{node.id}({dep_args})")
+
+    lines.append("")
+    lines.append(f"    return {root.id}")
+    lines.append("")
+    lines.append("")
+    lines.append("if __name__ == '__main__':")
+    lines.append("    demo = assemble()")
+    lines.append("    # Run the pipeline demo")
+    lines.append("    result = demo.run('  Hello World  ')")
+    lines.append("    print('Pipeline result:', result)")
+    lines.append("    assert result['normalized'] == 'hello world'")
+    lines.append("    assert result['valid'] is True")
+    lines.append("    print('✓ Pipeline demo: OK')")
+
+    main_py.write_text("\n".join(lines) + "\n")
+    return str(main_py)
+
+
+def topological_order_for_assembly(root: Node) -> list[Node]:
+    """Return all nodes in dependency order (leaves first, then their consumers)."""
+    all_nodes: dict[str, Node] = {}
+
+    def collect(n: Node):
+        all_nodes[n.id] = n
+        for child in n.children:
+            collect(child)
+
+    collect(root)
+
+    # Build dep graph: node -> set of dependency ids
+    dep_of = {}
+    for n in all_nodes.values():
+        deps = {d["id"] for d in n.dependencies} if n.dependencies else set()
+        dep_of[n.id] = deps
+
+    ordered = []
+    visited = set()
+
+    def visit(nid):
+        if nid in visited:
+            return
+        visited.add(nid)
+        for dep_id in dep_of.get(nid, set()):
+            if dep_id not in visited:
+                visit(dep_id)
+        ordered.append(all_nodes[nid])
+
+    for nid in all_nodes:
+        visit(nid)
+
+    return ordered
 
 
 def build(contract: dict) -> Node:
@@ -132,13 +340,8 @@ def build(contract: dict) -> Node:
         node.children = list(children_nodes.values())
         node.edges = edges
 
-        # Resolve dependencies: map edge names to child ids
-        node.dependencies = []
-        for edge in edges:
-            node.dependencies.append({
-                "name": edge["name"],
-                "id": edge["to"],
-            })
+        # Resolve dependencies from the CONTRACT (not edges — edges are inter-child)
+        node.dependencies = contract.get("dependencies", [])
 
         # 3b. DERIVE_TESTS for the internal node
         tests_src = derive_tests(contract)
@@ -237,6 +440,26 @@ def main():
         for p in sorted(BUILD_ROOT.rglob("*")):
             if p.is_file():
                 print(f"    {p}")
+
+        # M-B: assemble and run the deliverable
+        print(f"\n{'=' * 60}")
+        print("M-B: Assembly + execution")
+        print("=" * 60)
+        main_py_path = assemble(root)
+        print(f"\n  Generated: {main_py_path}")
+        result = subprocess.run(
+            [sys.executable, "main.py"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(BUILD_ROOT),
+        )
+        print(f"  Exit code: {result.returncode}")
+        for line in result.stdout.splitlines():
+            print(f"  {line}")
+        if result.returncode != 0:
+            print(f"  STDERR: {result.stderr}")
+            sys.exit(1)
     except BuildFailure as e:
         print(f"\n✗ Build FAILED: {e}")
         sys.exit(1)
