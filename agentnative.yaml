@@ -1,7 +1,0 @@
-module_root: modules
-source_dir: src
-tests_dir: tests
-budget:
-  max_loc: 5000
-  max_files: 100
-  max_context_tokens: 100000
