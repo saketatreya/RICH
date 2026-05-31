@@ -425,32 +425,8 @@ ROOT_CONTRACT = {
 }
 
 
-def main():
-    """M-A through M-C driver."""
-    import argparse
-    parser = argparse.ArgumentParser(description="RICH Build System")
-    parser.add_argument("--test-leaf", type=str, metavar="MODULE_ID",
-                        help="M-C: test single-leaf IMPLEMENT+DERIVE_TESTS with real LLM")
-    parser.add_argument("--contract", type=str, metavar="DESC",
-                        help="Description for --test-leaf contract")
-    args = parser.parse_args()
-
-    if args.test_leaf:
-        test_single_leaf(args.test_leaf, args.contract or f"Implement {args.test_leaf}")
-        return
-
-    print("=" * 60)
-    print("M-A/B: Canned pipeline demo")
-    print("=" * 60)
-
-
 def test_single_leaf(module_id: str, description: str):
-    """M-C: Test single-leaf generate+verify loop with real LLM.
-
-    Contract: a single module with one op, no deps.
-    PLAN stays stubbed to is_leaf:true.
-    IMPLEMENT and DERIVE_TESTS call real LLM.
-    """
+    """M-C: Test single-leaf generate+verify loop with real LLM."""
     from llm import is_available as llm_available
 
     print("=" * 60)
@@ -480,32 +456,45 @@ def test_single_leaf(module_id: str, description: str):
     if not llm_available():
         print("\n  ⚠ OPENROUTER_API_KEY not set — using canned fallback")
         print("  Set the env var and re-run to test real LLM calls.\n")
-        contract["id"] = "normalizer"  # Use canned normalizer as demo
+        contract["id"] = "normalizer"
         node = build(contract)
         print(f"  ✓ Canned fallback: {node.id} verified")
         return
 
     print(f"\n  Model: {__import__('llm').RICH_MODEL}")
-    print(f"  Contract: {module_id}")
     print(f"  K_IMPL: {K_IMPL}")
 
     if BUILD_ROOT.exists():
         shutil.rmtree(BUILD_ROOT)
     BUILD_ROOT.mkdir()
 
-    from node import save_contract
-    node = Node(id=module_id, contract=contract, is_leaf=True)
-    save_contract(node)
-
     try:
         node = build(contract)
-        print(f"\n  ✓ M-C: {module_id} built and verified via LLM!")
+        print(f"\n  ✓ {module_id} built and verified via LLM!")
         print(f"  Source: {node.src_path()}/{module_id}.py")
         print(f"  Tests:  {node.tests_path()}/test_{module_id}.py")
     except BuildFailure as e:
-        print(f"\n  ✗ M-C: {module_id} FAILED after {K_IMPL} attempts")
-        print(f"  Reason: {e.reason}")
+        print(f"\n  ✗ {module_id} FAILED after {K_IMPL} attempts: {e.reason}")
         sys.exit(1)
+
+
+def main():
+    """M-A through M-C driver."""
+    import argparse
+    parser = argparse.ArgumentParser(description="RICH Build System")
+    parser.add_argument("--test-leaf", type=str, metavar="MODULE_ID",
+                        help="M-C: test single-leaf IMPLEMENT+DERIVE_TESTS with real LLM")
+    parser.add_argument("--contract", type=str, metavar="DESC",
+                        help="Description for --test-leaf contract")
+    args = parser.parse_args()
+
+    if args.test_leaf:
+        test_single_leaf(args.test_leaf, args.contract or f"Implement {args.test_leaf}")
+        return
+
+    print("=" * 60)
+    print("M-A/B: Canned pipeline demo")
+    print("=" * 60)
 
     # Clean build dir
     if BUILD_ROOT.exists():

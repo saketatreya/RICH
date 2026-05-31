@@ -1,5 +1,5 @@
 id: normalizer
-description: Reverse a string and return the result
+description: Convert a string to uppercase
 interface:
   operations:
   - name: run
@@ -11,4 +11,4 @@ interface:
 dependencies: []
 behavior:
 - id: basic
-  prose: Reverse a string and return the result
+  prose: Convert a string to uppercase

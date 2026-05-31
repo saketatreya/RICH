@@ -16,14 +16,24 @@ from llm import (
 )
 
 
-# ── PLAN (stubbed until M-D) ───────────────────────────────────────
+# ── PLAN (real LLM from M-D, leaf-only) ────────────────────────────
+
+PLAN_SYSTEM_LEAF_ONLY = """You are an architect for a recursive agent build system called RICH.
+Your job: given a module CONTRACT, decide if it can be implemented directly as a leaf module.
+
+CRITICAL RESTRICTION: You may ONLY return {"is_leaf": true}. Decomposition is disabled.
+Do NOT return children or edges under any circumstances. If you think the module
+should be decomposed, return {"is_leaf": true} anyway — this is a leaf-only mode.
+
+Output format: a JSON object with a single key "is_leaf" set to true.
+Example: {"is_leaf": true}"""
+
 
 def plan(contract: dict) -> dict:
     """PLAN(contract) → decision.
 
-    M-A/M-B/M-C: Always returns is_leaf:true for non-canned contracts.
-    Canned decomposition for the pipeline_demo root.
-    M-D: Becomes a real LLM call restricted to is_leaf:true.
+    M-A/M-B/M-C: Canned decomposition for pipeline_demo; is_leaf:true for others.
+    M-D: Real LLM call restricted to is_leaf:true.
     M-E: Full decomposition enabled.
     """
     node_id = contract["id"]
@@ -32,7 +42,30 @@ def plan(contract: dict) -> dict:
     if node_id == "pipeline_demo":
         return CANNED_PIPELINE_DEMO_DECISION
 
-    # Everything else: leaf (for M-C single-leaf testing)
+    # Try real LLM PLAN if available
+    if is_available():
+        contract_yaml = yaml.dump(contract, default_flow_style=False, sort_keys=False)
+        user_prompt = f"""CONTRACT:
+```yaml
+{contract_yaml}
+```
+
+Can this module be implemented directly as a leaf?"""
+
+        try:
+            raw = call_with_retry(
+                system_prompt=PLAN_SYSTEM_LEAF_ONLY,
+                user_prompt=user_prompt,
+                temperature=0.05,
+                max_tokens=256,
+            )
+            decision = parse_json_response(raw, context=f"PLAN({node_id})")
+            # Force leaf-only regardless of what LLM returns
+            return {"is_leaf": True}
+        except (LLMNotConfigured, LLMParseError) as e:
+            print(f"  [plan] LLM failed for {node_id}, falling back to leaf: {e}")
+
+    # Fallback: everything is a leaf
     return {"is_leaf": True}
 
 
