@@ -1,0 +1,14 @@
+id: normalizer
+description: 'Normalize a string: strip whitespace, lowercase'
+interface:
+  operations:
+  - name: normalize
+    inputs:
+      text: string
+    outputs:
+      normalized: string
+    errors: []
+dependencies: []
+behavior:
+- id: strip_and_lower
+  prose: Normalized text must have no leading/trailing whitespace and be lowercase
