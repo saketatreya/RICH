@@ -63,6 +63,8 @@ def plan_canned(contract: dict) -> dict:
     node_id = contract["id"]
     if node_id == "pipeline_demo":
         return CANNED_PIPELINE_DEMO_DECISION
+    if node_id == "email_checker":
+        return CANNED_FAN_IN_DECISION
     return {"is_leaf": True}
 
 
@@ -388,6 +390,73 @@ CANNED_PIPELINE_DEMO_DECISION = {
     "edges": [{"from": "normalizer", "to": "validator", "name": "normalized"}],
 }
 
+
+# M-F: Fan-in demo — two children share one dependency
+CANNED_FAN_IN_DECISION = {
+    "is_leaf": False,
+    "children": [
+        {
+            "id": "regex_engine",
+            "description": "Provide regex pattern matching: check if a string matches a given pattern",
+            "interface": {
+                "operations": [
+                    {
+                        "name": "matches",
+                        "inputs": {"text": "string", "pattern": "string"},
+                        "outputs": {"ok": "bool", "match": "string"},
+                        "errors": [],
+                    }
+                ]
+            },
+            "dependencies": [],
+            "behavior": [
+                {"id": "match_or_not", "prose": "Returns ok=true and the matched text if pattern matches, ok=false and empty match otherwise"},
+            ],
+        },
+        {
+            "id": "format_checker",
+            "description": "Check if an email has valid format (contains @, has domain part)",
+            "interface": {
+                "operations": [
+                    {
+                        "name": "check_format",
+                        "inputs": {"email": "string"},
+                        "outputs": {"valid": "bool"},
+                        "errors": [],
+                    }
+                ]
+            },
+            "dependencies": [{"name": "regex", "id": "regex_engine"}],
+            "behavior": [
+                {"id": "has_at", "prose": "Email must contain exactly one @ sign"},
+                {"id": "has_domain", "prose": "Domain part after @ must be non-empty"},
+            ],
+        },
+        {
+            "id": "domain_checker",
+            "description": "Check if email domain is a common provider (gmail, yahoo, outlook)",
+            "interface": {
+                "operations": [
+                    {
+                        "name": "is_common",
+                        "inputs": {"email": "string"},
+                        "outputs": {"common": "bool", "domain": "string"},
+                        "errors": [],
+                    }
+                ]
+            },
+            "dependencies": [{"name": "regex", "id": "regex_engine"}],
+            "behavior": [
+                {"id": "common_providers", "prose": "Returns common=true for gmail.com, yahoo.com, outlook.com domains"},
+            ],
+        },
+    ],
+    "edges": [
+        {"from": "regex_engine", "to": "format_checker", "name": "regex"},
+        {"from": "regex_engine", "to": "domain_checker", "name": "regex"},
+    ],
+}
+
 CANNED_IMPLS = {
     "normalizer": '''"""Normalize a string: strip whitespace, lowercase."""
 
@@ -429,6 +498,65 @@ class PipelineDemo:
             "normalized": norm_result["normalized"],
             "valid": val_result["valid"],
             "reason": val_result["reason"],
+        }
+''',
+    # M-F: Fan-in canned implementations
+    "regex_engine": '''"""Regex engine: pattern matching via Python's re module."""
+
+import re
+
+
+def matches(text: str, pattern: str) -> dict:
+    """Check if text matches pattern. Returns ok=True and the match if found."""
+    m = re.search(pattern, text)
+    if m:
+        return {"ok": True, "match": m.group()}
+    return {"ok": False, "match": ""}
+''',
+    "format_checker": '''"""Format checker: validate email format using injected regex engine."""
+
+
+class FormatChecker:
+    def __init__(self, regex):
+        self.regex = regex
+
+    def check_format(self, email: str) -> dict:
+        """Check email has valid format: contains @, has domain part."""
+        result = self.regex.matches(email, r"^[^@]+@[^@]+\\.[^@]+$")
+        return {"valid": result["ok"]}
+''',
+    "domain_checker": '''"""Domain checker: check if email domain is common using injected regex engine."""
+
+
+class DomainChecker:
+    def __init__(self, regex):
+        self.regex = regex
+
+    def is_common(self, email: str) -> dict:
+        """Check if email domain is gmail/yahoo/outlook."""
+        result = self.regex.matches(email, r"@(gmail|yahoo|outlook)\\.")
+        if result["ok"]:
+            return {"common": True, "domain": result["match"].lstrip("@").rstrip(".")}
+        return {"common": False, "domain": ""}
+''',
+    "email_checker": '''"""Email checker: compose format_checker and domain_checker over shared regex_engine."""
+
+
+class EmailChecker:
+    def __init__(self, regex_engine, format_checker, domain_checker):
+        self.regex_engine = regex_engine
+        self.format_checker = format_checker
+        self.domain_checker = domain_checker
+
+    def check(self, email: str) -> dict:
+        """Check email format and domain. Both checkers share the same regex engine."""
+        fmt = self.format_checker.check_format(email)
+        dom = self.domain_checker.is_common(email)
+        return {
+            "email": email,
+            "valid_format": fmt["valid"],
+            "common_domain": dom["common"],
+            "domain": dom["domain"],
         }
 ''',
 }
@@ -508,5 +636,107 @@ def test_pipeline_happy_path():
     assert result["original"] == "  Hello World  "
     assert result["normalized"] == "hello world"
     assert result["valid"] is True
+''',
+    "regex_engine": '''"""Tests for regex_engine."""
+
+from regex_engine import matches
+
+
+def test_matches_found():
+    result = matches(text="hello world", pattern=r"hello")
+    assert result["ok"] is True
+    assert result["match"] == "hello"
+
+
+def test_matches_not_found():
+    result = matches(text="hello world", pattern=r"xyz")
+    assert result["ok"] is False
+    assert result["match"] == ""
+
+
+def test_matches_email():
+    result = matches(text="user@gmail.com", pattern=r"@gmail\\.")
+    assert result["ok"] is True
+''',
+    "format_checker": '''"""Tests for format_checker — uses fake regex engine."""
+
+from format_checker import FormatChecker
+
+
+class FakeRegex:
+    def matches(self, text, pattern):
+        if "@" in text and "." in text.split("@")[-1]:
+            return {"ok": True, "match": text}
+        return {"ok": False, "match": ""}
+
+
+def test_valid_email():
+    checker = FormatChecker(FakeRegex())
+    result = checker.check_format("user@gmail.com")
+    assert result["valid"] is True
+
+
+def test_invalid_email_no_at():
+    checker = FormatChecker(FakeRegex())
+    result = checker.check_format("usergmail.com")
+    assert result["valid"] is False
+''',
+    "domain_checker": '''"""Tests for domain_checker — uses fake regex engine."""
+
+from domain_checker import DomainChecker
+
+
+class FakeRegex:
+    def matches(self, text, pattern):
+        if "gmail" in text:
+            return {"ok": True, "match": "@gmail."}
+        return {"ok": False, "match": ""}
+
+
+def test_common_domain():
+    checker = DomainChecker(FakeRegex())
+    result = checker.is_common("user@gmail.com")
+    assert result["common"] is True
+    assert result["domain"] == "gmail"
+
+
+def test_uncommon_domain():
+    checker = DomainChecker(FakeRegex())
+    result = checker.is_common("user@company.com")
+    assert result["common"] is False
+''',
+    "email_checker": '''"""Tests for email_checker — integration with shared regex_engine."""
+
+from email_checker import EmailChecker
+from regex_engine import matches as real_matches
+
+
+class RealRegex:
+    def matches(self, text, pattern):
+        return real_matches(text, pattern)
+
+
+class FakeFormatChecker:
+    def __init__(self, regex):
+        self.regex = regex
+    def check_format(self, email):
+        r = self.regex.matches(email, r"@")
+        return {"valid": r["ok"]}
+
+
+class FakeDomainChecker:
+    def __init__(self, regex):
+        self.regex = regex
+    def is_common(self, email):
+        r = self.regex.matches(email, r"@gmail")
+        return {"common": r["ok"], "domain": "gmail" if r["ok"] else ""}
+
+
+def test_valid_gmail():
+    regex = RealRegex()
+    checker = EmailChecker(regex, FakeFormatChecker(regex), FakeDomainChecker(regex))
+    result = checker.check("user@gmail.com")
+    assert result["valid_format"] is True
+    assert result["common_domain"] is True
 ''',
 }

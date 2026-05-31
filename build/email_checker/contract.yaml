@@ -1,0 +1,27 @@
+id: email_checker
+description: Check email format validity and whether domain is a common provider,
+  using a shared regex engine
+interface:
+  operations:
+  - name: check
+    inputs:
+      email: string
+    outputs:
+      email: string
+      valid_format: bool
+      common_domain: bool
+      domain: string
+    errors: []
+dependencies:
+- name: regex_engine
+  id: regex_engine
+- name: format_checker
+  id: format_checker
+- name: domain_checker
+  id: domain_checker
+behavior:
+- id: share_regex
+  prose: Both format_checker and domain_checker share the same regex_engine instance
+- id: valid_detection
+  prose: Returns valid_format=true for properly formatted emails, common_domain=true
+    for gmail/yahoo/outlook

@@ -1,0 +1,6 @@
+- name: regex_engine
+  id: regex_engine
+- name: format_checker
+  id: format_checker
+- name: domain_checker
+  id: domain_checker

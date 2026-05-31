@@ -1,0 +1,17 @@
+id: regex_engine
+description: 'Provide regex pattern matching: check if a string matches a given pattern'
+interface:
+  operations:
+  - name: matches
+    inputs:
+      text: string
+      pattern: string
+    outputs:
+      ok: bool
+      match: string
+    errors: []
+dependencies: []
+behavior:
+- id: match_or_not
+  prose: Returns ok=true and the matched text if pattern matches, ok=false and empty
+    match otherwise

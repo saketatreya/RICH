@@ -235,12 +235,14 @@ def assemble(root: Node) -> str:
     lines.append("")
     lines.append("if __name__ == '__main__':")
     lines.append("    demo = assemble()")
-    lines.append("    # Run the pipeline demo")
-    lines.append("    result = demo.run('  Hello World  ')")
-    lines.append("    print('Pipeline result:', result)")
-    lines.append("    assert result['normalized'] == 'hello world'")
-    lines.append("    assert result['valid'] is True")
-    lines.append("    print('✓ Pipeline demo: OK')")
+    root_ops = root.contract.get("interface", {}).get("operations", [])
+    if root_ops:
+        op_name = root_ops[0]["name"]
+        lines.append(f"    result = demo.{op_name}('test input')")
+        lines.append(f"    print('{op_name} result:', result)")
+    else:
+        lines.append("    print('Assembled:', type(demo).__name__)")
+    lines.append("    print('✓ Deliverable: OK')")
 
     main_py.write_text("\n".join(lines) + "\n")
     return str(main_py)
@@ -304,6 +306,8 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
     # Also save raw PLAN output so decision.json reflects what PLAN authored
     if not node.is_leaf:
         _save_raw_decision(node, decision)
+    # Resolve dependencies from contract (for both leaf and internal)
+    node.dependencies = contract.get("dependencies", [])
     save_status(node, "planned")
 
     if node.is_leaf:
@@ -443,6 +447,97 @@ ROOT_CONTRACT = {
         },
     ],
 }
+
+
+# M-F: Fan-in demo root contract
+FAN_IN_ROOT_CONTRACT = {
+    "id": "email_checker",
+    "description": "Check email format validity and whether domain is a common provider, using a shared regex engine",
+    "interface": {
+        "operations": [
+            {
+                "name": "check",
+                "inputs": {"email": "string"},
+                "outputs": {"email": "string", "valid_format": "bool", "common_domain": "bool", "domain": "string"},
+                "errors": [],
+            }
+        ]
+    },
+    "dependencies": [
+        {"name": "regex_engine", "id": "regex_engine"},
+        {"name": "format_checker", "id": "format_checker"},
+        {"name": "domain_checker", "id": "domain_checker"},
+    ],
+    "behavior": [
+        {"id": "share_regex", "prose": "Both format_checker and domain_checker share the same regex_engine instance"},
+        {"id": "valid_detection", "prose": "Returns valid_format=true for properly formatted emails, common_domain=true for gmail/yahoo/outlook"},
+    ],
+}
+
+
+def test_fan_in():
+    """M-F: Test shared dependency (fan-in) with canned data.
+
+    Email checker: format_checker and domain_checker both depend on regex_engine.
+    Assembly must instantiate regex_engine ONCE and inject the same instance into both.
+    """
+    print("=" * 60)
+    print("M-F: Fan-in (shared dependency) test")
+    print("     Two children share one regex_engine")
+    print("=" * 60)
+
+    if BUILD_ROOT.exists():
+        shutil.rmtree(BUILD_ROOT)
+    BUILD_ROOT.mkdir()
+
+    try:
+        root = build(FAN_IN_ROOT_CONTRACT, use_canned=True)
+        print(f"\n✓ Fan-in build succeeded!")
+        print(f"  Root: {root.id}")
+        print(f"  Children: {[c.id for c in root.children]}")
+        print(f"  Edges: {root.edges}")
+
+        # Verify regex_engine is a dependency of both format_checker and domain_checker
+        regex_shared = [
+            c.id for c in root.children
+            if any(d["id"] == "regex_engine" for d in c.dependencies)
+        ]
+        print(f"  Both depend on regex_engine: {regex_shared}")
+        assert len(regex_shared) == 2, f"Expected 2 children sharing regex_engine, got {regex_shared}"
+
+        # Assemble and verify shared instantiation
+        print(f"\n{'=' * 60}")
+        print("Assembly (shared dependency check)")
+        print("=" * 60)
+        main_py_path = assemble(root)
+        print(f"  Generated: {main_py_path}")
+
+        # Verify main.py has only ONE construct_regex_engine() CALL (not def)
+        main_py_content = (BUILD_ROOT / "main.py").read_text()
+        regex_constructs = main_py_content.count("= construct_regex_engine()")
+        print(f"  construct_regex_engine() calls in main.py: {regex_constructs}")
+        assert regex_constructs == 1, f"Expected 1 shared instantiation, got {regex_constructs}"
+
+        # Run the deliverable
+        result = subprocess.run(
+            [sys.executable, "main.py"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(BUILD_ROOT),
+        )
+        if result.returncode == 0:
+            print(f"  ✓ Deliverable runs successfully")
+            for line in result.stdout.splitlines():
+                print(f"    {line}")
+        else:
+            print(f"  ✗ Deliverable failed (exit {result.returncode})")
+            print(f"  STDERR: {result.stderr[:500]}")
+            sys.exit(1)
+
+    except BuildFailure as e:
+        print(f"\n✗ Fan-in build FAILED: {e}")
+        sys.exit(1)
 
 
 def test_single_leaf(module_id: str, description: str):
@@ -608,6 +703,8 @@ def main():
                         help="M-E: test decomposition with real LLM (pipeline goal)")
     parser.add_argument("--contract", type=str, metavar="DESC",
                         help="Description for --test-leaf or --decompose contract")
+    parser.add_argument("--fan-in", action="store_true",
+                        help="M-F: test shared dependency (fan-in) with canned data")
     args = parser.parse_args()
 
     if args.test_leaf:
@@ -616,6 +713,10 @@ def main():
 
     if args.decompose:
         test_decompose(args.decompose, args.contract or args.decompose)
+        return
+
+    if args.fan_in:
+        test_fan_in()
         return
 
     print("=" * 60)
