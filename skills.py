@@ -16,7 +16,7 @@ from llm import (
 )
 
 
-# ── PLAN (real LLM from M-D, leaf-only) ────────────────────────────
+# ── PLAN (real LLM from M-D, decomposition from M-E) ───────────────
 
 PLAN_SYSTEM_LEAF_ONLY = """You are an architect for a recursive agent build system called RICH.
 Your job: given a module CONTRACT, decide if it can be implemented directly as a leaf module.
@@ -28,45 +28,146 @@ should be decomposed, return {"is_leaf": true} anyway — this is a leaf-only mo
 Output format: a JSON object with a single key "is_leaf" set to true.
 Example: {"is_leaf": true}"""
 
+PLAN_SYSTEM_DECOMPOSE = """You are an architect for a recursive agent build system called RICH.
+Your job: given a ROOT CONTRACT, decompose it into child modules if appropriate,
+or decide it's simple enough to implement directly as a leaf.
 
-def plan(contract: dict) -> dict:
+DECISION RULES:
+- If the contract is simple (1-2 ops, no complex logic), return leaf.
+- If the contract describes a multi-step workflow or pipeline, decompose into children.
+- Each child gets its OWN contract that YOU author — the child must be independently implementable.
+- Children must form a DAG (no cycles). Edges declare which child depends on which.
+- DEPTH LIMIT: max 2 levels (root → children). Children must be leaves.
+- Choose clean, descriptive child ids (lowercase, underscore-separated).
+- Each child's contract must include: id, description, interface (operations with typed inputs/outputs), dependencies, behavior (prose).
+
+OUTPUT FORMAT (JSON):
+For leaf: {"is_leaf": true}
+For decompose: {
+  "is_leaf": false,
+  "children": [
+    {
+      "id": "<child_id>",
+      "description": "<what it does>",
+      "interface": {"operations": [{"name": "<op>", "inputs": {...}, "outputs": {...}, "errors": []}]},
+      "dependencies": [],
+      "behavior": [{"id": "<prop_id>", "prose": "<what must hold>"}]
+    }
+  ],
+  "edges": [{"from": "<child_id>", "to": "<child_id>", "name": "<inject_param_name>"}]
+}"""
+
+
+def plan_canned(contract: dict) -> dict:
+    """Always-returns-canned PLAN for the pipeline demo."""
+    node_id = contract["id"]
+    if node_id == "pipeline_demo":
+        return CANNED_PIPELINE_DEMO_DECISION
+    return {"is_leaf": True}
+
+
+def plan(contract: dict, allow_decompose: bool = False) -> dict:
     """PLAN(contract) → decision.
 
     M-A/M-B/M-C: Canned decomposition for pipeline_demo; is_leaf:true for others.
     M-D: Real LLM call restricted to is_leaf:true.
-    M-E: Full decomposition enabled.
+    M-E: allow_decompose=True enables full decomposition (depth 1, pipeline-only).
     """
     node_id = contract["id"]
 
-    # Canned: pipeline_demo decomposes into normalizer + validator
+    # Canned: pipeline_demo always uses canned decomposition
     if node_id == "pipeline_demo":
         return CANNED_PIPELINE_DEMO_DECISION
 
     # Try real LLM PLAN if available
     if is_available():
+        system = PLAN_SYSTEM_DECOMPOSE if allow_decompose else PLAN_SYSTEM_LEAF_ONLY
         contract_yaml = yaml.dump(contract, default_flow_style=False, sort_keys=False)
         user_prompt = f"""CONTRACT:
 ```yaml
 {contract_yaml}
 ```
 
-Can this module be implemented directly as a leaf?"""
+Decide: leaf or decompose?"""
 
         try:
             raw = call_with_retry(
-                system_prompt=PLAN_SYSTEM_LEAF_ONLY,
+                system_prompt=system,
                 user_prompt=user_prompt,
-                temperature=0.05,
-                max_tokens=256,
+                temperature=0.15 if allow_decompose else 0.05,
+                max_tokens=2048 if allow_decompose else 256,
             )
             decision = parse_json_response(raw, context=f"PLAN({node_id})")
-            # Force leaf-only regardless of what LLM returns
+
+            if not allow_decompose:
+                return {"is_leaf": True}
+
+            # Validate decomposition
+            if not decision.get("is_leaf", True):
+                children = decision.get("children", [])
+                edges = decision.get("edges", [])
+                # Validate DAG (no cycles)
+                _validate_dag(children, edges, node_id)
+                # Validate child contracts have required fields
+                _validate_child_contracts(children, node_id)
+                return decision
+
             return {"is_leaf": True}
+
         except (LLMNotConfigured, LLMParseError) as e:
             print(f"  [plan] LLM failed for {node_id}, falling back to leaf: {e}")
+        except ValueError as e:
+            print(f"  [plan] Validation failed for {node_id}: {e}")
+            # Fall back to leaf on validation failure
+            return {"is_leaf": True}
 
     # Fallback: everything is a leaf
     return {"is_leaf": True}
+
+
+def _validate_dag(children: list[dict], edges: list[dict], parent_id: str):
+    """Validate that children+edges form a DAG (no cycles)."""
+    child_ids = {c["id"] for c in children}
+    # Build adjacency
+    dep_of = {cid: set() for cid in child_ids}
+    for edge in edges:
+        frm = edge.get("from", "")
+        to = edge.get("to", "")
+        if frm not in child_ids:
+            raise ValueError(f"Edge references unknown child '{frm}' in {parent_id}")
+        if to not in child_ids:
+            raise ValueError(f"Edge references unknown child '{to}' in {parent_id}")
+        dep_of[to].add(frm)
+
+    # Detect cycles via DFS
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {cid: WHITE for cid in child_ids}
+
+    def dfs(cid):
+        color[cid] = GRAY
+        for dep in dep_of.get(cid, set()):
+            if color[dep] == GRAY:
+                raise ValueError(f"Cycle detected: {cid} → {dep} in decomposition of {parent_id}")
+            if color[dep] == WHITE:
+                dfs(dep)
+        color[cid] = BLACK
+
+    for cid in child_ids:
+        if color[cid] == WHITE:
+            dfs(cid)
+
+
+def _validate_child_contracts(children: list[dict], parent_id: str):
+    """Validate each child contract has required fields."""
+    required = ["id", "description", "interface"]
+    for child in children:
+        for field in required:
+            if field not in child:
+                raise ValueError(f"Child contract missing '{field}' in decomposition of {parent_id}")
+        iface = child.get("interface", {})
+        ops = iface.get("operations", [])
+        if not ops:
+            raise ValueError(f"Child '{child['id']}' has no operations in decomposition of {parent_id}")
 
 
 # ── IMPLEMENT (real LLM from M-C) ──────────────────────────────────
@@ -76,14 +177,35 @@ Your job: given a module CONTRACT, produce the Python source code that satisfies
 
 RULES:
 1. Return ONLY valid Python source code. No markdown fences, no prose.
-2. The module must expose every operation named in contract.interface.operations with matching signatures.
+2. CRITICAL: Export each operation as a TOP-LEVEL FUNCTION matching the operation name exactly.
+   Do NOT wrap operations in classes. The test harness imports functions directly.
+   Example: def normalize(text: str) -> dict:
+                return {"normalized": text.strip().lower()}
 3. Each operation returns a dict matching its declared outputs.
 4. Dependencies arrive as injected constructor/factory parameters — NEVER import them.
-5. If dep_contracts is non-empty, receive each dependency as a named parameter.
-6. For pipeline nodes (pipeline=True), compose the dependencies as a sequential pipeline.
+   PIPELINE MODE ONLY (not leaf): use a class with __init__ receiving deps.
+   Example: class MyPipeline:
+                def __init__(self, dep_a, dep_b):
+                    self.dep_a = dep_a
+                    self.dep_b = dep_b
+                def run(self, text):
+                    r1 = self.dep_a.op(text)
+                    r2 = self.dep_b.op(r1["output_key"])
+                    return {"result": r2["output_key"]}
+5. PIPELINE MODE: You MUST compose the injected dependencies sequentially.
+   Call dep1's operation, pass its output dict to dep2, etc. Do NOT reimplement.
+6. LEAF MODE: Export plain functions. No classes needed.
 7. If you receive failure output from a prior attempt, fix the bugs.
 
 Output format: a JSON object with a single key "source" containing the Python code as a string."""
+
+
+def implement_canned(contract: dict, dep_contracts=None, pipeline=False, prior_failures=None) -> str:
+    """Always-returns-canned IMPLEMENT."""
+    node_id = contract["id"]
+    if node_id in CANNED_IMPLS:
+        return CANNED_IMPLS[node_id]
+    return ""
 
 
 def implement(contract: dict, dep_contracts: dict | None = None,
@@ -157,11 +279,20 @@ RULES:
 1. Return ONLY valid Python pytest source. No markdown fences, no prose.
 2. Import the module by name (from <module_id> import <op_name>).
 3. Test every operation in contract.interface.operations.
-4. For each operation: test normal inputs, edge cases, and declared error conditions.
-5. Tests are consumer-driven — they encode what the consumer needs from this module.
-6. Use descriptive test names: test_<op>_<scenario>.
+4. CRITICAL: Operations return a DICT with keys matching the declared outputs. Extract the right key before asserting. Example: result = op(args); assert result["output_key"] == expected
+5. For each operation: test normal inputs, edge cases, and declared error conditions.
+6. Tests are consumer-driven — they encode what the consumer needs from this module.
+7. Use descriptive test names: test_<op>_<scenario>.
 
 Output format: a JSON object with a single key "tests" containing the pytest code as a string."""
+
+
+def derive_tests_canned(contract: dict) -> str:
+    """Always-returns-canned DERIVE_TESTS."""
+    node_id = contract["id"]
+    if node_id in CANNED_TESTS:
+        return CANNED_TESTS[node_id]
+    return ""
 
 
 def derive_tests(contract: dict) -> str:

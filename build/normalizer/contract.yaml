@@ -1,14 +1,14 @@
 id: normalizer
-description: Convert a string to uppercase
+description: 'Normalize a string: strip whitespace, lowercase'
 interface:
   operations:
-  - name: run
+  - name: normalize
     inputs:
       text: string
     outputs:
-      result: string
+      normalized: string
     errors: []
 dependencies: []
 behavior:
-- id: basic
-  prose: Convert a string to uppercase
+- id: strip_and_lower
+  prose: Normalized text must have no leading/trailing whitespace and be lowercase

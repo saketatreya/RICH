@@ -41,7 +41,7 @@ from node import (
     save_status,
     topological_order,
 )
-from skills import plan, implement, derive_tests
+from skills import plan, implement, derive_tests, plan_canned, implement_canned, derive_tests_canned
 
 
 K_IMPL = 3
@@ -281,13 +281,16 @@ def topological_order_for_assembly(root: Node) -> list[Node]:
     return ordered
 
 
-def build(contract: dict) -> Node:
+def build(contract: dict, allow_decompose: bool = False, use_canned: bool = False) -> Node:
     """The core recursive procedure (§4).
 
     Takes a contract, returns a verified Node or raises BuildFailure.
     """
     # 1. PLAN
-    decision = plan(contract)
+    if use_canned:
+        decision = plan_canned(contract)
+    else:
+        decision = plan(contract, allow_decompose=allow_decompose)
     node_id = contract["id"]
 
     # Create node
@@ -298,11 +301,17 @@ def build(contract: dict) -> Node:
     )
     save_contract(node)
     save_decision(node)
+    # Also save raw PLAN output so decision.json reflects what PLAN authored
+    if not node.is_leaf:
+        _save_raw_decision(node, decision)
     save_status(node, "planned")
 
     if node.is_leaf:
         # 2a. DERIVE_TESTS
-        tests_src = derive_tests(contract)
+        if use_canned:
+            tests_src = derive_tests_canned(contract)
+        else:
+            tests_src = derive_tests(contract)
         node.tests_path().mkdir(parents=True, exist_ok=True)
         test_file = node.tests_path() / f"test_{node_id}.py"
         test_file.write_text(tests_src)
@@ -310,8 +319,12 @@ def build(contract: dict) -> Node:
         # 3a. IMPLEMENT + verify loop
         failures = []
         for attempt in range(1, K_IMPL + 1):
-            src = implement(contract, dep_contracts=None, pipeline=False,
-                          prior_failures=failures if failures else None)
+            if use_canned:
+                from skills import implement_canned as _impl_fn
+                src = _impl_fn(contract, dep_contracts=None, pipeline=False)
+            else:
+                src = implement(contract, dep_contracts=None, pipeline=False,
+                              prior_failures=failures if failures else None)
             node.src_path().mkdir(parents=True, exist_ok=True)
             src_file = node.src_path() / f"{node_id}.py"
             src_file.write_text(src)
@@ -334,10 +347,10 @@ def build(contract: dict) -> Node:
         children_contracts = decision["children"]
         edges = decision.get("edges", [])
 
-        # Build child nodes
+        # Build child nodes — children are always leaves in M-E (depth limit 1)
         children_nodes = {}
         for child_contract in children_contracts:
-            child_node = build(child_contract)
+            child_node = build(child_contract, allow_decompose=False, use_canned=use_canned)
             children_nodes[child_contract["id"]] = child_node
 
         node.children = list(children_nodes.values())
@@ -347,7 +360,10 @@ def build(contract: dict) -> Node:
         node.dependencies = contract.get("dependencies", [])
 
         # 3b. DERIVE_TESTS for the internal node
-        tests_src = derive_tests(contract)
+        if use_canned:
+            tests_src = derive_tests_canned(contract)
+        else:
+            tests_src = derive_tests(contract)
         node.tests_path().mkdir(parents=True, exist_ok=True)
         test_file = node.tests_path() / f"test_{node_id}.py"
         test_file.write_text(tests_src)
@@ -361,8 +377,12 @@ def build(contract: dict) -> Node:
 
         failures = []
         for attempt in range(1, K_WIRE + 1):
-            src = implement(contract, dep_contracts=dep_contracts, pipeline=True,
-                          prior_failures=failures if failures else None)
+            if use_canned:
+                from skills import implement_canned as _impl_fn
+                src = _impl_fn(contract, dep_contracts=dep_contracts, pipeline=True)
+            else:
+                src = implement(contract, dep_contracts=dep_contracts, pipeline=True,
+                              prior_failures=failures if failures else None)
             node.src_path().mkdir(parents=True, exist_ok=True)
             src_file = node.src_path() / f"{node_id}.py"
             src_file.write_text(src)
@@ -478,18 +498,124 @@ def test_single_leaf(module_id: str, description: str):
         sys.exit(1)
 
 
+def test_decompose(desc: str, goal: str):
+    """M-E: Test full decomposition pipeline with real LLM.
+
+    Creates a root contract from the goal description.
+    PLAN can decompose into children.
+    IMPLEMENT generates all modules.
+    DERIVE_TESTS generates all tests.
+    Assembly produces runnable deliverable.
+    """
+    from llm import is_available as llm_available
+
+    print("=" * 60)
+    print(f"M-E: Decomposition test")
+    print(f"     Goal: {goal}")
+    print("=" * 60)
+
+    if not llm_available():
+        print("\n  ⚠ OPENROUTER_API_KEY not set — cannot test decomposition")
+        print("  Set the env var and re-run.")
+        sys.exit(1)
+
+    # Build root contract from goal
+    root_id = desc.lower().replace(" ", "_")[:32]
+    root_contract = {
+        "id": root_id,
+        "description": goal,
+        "interface": {
+            "operations": [
+                {
+                    "name": "run",
+                    "inputs": {"input_text": "string"},
+                    "outputs": {"result": "string"},
+                    "errors": [],
+                }
+            ]
+        },
+        "dependencies": [],
+        "behavior": [
+            {"id": "goal", "prose": goal},
+        ],
+    }
+
+    print(f"\n  Model: {__import__('llm').RICH_MODEL}")
+    print(f"  Root ID: {root_id}")
+    print(f"  K_IMPL: {K_IMPL}, K_WIRE: {K_WIRE}")
+    print(f"  Allowing decomposition: YES")
+    print()
+
+    if BUILD_ROOT.exists():
+        shutil.rmtree(BUILD_ROOT)
+    BUILD_ROOT.mkdir()
+
+    try:
+        root = build(root_contract, allow_decompose=True)
+
+        if root.is_leaf:
+            print(f"\n  ✓ Built as single leaf module")
+            print(f"  Source: {root.src_path()}/{root_id}.py")
+            print(f"  Tests:  {root.tests_path()}/test_{root_id}.py")
+        else:
+            print(f"\n  ✓ Decomposed into {len(root.children)} children:")
+            for child in root.children:
+                print(f"    - {child.id} (leaf={child.is_leaf})")
+            print(f"  Root wiring: {root.src_path()}/{root_id}.py")
+
+        # Assemble and run
+        print(f"\n{'=' * 60}")
+        print("Assembly + execution")
+        print("=" * 60)
+        main_py_path = assemble(root)
+        print(f"  Generated: {main_py_path}")
+
+        result = subprocess.run(
+            [sys.executable, "main.py"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=str(BUILD_ROOT),
+        )
+        if result.returncode == 0:
+            print(f"  ✓ Deliverable runs successfully")
+            for line in result.stdout.splitlines():
+                print(f"    {line}")
+        else:
+            print(f"  ✗ Deliverable failed (exit {result.returncode})")
+            print(f"  STDERR: {result.stderr[:500]}")
+
+    except BuildFailure as e:
+        print(f"\n  ✗ Build FAILED: {e}")
+        sys.exit(1)
+
+
+def _save_raw_decision(node: Node, decision: dict):
+    """Save PLAN's raw decision output (includes children contracts)."""
+    import json
+    node.path().mkdir(parents=True, exist_ok=True)
+    with open(node.decision_path(), "w") as f:
+        json.dump(decision, f, indent=2)
+
+
 def main():
-    """M-A through M-C driver."""
+    """M-A through M-E driver."""
     import argparse
     parser = argparse.ArgumentParser(description="RICH Build System")
     parser.add_argument("--test-leaf", type=str, metavar="MODULE_ID",
                         help="M-C: test single-leaf IMPLEMENT+DERIVE_TESTS with real LLM")
+    parser.add_argument("--decompose", type=str, metavar="DESC",
+                        help="M-E: test decomposition with real LLM (pipeline goal)")
     parser.add_argument("--contract", type=str, metavar="DESC",
-                        help="Description for --test-leaf contract")
+                        help="Description for --test-leaf or --decompose contract")
     args = parser.parse_args()
 
     if args.test_leaf:
         test_single_leaf(args.test_leaf, args.contract or f"Implement {args.test_leaf}")
+        return
+
+    if args.decompose:
+        test_decompose(args.decompose, args.contract or args.decompose)
         return
 
     print("=" * 60)
@@ -502,7 +628,7 @@ def main():
     BUILD_ROOT.mkdir()
 
     try:
-        root = build(ROOT_CONTRACT)
+        root = build(ROOT_CONTRACT, use_canned=True)
         print(f"\n✓ Build succeeded!")
         print(f"  Root: {root.id} (is_leaf={root.is_leaf})")
         print(f"  Children: {[c.id for c in root.children]}")

@@ -14,7 +14,7 @@ import urllib.request
 import urllib.error
 
 # ── Config ─────────────────────────────────────────────────────────
-DEFAULT_MODEL = "anthropic/claude-haiku-3.5"
+DEFAULT_MODEL = "google/gemini-2.0-flash-001"
 RICH_MODEL = os.environ.get("RICH_MODEL", DEFAULT_MODEL)
 API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -132,8 +132,12 @@ def parse_json_response(raw: str, context: str = "") -> dict:
     text = re.sub(r"\n?```\s*$", "", text)
     text = text.strip()
 
+    # Fix common LLM JSON escaping bugs: backslashes before non-escape chars
+    # Valid JSON escapes: \" \\ \/ \b \f \n \r \t \u
+    text = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
+
     try:
-        return json.loads(text)
+        return json.loads(text, strict=False)
     except json.JSONDecodeError as e:
         # Dump raw response — do NOT crash silently (§5)
         dump_path = f"/tmp/rich_parse_failure_{int(time.time())}.txt"
