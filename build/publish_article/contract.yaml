@@ -1,0 +1,34 @@
+id: publish_article
+description: 'Publish a markdown article: parse it, analyze its content, then render
+  the published record. Three stages run in order: parse, analyze, render.'
+interface:
+  operations:
+  - name: publish
+    inputs:
+      raw: string
+    outputs:
+      title: string
+      body: string
+      analysis: dict
+      published: dict
+    errors: []
+dependencies: []
+behavior:
+- id: parse
+  prose: 'Stage 1 (parse): from the raw markdown, take the first line starting with
+    ''# '' as the title (without the ''# ''), and the remaining lines joined as the
+    body.'
+- id: analyze
+  prose: 'Stage 2 (analyze) produces a content-analysis dict for the body. The analysis
+    is ONE deliverable at the article level, but computing it requires FOUR separable,
+    independent sub-analyses, each its own concern: (1) word_count = number of whitespace-separated
+    words; (2) reading_level = ''easy'' if average words-per-sentence < 12 else ''hard''
+    (sentences split on ''.''); (3) top_keyword = the most frequent word (lowercased,
+    ties broken alphabetically); (4) has_links = true if the body contains ''http''.
+    The analysis dict has keys word_count, reading_level, top_keyword, has_links.'
+- id: render
+  prose: 'Stage 3 (render): assemble the published dict with keys title, body, analysis,
+    and a ''summary'' string of the form ''<title> (<word_count> words, <reading_level>)''.'
+- id: order
+  prose: Stages run strictly in order; analyze consumes parse's body; render consumes
+    title, body, and analysis.

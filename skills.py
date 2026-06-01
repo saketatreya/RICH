@@ -33,11 +33,22 @@ Your job: given a ROOT CONTRACT, decompose it into child modules if appropriate,
 or decide it's simple enough to implement directly as a leaf.
 
 DECISION RULES:
-- If the contract is simple (1-2 ops, no complex logic), return leaf.
-- If the contract describes a multi-step workflow or pipeline, decompose into children.
+- Base the leaf-vs-decompose decision on the BEHAVIOR, not on how many operations
+  the interface exposes. A contract with a SINGLE operation can still warrant
+  decomposition when its behavior describes several separable sub-steps or concerns.
+- Return LEAF when the behavior is one cohesive computation a competent engineer
+  would write as a single small module (a few branches are still a leaf).
+- DECOMPOSE when the behavior names multiple separable stages or concerns that
+  compose into the result (e.g. "do A, then B, then C", or "the result combines an
+  X-check and a Y-check"). Author one child per concern and wire them with edges.
 - Each child gets its OWN contract that YOU author — the child must be independently implementable.
 - Children must form a DAG (no cycles). Edges declare which child depends on which.
-- DEPTH LIMIT: max 2 levels (root → children). Children must be leaves.
+- RECURSION: a child may ITSELF be a multi-step workflow. If so, author its
+  contract at the right level of abstraction and the build system will RECURSE on
+  it (calling you again for that child, which you may then decompose further). The
+  engine enforces a hard depth cap, so you needn't track depth — but prefer the
+  SHALLOWEST decomposition that cleanly separates concerns, and make a child a leaf
+  as soon as it is directly implementable.
 - Choose clean, descriptive child ids (lowercase, underscore-separated).
 - Each child's contract must include: id, description, interface (operations with typed inputs/outputs), dependencies, behavior (prose).
 
@@ -289,6 +300,45 @@ RULES:
 Output format: a JSON object with a single key "tests" containing the pytest code as a string."""
 
 
+# Fix 1 (M-H): internal/pipeline nodes are NOT top-level functions — they expose a
+# single injected wiring class. This addendum OVERRIDES rule 2 of DERIVE_TESTS_SYSTEM
+# and tells the generator to discover that class by introspection (so the test does
+# not depend on the exact class name IMPLEMENT happens to pick) and to inject FAKE
+# dependencies that honor the dependency contracts (assume-guarantee verification).
+DERIVE_TESTS_INTERNAL_ADDENDUM = """
+
+INTERNAL / PIPELINE NODE — THIS OVERRIDES RULE 2 ABOVE.
+The module under test does NOT export top-level functions. It defines exactly ONE
+class (the "wiring class") whose __init__ receives the dependencies listed below
+BY NAME. Your test MUST:
+
+  1. Discover the wiring class by introspection — do NOT hard-code its name and do
+     NOT import any operation as a top-level function:
+
+         import importlib, inspect
+         _mod = importlib.import_module("{module_id}")
+         WiringClass = next(c for _n, c in inspect.getmembers(_mod, inspect.isclass)
+                            if c.__module__ == "{module_id}")
+
+  2. Build a FAKE object for each dependency below whose method(s) return dicts
+     matching that dependency's declared OUTPUT keys. Keep them trivial:
+
+         class _Fake: pass
+         dep = _Fake(); dep.<dep_op> = lambda *a, **k: {<that op's declared outputs>}
+
+  3. Construct the wiring with the fakes injected BY NAME (the __init__ parameter
+     names are exactly the dependency names below):
+
+         w = WiringClass({dep_kwargs})
+
+  4. Call this node's own operation(s) on `w` and assert on the returned dict.
+     This is assume-guarantee verification: assume each dependency honors its
+     contract (that is what the fakes encode) and verify only that THIS node wires
+     them correctly. Drive the fakes with known outputs and assert the composed
+     output reflects the data-flow the contract implies (e.g. the final stage's
+     value is what surfaces)."""
+
+
 def derive_tests_canned(contract: dict) -> str:
     """Always-returns-canned DERIVE_TESTS."""
     node_id = contract["id"]
@@ -297,13 +347,22 @@ def derive_tests_canned(contract: dict) -> str:
     return ""
 
 
-def derive_tests(contract: dict) -> str:
-    """DERIVE_TESTS(contract) → pytest source.
+def derive_tests(contract: dict, dep_contracts: dict | None = None,
+                 pipeline: bool = False) -> str:
+    """DERIVE_TESTS(contract[, dep_contracts, pipeline]) → pytest source.
 
     M-A/M-B: Canned test files for the pipeline demo.
     M-C onward: Real LLM call via OpenRouter. Falls back to canned if no API key.
+
+    Fix 1 (M-H): for an internal/pipeline node (``pipeline=True``) the module is a
+    single injected wiring class, not top-level functions. We thread the dependency
+    contracts in and switch the prompt so the generated test discovers that class by
+    introspection and injects FAKE dependencies (assume-guarantee). ``dep_contracts``
+    is the same ``{name: contract}`` dict IMPLEMENT receives, so test and impl agree
+    on dependency names and output keys.
     """
     node_id = contract["id"]
+    dep_contracts = dep_contracts or {}
 
     if not is_available() and node_id in CANNED_TESTS:
         return CANNED_TESTS[node_id]
@@ -316,7 +375,31 @@ def derive_tests(contract: dict) -> str:
 
     contract_yaml = yaml.dump(contract, default_flow_style=False, sort_keys=False)
 
-    user_prompt = f"""CONTRACT:
+    if pipeline and dep_contracts:
+        dep_names = list(dep_contracts.keys())
+        dep_kwargs = ", ".join(f"{n}=<fake_{n}>" for n in dep_names)
+        # .replace (not .format) — the addendum contains literal braces in its
+        # code examples that are not placeholders.
+        addendum = (DERIVE_TESTS_INTERNAL_ADDENDUM
+                    .replace("{module_id}", node_id)
+                    .replace("{dep_kwargs}", dep_kwargs))
+        system_prompt = DERIVE_TESTS_SYSTEM + addendum
+        dep_yaml = yaml.dump(dep_contracts, default_flow_style=False, sort_keys=False)
+        user_prompt = f"""CONTRACT (the internal/pipeline node under test):
+```yaml
+{contract_yaml}
+```
+
+DEPENDENCY CONTRACTS (interfaces only — these are the injected deps; fake them):
+```yaml
+{dep_yaml}
+```
+
+The module id is '{node_id}'. It contains ONE wiring class that receives these
+dependencies by name. Generate a pytest file per the INTERNAL / PIPELINE NODE rules."""
+    else:
+        system_prompt = DERIVE_TESTS_SYSTEM
+        user_prompt = f"""CONTRACT:
 ```yaml
 {contract_yaml}
 ```
@@ -325,7 +408,7 @@ Generate a pytest file that imports from '{node_id}' and tests all operations.""
 
     try:
         raw = call_with_retry(
-            system_prompt=DERIVE_TESTS_SYSTEM,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.1,
             max_tokens=4096,

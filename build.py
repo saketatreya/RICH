@@ -162,6 +162,34 @@ def run_tests(src_dir: Path, tests_dir: Path) -> dict:
             return {"passed": False, "failures": ["Test execution timed out (30s)"]}
 
 
+def _injection_deps(node: Node) -> list[tuple[str, str]]:
+    """The dependencies INJECTED into a node's wiring, as (param_name, source_id).
+
+    Single source of truth shared by gen_construct, the assembly fold, and the
+    topological order so all three agree (the §2 composition convention).
+
+      • Internal node (has children): it composes its CHILDREN — injected by child
+        id (the verified wiring class names its __init__ params by child id; for
+        root seeds those also equal the declared dependency names).
+      • Leaf with a declared dependency (e.g. a shared engine): injected by dep
+        NAME, sourced from the dep's id.
+      • Pure leaf: injects nothing.
+
+    Children is the truth for internal nodes — a non-root internal node's
+    contract.dependencies is empty even though it composes children.
+
+    Robustness (live PLAN): a leaf's contract.dependencies must be well-formed
+    {name, id} dicts to count as a real injected dependency. Live PLAN sometimes
+    emits redundant BARE-STRING entries (e.g. ['sanitize']) that merely echo the
+    pipeline edges — those stages are composed by the PARENT, not injected into the
+    leaf, so we ignore any entry that is not a {name, id} dict.
+    """
+    if node.children:
+        return [(c.id, c.id) for c in node.children]
+    return [(d["name"], d["id"]) for d in (node.dependencies or [])
+            if isinstance(d, dict) and "name" in d and "id" in d]
+
+
 def assemble(root: Node) -> str:
     """§6.2 — Deterministic topological fold with injection.
 
@@ -187,54 +215,46 @@ def assemble(root: Node) -> str:
 
     # Build a helper to generate constructor code for a node
     def gen_construct(node: Node) -> list[str]:
-        """Generate the construction code for a node."""
+        """Generate the construction code for a node (Fix 2, M-H).
+
+        Unified rule keyed on the node's INJECTED dependencies (_injection_deps),
+        implementing the §2 composition convention exactly once:
+
+          • injects nothing  → the module exports top-level functions; return a
+            thin handle that delegates each declared op to the module function.
+            Module-qualified (``_m.op``) so op names never collide across modules.
+          • injects deps      → the module defines exactly ONE verified wiring
+            class. Import it, locate it by introspection (the single class whose
+            ``__module__`` is this module), and instantiate it with the deps
+            injected BY NAME. We run the SAME class the tests verified — assembly
+            never re-derives composition (D6 / §6.2 / Trap 2). If the module does
+            not contain exactly one own class, ``_wiring_class`` FAILS LOUD (§6:
+            never guess a non-pipeline composition).
+        """
         result = []
-        if node.is_leaf:
-            contract = node.contract
-            ops = contract.get("interface", {}).get("operations", [])
-            result.append(f"# Leaf: {node.id}")
-            result.append(f"class _{node.id}_wrapper:")
-            for op in ops:
-                op_name = op["name"]
-                result.append(f"    def {op_name}(self, *args, **kwargs):")
-                result.append(f"        return {op_name}(*args, **kwargs)")
-            result.append("")
-            result.append("")
+        ops = node.contract.get("interface", {}).get("operations", [])
+        inj = _injection_deps(node)
+        if not inj:
+            result.append(f"# Module (no injected deps): {node.id} — wraps top-level functions")
             result.append(f"def construct_{node.id}():")
-            result.append(f"    return _{node.id}_wrapper()")
-        else:
-            contract = node.contract
-            ops = contract.get("interface", {}).get("operations", [])
-            dep_names = [d["name"] for d in node.dependencies]
-            result.append(f"# Internal: {node.id}")
-            if dep_names:
-                dep_params = ", ".join(dep_names)
-                result.append(f"def construct_{node.id}({dep_params}):")
-            else:
-                result.append(f"def construct_{node.id}():")
-            class_name = node.id
-            dep_inits = []
-            for dep in node.dependencies:
-                dep_inits.append(f"            self.{dep['name']} = {dep['name']}")
+            result.append(f"    import {node.id} as _m")
+            result.append(f"    class _Handle:")
             if ops:
-                result.append(f"    class _{class_name}:")
-                if dep_inits:
-                    result.append(f"        def __init__(self, {', '.join(dep_names)}):")
-                    result.extend(dep_inits)
                 for op in ops:
                     op_name = op["name"]
-                    if node.id == "pipeline_demo" and op_name == "run":
-                        result.append(f"        def {op_name}(self, text):")
-                        result.append(f"            norm_result = self.normalizer.normalize(text)")
-                        result.append(f"            val_result = self.validator.validate(norm_result['normalized'])")
-                        result.append(f"            return {{'original': text, 'normalized': norm_result['normalized'], 'valid': val_result['valid'], 'reason': val_result['reason']}}")
-                    else:
-                        result.append(f"        def {op_name}(self, *args, **kwargs):")
-                        result.append(f"            pass  # TODO: wire from contract")
-                dep_args = ", ".join(dep_names) if dep_names else ""
-                result.append(f"    return _{class_name}({dep_args})")
+                    result.append(f"        def {op_name}(self, *args, **kwargs):")
+                    result.append(f"            return _m.{op_name}(*args, **kwargs)")
             else:
-                result.append(f"    pass  # No ops for {node.id}")
+                result.append(f"        pass")
+            result.append(f"    return _Handle()")
+        else:
+            params = [p for p, _src in inj]
+            dep_params = ", ".join(params)
+            kwargs = ", ".join(f"{p}={p}" for p in params)
+            result.append(f"# Wiring node: {node.id} — instantiate verified class, inject {params}")
+            result.append(f"def construct_{node.id}({dep_params}):")
+            result.append(f"    import {node.id} as _m")
+            result.append(f"    return _wiring_class(_m, {node.id!r})({kwargs})")
         result.append("")
         return result
 
@@ -259,10 +279,23 @@ def assemble(root: Node) -> str:
     lines.append("")
     lines.append("")
 
-    # Import all leaf modules
-    for node_id in sorted(all_nodes):
-        if all_nodes[node_id].is_leaf:
-            lines.append(f"from {node_id} import *  # noqa: F403")
+    # Wiring-class locator (Fix 2): assembly instantiates the verified IMPLEMENT
+    # class; it never re-derives composition. Each construct_<id> imports its own
+    # module, so there are no top-level `import *` collisions across modules.
+    lines.append("def _wiring_class(module, module_id):")
+    lines.append('    """Return the single class DEFINED in `module` — the verified wiring class.')
+    lines.append("")
+    lines.append("    Fail loud if not exactly one (§6: assembly never guesses composition).")
+    lines.append('    """')
+    lines.append("    import inspect")
+    lines.append("    own = [c for _n, c in inspect.getmembers(module, inspect.isclass)")
+    lines.append("           if c.__module__ == module_id]")
+    lines.append("    if len(own) != 1:")
+    lines.append("        raise RuntimeError(")
+    lines.append('            f"assemble[{module_id}]: expected exactly ONE wiring class defined "')
+    lines.append('            f"in the module, found {[c.__name__ for c in own]!r}. v1 supports a "')
+    lines.append('            f"single injected wiring class per node; refusing to guess.")')
+    lines.append("    return own[0]")
     lines.append("")
     lines.append("")
 
@@ -278,11 +311,17 @@ def assemble(root: Node) -> str:
 
     ordered = topological_order_for_assembly(root)
     for node in ordered:
-        if node.is_leaf:
-            lines.append(f"    {node.id} = construct_{node.id}()")
-        else:
-            dep_args = ", ".join(f"{d['name']}={d['name']}" for d in node.dependencies)
+        # Inject each dep by its param NAME, bound to the variable holding that
+        # dep's instance (named by its source id). _injection_deps is the single
+        # source of truth shared with gen_construct and the topo order. (The
+        # earlier code keyed on is_leaf / used `{name}={name}` — a latent bug
+        # whenever name != id, e.g. fan-in's regex/regex_engine.)
+        inj = _injection_deps(node)
+        if inj:
+            dep_args = ", ".join(f"{p}={src}" for p, src in inj)
             lines.append(f"    {node.id} = construct_{node.id}({dep_args})")
+        else:
+            lines.append(f"    {node.id} = construct_{node.id}()")
 
     lines.append("")
     lines.append(f"    return {root.id}")
@@ -292,8 +331,21 @@ def assemble(root: Node) -> str:
     lines.append("    demo = assemble()")
     root_ops = root.contract.get("interface", {}).get("operations", [])
     if root_ops:
-        op_name = root_ops[0]["name"]
-        lines.append(f"    result = demo.{op_name}('test input')")
+        # Smoke-test the assembled deliverable with type-appropriate dummy args
+        # for EVERY declared input — not a single positional 'test input'. The old
+        # stub hardcoded one positional string, which silently mismatched any op
+        # that takes != 1 input (now that assemble() instantiates the REAL verified
+        # wiring class rather than the old `pass`-stub, that mismatch surfaces as a
+        # TypeError instead of a false-green None). Building kwargs by declared
+        # input name + type makes the smoke test honest for any op signature.
+        op = root_ops[0]
+        op_name = op["name"]
+        _dummy = {"string": "'test input'", "number": "1", "bool": "True",
+                  "list": "[1, 2, 3]", "dict": "{}"}
+        inputs = op.get("inputs", {})
+        call_args = ", ".join(f"{k}={_dummy.get(t, repr('test input'))}"
+                              for k, t in inputs.items())
+        lines.append(f"    result = demo.{op_name}({call_args})")
         lines.append(f"    print('{op_name} result:', result)")
     else:
         lines.append("    print('Assembled:', type(demo).__name__)")
@@ -314,11 +366,12 @@ def topological_order_for_assembly(root: Node) -> list[Node]:
 
     collect(root)
 
-    # Build dep graph: node -> set of dependency ids
+    # Build dep graph: node -> set of injected-dependency source ids. Uses the
+    # same _injection_deps truth as the fold so children of an internal node are
+    # constructed before it (a non-root internal node has empty contract.deps).
     dep_of = {}
     for n in all_nodes.values():
-        deps = {d["id"] for d in n.dependencies} if n.dependencies else set()
-        dep_of[n.id] = deps
+        dep_of[n.id] = {src for _p, src in _injection_deps(n)}
 
     ordered = []
     visited = set()
@@ -472,26 +525,40 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
         node.children = list(children_nodes.values())
         node.edges = edges
 
-        # Resolve dependencies from the CONTRACT (not edges — edges are inter-child)
+        # Resolve dependencies from the CONTRACT (kept for deps.yaml / provenance).
         node.dependencies = contract.get("dependencies", [])
 
-        # 3b. DERIVE_TESTS for the internal node
+        # Build dep_contracts dict: {param_name: contract, ...} — needed by BOTH
+        # DERIVE_TESTS (Fix 1: fake-injected class tests) and IMPLEMENT (wiring).
+        #
+        # Move 1 (unifying fix): source this from _injection_deps (the node's
+        # CHILDREN), NOT from contract.dependencies. An internal node composes its
+        # children; its own contract.dependencies is EMPTY for every node a live
+        # PLAN authors — non-root internals AND depth-1 roots from a fresh goal —
+        # which left real-mode IMPLEMENT/DERIVE_TESTS blind to the children. That
+        # blindness was masked only by canned mode (ignores dep_contracts) and the
+        # pinned gate (hand-authored root deps that happened to equal the
+        # children). Keying by child id also makes the wiring class's __init__
+        # param names match exactly what assembly injects (_injection_deps), so
+        # tests, impl, and assembly agree on names BY CONSTRUCTION. Insertion order
+        # follows topo order (children_nodes is topo-ordered) — an implicit
+        # pipeline-order signal to IMPLEMENT.
+        dep_contracts = {}
+        for param_name, src_id in _injection_deps(node):
+            dep_contracts[param_name] = children_nodes[src_id].contract
+
+        # 3b. DERIVE_TESTS for the internal node — thread dep contracts + pipeline
+        # flag so the generated test discovers the wiring class and uses fakes.
         if use_canned:
             import skills as _skills6
             tests_src = _skills6.derive_tests_canned(contract)
         else:
-            tests_src = derive_tests(contract)
+            tests_src = derive_tests(contract, dep_contracts=dep_contracts, pipeline=True)
         node.tests_path().mkdir(parents=True, exist_ok=True)
         test_file = node.tests_path() / f"test_{node_id}.py"
         test_file.write_text(tests_src)
 
         # 4b. IMPLEMENT wiring + verify loop
-        # Build dep_contracts dict: {name: contract, ...}
-        dep_contracts = {}
-        for dep in node.dependencies:
-            child_id = dep["id"]
-            dep_contracts[dep["name"]] = children_nodes[child_id].contract
-
         failures = []
         for attempt in range(1, K_WIRE + 1):
             if use_canned:

@@ -1,0 +1,125 @@
+{
+  "is_leaf": false,
+  "children": [
+    {
+      "id": "parse_article",
+      "description": "Extract title and body from raw markdown input",
+      "interface": {
+        "operations": [
+          {
+            "name": "parse",
+            "inputs": {
+              "raw": "string"
+            },
+            "outputs": {
+              "title": "string",
+              "body": "string"
+            },
+            "errors": []
+          }
+        ]
+      },
+      "dependencies": [],
+      "behavior": [
+        {
+          "id": "extract_title",
+          "prose": "Scan lines of raw for the first line that starts with '# '; strip the leading '# ' to produce title."
+        },
+        {
+          "id": "extract_body",
+          "prose": "All lines other than the title line are joined (preserving order) to produce body."
+        }
+      ]
+    },
+    {
+      "id": "analyze_body",
+      "description": "Produce a content-analysis dict from the article body via four independent sub-analyses",
+      "interface": {
+        "operations": [
+          {
+            "name": "analyze",
+            "inputs": {
+              "body": "string"
+            },
+            "outputs": {
+              "analysis": "dict"
+            },
+            "errors": []
+          }
+        ]
+      },
+      "dependencies": [],
+      "behavior": [
+        {
+          "id": "word_count",
+          "prose": "Count whitespace-separated words in body; store as analysis['word_count'] (int)."
+        },
+        {
+          "id": "reading_level",
+          "prose": "Split body on '.' to get sentences; compute average words-per-sentence; store analysis['reading_level'] = 'easy' if average < 12 else 'hard'."
+        },
+        {
+          "id": "top_keyword",
+          "prose": "Lowercase every word in body, count frequencies, pick the most frequent; break ties alphabetically; store as analysis['top_keyword'] (string)."
+        },
+        {
+          "id": "has_links",
+          "prose": "Store analysis['has_links'] = true if the substring 'http' appears anywhere in body, else false."
+        },
+        {
+          "id": "independence",
+          "prose": "The four sub-analyses (word_count, reading_level, top_keyword, has_links) each concern a separate property of the body and do not depend on each other; they are combined into a single analysis dict as their only point of coupling."
+        }
+      ]
+    },
+    {
+      "id": "render_article",
+      "description": "Assemble the final published record from title, body, and analysis",
+      "interface": {
+        "operations": [
+          {
+            "name": "render",
+            "inputs": {
+              "title": "string",
+              "body": "string",
+              "analysis": "dict"
+            },
+            "outputs": {
+              "published": "dict"
+            },
+            "errors": []
+          }
+        ]
+      },
+      "dependencies": [],
+      "behavior": [
+        {
+          "id": "assemble",
+          "prose": "Build published dict with keys: title (from input), body (from input), analysis (from input), and summary = '<title> (<word_count> words, <reading_level>)' where word_count and reading_level are drawn from analysis."
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "parse_article",
+      "to": "analyze_body",
+      "name": "body"
+    },
+    {
+      "from": "parse_article",
+      "to": "render_article",
+      "name": "title"
+    },
+    {
+      "from": "parse_article",
+      "to": "render_article",
+      "name": "body"
+    },
+    {
+      "from": "analyze_body",
+      "to": "render_article",
+      "name": "analysis"
+    }
+  ]
+}

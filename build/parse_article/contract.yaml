@@ -1,0 +1,19 @@
+id: parse_article
+description: Extract title and body from raw markdown input
+interface:
+  operations:
+  - name: parse
+    inputs:
+      raw: string
+    outputs:
+      title: string
+      body: string
+    errors: []
+dependencies: []
+behavior:
+- id: extract_title
+  prose: Scan lines of raw for the first line that starts with '# '; strip the leading
+    '# ' to produce title.
+- id: extract_body
+  prose: All lines other than the title line are joined (preserving order) to produce
+    body.

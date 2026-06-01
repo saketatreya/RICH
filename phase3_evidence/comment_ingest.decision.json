@@ -1,0 +1,176 @@
+{
+  "is_leaf": false,
+  "children": [
+    {
+      "id": "sanitize",
+      "description": "Strip HTML tags from raw comment text and normalize whitespace.",
+      "interface": {
+        "operations": [
+          {
+            "name": "sanitize",
+            "inputs": {
+              "text": "string"
+            },
+            "outputs": {
+              "text": "string"
+            },
+            "errors": []
+          }
+        ]
+      },
+      "dependencies": [],
+      "behavior": [
+        {
+          "id": "strip_html",
+          "prose": "Remove all HTML tags from the input text (any content matching <...>)."
+        },
+        {
+          "id": "normalize_whitespace",
+          "prose": "Collapse every run of whitespace characters (spaces, tabs, newlines) to a single space, then trim leading and trailing whitespace."
+        }
+      ]
+    },
+    {
+      "id": "moderate",
+      "description": "Scan sanitized text for banned words, replace them, and set the flagged flag.",
+      "interface": {
+        "operations": [
+          {
+            "name": "moderate",
+            "inputs": {
+              "text": "string"
+            },
+            "outputs": {
+              "body": "string",
+              "flagged": "bool"
+            },
+            "errors": []
+          }
+        ]
+      },
+      "dependencies": [
+        "sanitize"
+      ],
+      "behavior": [
+        {
+          "id": "banned_word_replacement",
+          "prose": "Perform a case-insensitive scan for the banned words 'spam', 'scam', and 'viagra'. Replace each occurrence with '***'."
+        },
+        {
+          "id": "flag_detection",
+          "prose": "Set flagged=true if at least one banned word was found and replaced; otherwise set flagged=false."
+        }
+      ]
+    },
+    {
+      "id": "enrich",
+      "description": "Compute word_count, reading_time, and preview from the moderated body.",
+      "interface": {
+        "operations": [
+          {
+            "name": "enrich",
+            "inputs": {
+              "body": "string"
+            },
+            "outputs": {
+              "word_count": "number",
+              "reading_time": "number",
+              "preview": "string"
+            },
+            "errors": []
+          }
+        ]
+      },
+      "dependencies": [
+        "moderate"
+      ],
+      "behavior": [
+        {
+          "id": "word_count",
+          "prose": "Count the number of whitespace-separated tokens in body; that is word_count."
+        },
+        {
+          "id": "reading_time",
+          "prose": "Compute reading_time in seconds as the ceiling of word_count divided by 3."
+        },
+        {
+          "id": "preview",
+          "prose": "Take the first 50 characters of body (no padding if body is shorter) as preview."
+        }
+      ]
+    },
+    {
+      "id": "format",
+      "description": "Assemble the final published-comment record dict from all pipeline outputs.",
+      "interface": {
+        "operations": [
+          {
+            "name": "format",
+            "inputs": {
+              "body": "string",
+              "flagged": "bool",
+              "word_count": "number",
+              "reading_time": "number",
+              "preview": "string"
+            },
+            "outputs": {
+              "body": "string",
+              "flagged": "bool",
+              "word_count": "number",
+              "reading_time": "number",
+              "preview": "string"
+            },
+            "errors": []
+          }
+        ]
+      },
+      "dependencies": [
+        "moderate",
+        "enrich"
+      ],
+      "behavior": [
+        {
+          "id": "assemble_record",
+          "prose": "Return a dict with exactly the keys body, flagged, word_count, reading_time, and preview, populated from the injected inputs."
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "sanitize",
+      "to": "moderate",
+      "name": "text"
+    },
+    {
+      "from": "moderate",
+      "to": "enrich",
+      "name": "body"
+    },
+    {
+      "from": "moderate",
+      "to": "format",
+      "name": "body"
+    },
+    {
+      "from": "moderate",
+      "to": "format",
+      "name": "flagged"
+    },
+    {
+      "from": "enrich",
+      "to": "format",
+      "name": "word_count"
+    },
+    {
+      "from": "enrich",
+      "to": "format",
+      "name": "reading_time"
+    },
+    {
+      "from": "enrich",
+      "to": "format",
+      "name": "preview"
+    }
+  ]
+}
