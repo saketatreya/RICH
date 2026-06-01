@@ -1,6 +1,6 @@
 # RICH — Phase 4: force the dark regimes (live, unpinned) — Report
 
-**Date:** 2026-06-01 (PARTIAL — run cut by an external session quota; see §3)
+**Date:** 2026-06-01 (three live attempts at the forcing goal; results below)
 **Goal:** run the unmodified `build()` with **live, unpinned PLAN** end to end, on goals
 shaped so the *correct* decomposition can only be **nested** (depth-2) or **non-linear**
 (fan-in) — the two regimes Phase 3 left dark because no goal forced them. Harness:
@@ -8,53 +8,77 @@ shaped so the *correct* decomposition can only be **nested** (depth-2) or **non-
 
 ---
 
-## 0. Result (honest, and partial)
+## 0. Result (honest — a win, a reproducibility caveat, and one cell still open)
 
-**NEW — newly lit:** live, unpinned PLAN, handed a single goal (`publish_article`), authored
-a decomposition that is **both nested AND non-linear**, with no pin anywhere:
+### 0.1 The seam IS crossed — for a non-linear shape, unbroken, unpinned
+
+The single most important result: in one unbroken, unpinned execution, live PLAN authored a
+**non-linear (diamond)** decomposition of `publish_article` AND the engine carried it all the
+way to a **correct running deliverable** — no pin, no memo-stitch.
 
 ```
-publish_article            (internal)        ← root, 3 stages
-├─ parse_markdown          (leaf, VERIFIED)
-├─ analyze_content         (internal)         ← PLAN RECURSED here (depth-2, model-authored)
-│  ├─ word_count_analyzer      (leaf, VERIFIED)
-│  ├─ reading_level_analyzer   (leaf, VERIFIED)
-│  ├─ top_keyword_analyzer     (leaf, VERIFIED)
-│  ├─ has_links_checker        (leaf, VERIFIED)
-│  └─ analysis_assembler       (leaf, VERIFIED)   ← 4-way JOIN (fan-in)
-└─ render_article          (never reached — see §3)
+publish_article (internal, VERIFIED)        publish(raw) ->
+├─ parse_markdown  (leaf)   ─┐                 title:'My Trip'
+├─ analyze_content (leaf)   ─┤ fan-out/fan-in  body:'We walked far...'
+└─ render_article  (leaf)   ─┘                 analysis:{word_count:14, reading_level:'easy',
+edges: parse→analyze, parse→render,                      top_keyword:'the', has_links:True}
+       analyze→render                          published:{... summary:'My Trip (14 words, easy)'}
 ```
 
-- **Depth-2 live recursion (was canned-only):** `analyze_content` was handed to a *separate*
-  PLAN call and chose `is_leaf:false`, authoring 5 grandchildren. The model produced the
-  nesting — the first time recursion past depth-1 has been observed live.
-- **Non-pipeline live composition (was canned-only):** two diamonds, both model-authored —
-  `analyze_content`'s four analyzers all feed `analysis_assembler`; and at the root,
-  `parse_markdown` feeds *both* `analyze_content` and `render_article`. Not a line.
-- The forcing design worked: `analyze` read as one stage at the article level (so the root
-  didn't flatten to a wide pipeline) but was internally multi-concern (so the recursive PLAN
-  call decomposed it) — beating the prompt's "prefer shallowest clean decomposition" bias.
-- The 6 leaves are **real, correct, self-verified** code (e.g. `top_keyword_analyzer` does
-  frequency-count with an alphabetical tiebreak; `analysis_assembler`'s signature exactly
-  matches its 4 incoming edges).
+`parse_markdown` fans out to *both* `analyze_content` and `render_article`; `render_article`
+fans in from *both* `parse_markdown` and `analyze_content`. That is a genuine non-pipeline DAG
+— not a line — authored by live PLAN, wired by live IMPLEMENT, and assembled + run correctly
+by the deterministic fold. **This is the unbroken end-to-end Phase 3 only achieved stitched.**
 
-**NOT shown — still open:** the build **did not complete**. `analyze_content` has its tests
-but an empty `src/` (the quota hit at its wiring IMPLEMENT); `render_article` was never
-created; nothing assembled or ran; `doc_similarity` never started (its first PLAN call hit
-the limit). So:
+### 0.2 Live depth-2 recursion: authored, but NOT yet carried, and NOT reproducible
+
+Across **three** live attempts at the *same* `publish_article` goal this session:
+
+| attempt | `analyze` stage | depth | outcome |
+|---------|-----------------|-------|---------|
+| A (pre-quota) | **internal → 5 leaves** | **2** | nested + 4-way join authored; build cut by quota at `analyze`'s wiring → **carry not completed** |
+| B (this run, clean) | leaf | 1 | **built + assembled + ran correctly** (the §0.1 result) |
+| C (this run) | leaf | 1 | built; assemble crashed on a **harness artifact** (§0.3), not the engine |
+
+So: **live depth-2 recursion was *authored* once** (attempt A — `analyze_content` handed to a
+separate PLAN call that chose `is_leaf:false` and authored 5 grandchildren, incl. a 4-way join
+into `analysis_assembler`; the 6 leaves verified live, real code). But the same goal **flattened
+to depth-1 on the other two attempts** — PLAN's nesting here is **non-deterministic (~1/3)**, and
+both flat versions are arguably correct (a 4-sub-analysis `analyze` *can* be one module). And on
+the one attempt that nested, the external quota cut the build before the internal-node wiring +
+assembly ran. So **live depth-2 *carried to a deliverable* is still unshown** — gated by PLAN
+non-determinism + quota, not by engine capability (canned `--deep` proves the engine wires
+depth-2).
+
+### 0.3 Correction: the attempt-C assemble crash was MY harness bug, not a RICH bug
+
+Attempt C crashed with `TypeError: PublishArticle.__init__() got an unexpected keyword argument
+'parse_article'`. Root cause: `gate_forcing_one.py` did `from gate_forcing import …`, but
+`gate_forcing.py` ran its battery **on import** — so attempt B's build executed first in the same
+process and cached `publish_article` in `sys.modules` (with B's child names
+`parse_markdown/analyze_content`). Attempt C rebuilt with different child names
+(`parse_article/analyze_body`), but `import publish_article` returned the **stale cached module**,
+so assembly injected `parse_article=` into B's class → crash ("did you mean render_article" — the
+one name both trees shared). The on-disk files are internally consistent and assemble fine in a
+clean process. **Fixed:** `gate_forcing.py`'s side-effecting code is now guarded under
+`if __name__ == "__main__":`, so importing it no longer runs the battery or pollutes
+`sys.modules`. No RICH change was needed.
+
+### 0.4 The dedicated fan-in goal flattened
+
+`doc_similarity` (jaccard + cosine over a shared tokenizer) was **flattened to a single leaf** by
+live PLAN — the leaf bias again. The fan-in evidence we *do* have came incidentally from
+`publish_article`'s root diamond (§0.1), not from the goal designed to force it.
+
+### Scoreboard
 
 | question | status |
 |----------|--------|
-| Does live unpinned PLAN *author* nested decompositions? | **YES (new)** |
-| Does live unpinned PLAN *author* non-pipeline (fan-in) shapes? | **YES (new)** |
-| Does the engine *carry* a live nested/fan-in decomposition to a verified, running deliverable? | **STILL OPEN** — internal-node wiring + assembly were never reached |
-| Was the full loop crossed unbroken in one run? | **NO** — an external quota (not a logic failure) cut it at the internal-node wiring |
-
-This is the inverse of Phase 3's gap. Phase 3 showed the engine *carries* a (linear,
-single-level) decomposition to a deliverable, but the *authoring* was stitched/pinned.
-Phase 4 shows live PLAN *authors* the hard shapes unpinned, but the run died before the
-engine could carry them. Neither phase has yet shown authoring-AND-carrying of a hard shape
-in one unbroken execution.
+| Live unpinned PLAN *authors* a nested (depth-2) decomposition? | **YES** (attempt A; ~1/3 of the time) |
+| Live unpinned PLAN *authors* a non-linear (fan-in/diamond) shape? | **YES** (the `publish_article` root DAG) |
+| Engine *carries* a live **non-linear** decomposition to a running deliverable, unbroken? | **YES (new)** — §0.1 |
+| Engine *carries* a live **depth-2** decomposition to a running deliverable, unbroken? | **STILL OPEN** — the one nested attempt was cut by quota |
+| Is live nesting reliable? | **NO** — non-deterministic (~1/3 on this goal) |
 
 ---
 
