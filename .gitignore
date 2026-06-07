@@ -9,3 +9,16 @@ build/
 
 # Editor / scratch
 *.swp
+
+# Scratch gate / probe harnesses (one-off per-phase test drivers)
+gate_*.py
+carry_*.py
+
+# Evidence dumps + test-run logs
+*_evidence/
+testlog/
+
+# Phase / fix reports + ledgers (kept local, not part of the repo)
+*_REPORT.md
+*_LEDGER.md
+CLAUDE_CODE_FINDING.md
