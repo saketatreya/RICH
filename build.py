@@ -26,6 +26,7 @@ build(contract) -> Node | FAILURE:
         return FAILURE(...)
 """
 
+import ast
 import shutil
 import subprocess
 import sys
@@ -41,7 +42,9 @@ from node import (
     save_status,
     topological_order,
 )
-from skills import plan, implement, derive_tests, plan_canned, implement_canned, derive_tests_canned
+from skills import (plan, implement, derive_tests, derive_integration_test,
+                    plan_canned, implement_canned, derive_tests_canned)
+from llm import LLMNotConfigured, LLMParseError
 
 
 K_IMPL = 3
@@ -50,6 +53,54 @@ MAX_DEPTH = 3          # M-G: max recursion depth
 MAX_CHILDREN = 8       # M-G: max children per node
 MAX_LLM_CALLS = 50     # M-G: global LLM call ceiling
 REPLANS_MAX = 2        # M-G: max replan attempts on child failure
+
+
+# ── Phase 9 (§2.3): the call manifest ──────────────────────────────
+# An append-only audit log proving the build was FULLY LIVE-AUTHORED with zero pins.
+# Every node is tagged live-PLAN / live-IMPLEMENT / live-DERIVE_TESTS (produced by a
+# live, unpinned call) or memo-hit / decision-reuse (served from a PRIOR live build —
+# the resumption-across-a-quota-cut path, §2.2). Persisted under BUILD_ROOT so the
+# cross-window audit survives resumption: a memo-hit's hash is traceable to the earlier
+# live-build line carrying the same hash. The manifest is what PROVES "no pins" rather
+# than asserting it (§2.3) — and it doubles as the cost ledger (one line per LLM call).
+import os
+import time as _time
+
+MANIFEST_NAME = "manifest.jsonl"
+_manifest_run_id = None
+
+# Phase 9 (§2.4): selective model labels for the manifest's cost ledger. These MIRROR
+# the env-gated per-skill routing in skills.py: PLAN and IMPLEMENT (the bet and the code)
+# stay on the strong default; DERIVE_TESTS may be routed to a cheaper model. A label of
+# the default model means "backend default" (sonnet, via RICH_SUBAGENT_MODEL).
+_DEFAULT_MODEL = os.environ.get("RICH_SUBAGENT_MODEL", "sonnet")
+_PLAN_LABEL = os.environ.get("RICH_PLAN_MODEL") or _DEFAULT_MODEL
+_IMPL_LABEL = os.environ.get("RICH_IMPL_MODEL") or _DEFAULT_MODEL
+_TESTS_LABEL = os.environ.get("RICH_TESTS_MODEL") or _DEFAULT_MODEL
+
+
+def _manifest(node_id: str, event: str, contract: dict,
+              model: str | None = None, extra: dict | None = None):
+    """Append one audit entry to BUILD_ROOT/manifest.jsonl (§2.3). Best-effort:
+    logging never breaks a build."""
+    import json
+    entry = {
+        "ts": round(_time.time(), 3),
+        "run": _manifest_run_id,
+        "node": node_id,
+        "event": event,
+        "hash": _contract_hash(contract),
+    }
+    if model:
+        entry["model"] = model
+    if extra:
+        entry.update(extra)
+    try:
+        BUILD_ROOT.mkdir(parents=True, exist_ok=True)
+        with open(BUILD_ROOT / MANIFEST_NAME, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
 
 
 def _contract_hash(contract: dict) -> str:
@@ -101,6 +152,39 @@ def _save_memo(node: Node, contract: dict):
     """Save memoization hash for a verified node."""
     node.path().mkdir(parents=True, exist_ok=True)
     (node.path() / "memo.txt").write_text(_contract_hash(contract))
+
+
+def _load_prior_decision(contract: dict) -> dict | None:
+    """Phase 9 (§2.2): on resumption, reuse THIS node's own previously live-authored
+    PLAN decision — iff the on-disk contract is hash-identical to the incoming one.
+
+    This is the PLAN-level analogue of memoization. A full quota-cut run leaves nodes
+    that were PLANned-but-not-yet-verified with a persisted decision.json. Without this,
+    re-invoking build() would call PLAN again — and a fresh decision (even at low temp)
+    can differ, changing child contract hashes and BUSTING the memo on subtrees that
+    WERE already built live. Freezing the tree shape to the node's own prior live
+    decision makes resumption robust instead of luck-dependent: only the unbuilt
+    remainder spends new calls.
+
+    This is NOT pinning (§2.3): the decision was live-authored, by this same node, when
+    it was first planned — the manifest tags the reuse `decision-reuse`, traceable to the
+    earlier `live-PLAN` line. Forbidden laundering is reusing a *different* run's decision
+    under a pin, or hand-supplying one; neither happens here. Returns None if absent/stale.
+    """
+    import json
+    import yaml as _yaml
+    node_path = BUILD_ROOT / contract["id"]
+    decision_path = node_path / "decision.json"
+    contract_path = node_path / "contract.yaml"
+    if not decision_path.exists() or not contract_path.exists():
+        return None
+    try:
+        on_disk = _yaml.safe_load(contract_path.read_text())
+        if _contract_hash(on_disk) != _contract_hash(contract):
+            return None
+        return json.loads(decision_path.read_text())
+    except Exception:
+        return None
 
 
 class BuildFailure(Exception):
@@ -235,9 +319,21 @@ def assemble(root: Node) -> str:
         ops = node.contract.get("interface", {}).get("operations", [])
         inj = _injection_deps(node)
         if not inj:
-            result.append(f"# Module (no injected deps): {node.id} — wraps top-level functions")
+            # Adaptive (Phase 6): a no-dep leaf is EITHER a stateless transformation
+            # (top-level functions → wrap in a handle) OR a STATEFUL component (a single
+            # class holding state across calls → instantiate ONCE so the one instance's
+            # state persists). We detect which by introspection at assembly time rather
+            # than predicting IMPLEMENT's shape, so a stateful leaf carries the same way
+            # an internal wiring class does (one instance), and the dataflow path (no
+            # class defined) is unchanged.
+            result.append(f"# Module (no injected deps): {node.id} — stateful class (one instance) or top-level fns")
             result.append(f"def construct_{node.id}():")
+            result.append(f"    import inspect")
             result.append(f"    import {node.id} as _m")
+            result.append(f"    _own = [c for _n, c in inspect.getmembers(_m, inspect.isclass)")
+            result.append(f"            if c.__module__ == {node.id!r}]")
+            result.append(f"    if len(_own) == 1:")
+            result.append(f"        return _own[0]()          # stateful component — instantiate once")
             result.append(f"    class _Handle:")
             if ops:
                 for op in ops:
@@ -261,14 +357,17 @@ def assemble(root: Node) -> str:
     # Step 2: generate main.py
     main_py = BUILD_ROOT / "main.py"
 
-    # Copy all source files from subdirectories into build/ for import
+    # Copy all source files from subdirectories into build/ for import. Always OVERWRITE
+    # (Phase 11 fix): the old `if not dest.exists()` guard left a STALE top-level copy after
+    # a node was rebuilt on a resume — so the assembled deliverable silently ran the previous
+    # version of that node's code (observed: a rebuilt render_report produced correct
+    # per-endpoint output in its own tests, but main.py still imported the stale copy). The
+    # verified src under <id>/src/ is the single source of truth; refresh from it every time.
     for node_id, node in all_nodes.items():
         src_dir = node.src_path()
         if src_dir.exists():
             for f in src_dir.glob("*.py"):
-                dest = BUILD_ROOT / f.name
-                if not dest.exists():
-                    shutil.copy2(f, dest)
+                shutil.copy2(f, BUILD_ROOT / f.name)
 
     lines = []
 
@@ -391,28 +490,321 @@ def topological_order_for_assembly(root: Node) -> list[Node]:
     return ordered
 
 
+def _shares_stateful_dep(node: Node) -> str | None:
+    """Phase 8 integration trigger (§1.3): return the id of a child that is STATEFUL and is
+    depended on by MORE THAN ONE sibling (a shared mutable dependency — the dragon's
+    signature), else None. Detected purely from the graph (children + edges). When this
+    fires, per-module fake-based verification is unsound (overlapping footprints) and an
+    integration trace test over the real subtree is ADDED.
+    """
+    if not node.children:
+        return None
+    stateful_ids = {c.id for c in node.children if (c.contract or {}).get("stateful")}
+    if not stateful_ids:
+        return None
+    consumers: dict[str, set] = {}
+    for e in (node.edges or []):
+        consumers.setdefault(e.get("from"), set()).add(e.get("to"))
+    for sid in stateful_ids:
+        if len(consumers.get(sid, set())) > 1:
+            return sid
+    return None
+
+
+def verify_integration(node: Node, test_src: str) -> dict:
+    """Assemble node's REAL subtree (shared stateful instance, real writers — no fakes) and
+    run an integration test against it. Returns {passed, failures}. This is the verification
+    that per-module unit tests structurally cannot do (Phase 8). Read/run only; the transient
+    main.py it writes is overwritten when the full tree assembles."""
+    import tempfile
+    assemble(node)  # writes BUILD_ROOT/main.py + copies subtree src into BUILD_ROOT
+    with tempfile.TemporaryDirectory(prefix="rich_integ_") as tmp:
+        tmp_path = Path(tmp)
+        for f in BUILD_ROOT.glob("*.py"):
+            shutil.copy2(f, tmp_path)
+        (tmp_path / "test_integration.py").write_text(test_src)
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "--tb=short", str(tmp_path)],
+                capture_output=True, text=True, timeout=30, cwd=str(tmp_path))
+            passed = result.returncode == 0
+            failures = []
+            if not passed:
+                for line in result.stdout.splitlines():
+                    if "FAILED" in line or "Error" in line or "assert" in line:
+                        failures.append(line.strip())
+                failures = failures[:12]
+            return {"passed": passed, "failures": failures}
+        except subprocess.TimeoutExpired:
+            return {"passed": False, "failures": ["integration test timed out (30s)"]}
+
+
+# ── Phase 11 Fix 2: dataflow shape-handoff (concrete example capture) ──────────
+# A downstream leaf consuming a sibling's dataflow output is built knowing only its own
+# contract — not the concrete SHAPE of the value crossing the edge (Probe B's evaluator
+# failed 3× guessing the parser's AST shape). These helpers derive a CONCRETE example of
+# an upstream's real output by RUNNING the already-built, verified upstream (the brief's
+# preferred approach), and thread it into the downstream's IMPLEMENT + DERIVE_TESTS so
+# both halves — and the real upstream — agree on the shape by construction. Pure
+# execution: no LLM, no quota. Best-effort everywhere — any failure returns None and the
+# downstream simply falls back to its contract (pre-Fix-2 behavior). Mirrors Phase 7's
+# convention (thread the dependency's shape into the consumer), for DATA not capability.
+
+def _extract_test_input_candidates(node: Node) -> list[dict]:
+    """Best-effort: every concrete op-call kwargs found in the node's verified test file,
+    ranked by serialized size (largest first). Seeds example capture at the HEAD of a
+    dataflow chain (a head has no upstream to run). DERIVE_TESTS mandates keyword-arg calls
+    (skills.py rule 4), so these calls are reliably present.
+
+    Phase 11 Fix 2 hardening — seed RICHNESS. Tests bind their realistic sample to a local
+    first (``lines = ["…GET /a 200 42", …]; parse(lines=lines)``) and reserve bare literals
+    for empty/edge cases (``parse(lines=[])``). So we (a) resolve simple local/module literal
+    assignments so ``parse(lines=lines)`` is reachable, and return ALL candidates so the
+    capture path can pick the one whose *output* is richest (size alone is a weak proxy when
+    the impl rejects some inputs — e.g. a 4-line all-malformed sample is bigger but yields
+    zero events). Best-effort: any failure → []."""
+    try:
+        test_file = node.tests_path() / f"test_{node.id}.py"
+        if not test_file.exists():
+            return []
+        op_names = {op["name"] for op in
+                    node.contract.get("interface", {}).get("operations", [])}
+        tree = ast.parse(test_file.read_text())
+
+        # Module-level literal assignments (shared sample constants).
+        module_syms: dict = {}
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Assign):
+                for tgt in stmt.targets:
+                    if isinstance(tgt, ast.Name):
+                        try:
+                            module_syms[tgt.id] = ast.literal_eval(stmt.value)
+                        except Exception:
+                            pass
+
+        def _resolve(value, local_syms):
+            """A call-arg value → concrete Python value, via literal eval or a known
+            (local-then-module) literal-assigned name. Raises on anything else."""
+            if isinstance(value, ast.Name):
+                if value.id in local_syms:
+                    return local_syms[value.id]
+                if value.id in module_syms:
+                    return module_syms[value.id]
+                raise ValueError(f"unresolved name {value.id}")
+            return ast.literal_eval(value)
+
+        candidates: list[dict] = []
+
+        def scan(scope_node, local_syms):
+            for call in (n for n in ast.walk(scope_node) if isinstance(n, ast.Call)):
+                fn = call.func
+                name = (fn.attr if isinstance(fn, ast.Attribute)
+                        else fn.id if isinstance(fn, ast.Name) else None)
+                if name not in op_names or not call.keywords:
+                    continue
+                kwargs, ok = {}, True
+                for kw in call.keywords:
+                    if kw.arg is None:
+                        ok = False; break
+                    try:
+                        kwargs[kw.arg] = _resolve(kw.value, local_syms)
+                    except Exception:
+                        ok = False; break
+                if ok and kwargs:
+                    candidates.append(kwargs)
+
+        # Per-function scoping: a function's own literal assigns shadow module ones.
+        for fn_def in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+            local_syms: dict = {}
+            for stmt in ast.walk(fn_def):
+                if isinstance(stmt, ast.Assign):
+                    for tgt in stmt.targets:
+                        if isinstance(tgt, ast.Name):
+                            try:
+                                local_syms[tgt.id] = ast.literal_eval(stmt.value)
+                            except Exception:
+                                pass
+            scan(fn_def, local_syms)
+        # Also catch any module-level op-calls (rare).
+        scan(tree, module_syms)
+
+        import json as _json
+        # De-dup, then rank by serialized size (largest first).
+        seen, uniq = set(), []
+        for c in candidates:
+            key = _json.dumps(c, sort_keys=True, default=repr)
+            if key not in seen:
+                seen.add(key); uniq.append(c)
+        uniq.sort(key=lambda k: len(_json.dumps(k, default=repr)), reverse=True)
+        return uniq
+    except Exception:
+        return []
+
+
+def _extract_test_inputs(node: Node) -> dict | None:
+    """The single best-by-size test-derived seed (back-compat for `_run_inputs_for`'s head
+    fallback). For HEAD output capture, prefer `_capture_head_example` which ranks by the
+    seed's actual OUTPUT richness, not input size."""
+    cands = _extract_test_input_candidates(node)
+    return cands[0] if cands else None
+
+
+def _run_inputs_for(node: Node, inbound_examples: dict | None) -> dict | None:
+    """Concrete op-kwargs to RUN this node for capturing its own output example:
+    a downstream maps its inbound example(s) onto its declared input(s); a head extracts
+    literal inputs from its own tests.
+
+    Mapping precedence (Phase 11 Fix 2 hardening). An upstream op's output is almost always
+    a DICT of named fields, and a downstream input usually corresponds to ONE such field BY
+    NAME — exactly the by-name rule the wiring uses (assess_health's `events` ← parse_events
+    output's `events`, NOT the whole {events, malformed_count} dict). So resolve each
+    declared input as:
+      1. an upstream output FIELD whose name == the input name, then
+      2. the whole output of an upstream whose id == the input name, then
+      3. (single declared input, nothing matched by name) the single whole upstream output.
+    The earlier version only did (3)-for-one-input, which fed an upstream's WHOLE multi-field
+    output into a single-field consumer; the capture subprocess then crashed (e.g.
+    assess_health.assess iterating a {events, malformed_count} dict instead of the events
+    list) → None → the real downstream shape (the assessment) never reached render_report,
+    which then guessed the shape, failed, and triggered a full-subtree REPLAN cascade."""
+    if not inbound_examples:
+        return _extract_test_inputs(node)
+    ops = node.contract.get("interface", {}).get("operations", [])
+    decl = list((ops[0].get("inputs", {}) if ops else {}).keys())
+    if not decl:
+        return None
+    field_pool: dict = {}        # output-field name -> value (from dict-shaped outputs)
+    whole_by_src: dict = {}      # upstream id -> its whole output
+    for src, v in inbound_examples.items():
+        if v is None:
+            continue
+        whole_by_src[src] = v
+        if isinstance(v, dict):
+            for fk, fv in v.items():
+                field_pool.setdefault(fk, fv)
+    run: dict = {}
+    for name in decl:
+        if name in field_pool:
+            run[name] = field_pool[name]
+        elif name in whole_by_src:
+            run[name] = whole_by_src[name]
+    if len(run) == len(decl):
+        return run
+    if len(decl) == 1 and len(whole_by_src) == 1:
+        return {decl[0]: next(iter(whole_by_src.values()))}
+    return run or None
+
+
+def _capture_example_output(node: Node, concrete_inputs: dict | None):
+    """Assemble node's verified subtree and RUN its first operation on concrete_inputs in
+    a clean subprocess; return the operation's output (the concrete example that flows
+    downstream), or None. Reuses the Phase-8 assemble-subtree-in-subprocess pattern so a
+    stateful/internal upstream is exercised through its REAL composition."""
+    import json as _json
+    import tempfile
+    try:
+        ops = node.contract.get("interface", {}).get("operations", [])
+        if not ops or not concrete_inputs:
+            return None
+        op_name = ops[0]["name"]
+        assemble(node)  # writes BUILD_ROOT/main.py for this subtree + copies its src
+        with tempfile.TemporaryDirectory(prefix="rich_capture_") as tmp:
+            tmp_path = Path(tmp)
+            for f in BUILD_ROOT.glob("*.py"):
+                shutil.copy2(f, tmp_path)
+            (tmp_path / "_inputs.json").write_text(_json.dumps(concrete_inputs, default=repr))
+            (tmp_path / "_capture.py").write_text(
+                "import json\n"
+                "from main import assemble\n"
+                "inp = json.load(open('_inputs.json'))\n"
+                "demo = assemble()\n"
+                f"out = demo.{op_name}(**inp)\n"
+                "print('___RICH_EXAMPLE___' + json.dumps(out, default=repr))\n")
+            res = subprocess.run([sys.executable, "_capture.py"], capture_output=True,
+                                 text=True, timeout=30, cwd=str(tmp_path))
+            if res.returncode != 0:
+                return None
+            for line in res.stdout.splitlines():
+                if line.startswith("___RICH_EXAMPLE___"):
+                    return _json.loads(line[len("___RICH_EXAMPLE___"):])
+            return None
+    except Exception:
+        return None
+
+
+def _capture_head_example(node: Node, max_seeds: int = 24):
+    """Phase 11 Fix 2 — capture a HEAD's output example, selecting the seed by the RICHNESS
+    of its OUTPUT, not its input size. A head has no upstream to run, so its seed comes from
+    its own tests; but those are mostly edge/empty cases (``parse(lines=[])``) plus a few
+    populated ones. A degenerate seed yields an output with the right summary keys but ZERO
+    per-entry structure, so a downstream learns only the empty shape and then GUESSES the
+    per-entry shape (the render_report per-endpoint residual).
+
+    We therefore RUN each candidate seed and keep the output with the largest serialized size.
+    Crucially we must try the candidates regardless of input size: the seed that actually
+    produces records is often a SMALL one-liner (a single valid log line) while the big
+    multi-line samples are deliberately all-malformed edge cases — so an input-size cap would
+    skip exactly the seed we need. Bounded by max_seeds. Best-effort; None if nothing captures."""
+    import json as _json
+    best, best_size = None, -1
+    for seed in _extract_test_input_candidates(node)[:max_seeds]:
+        out = _capture_example_output(node, seed)
+        if out is None:
+            continue
+        try:
+            size = len(_json.dumps(out, default=repr))
+        except Exception:
+            size = 0
+        if size > best_size:
+            best, best_size = out, size
+    return best
+
+
 def build(contract: dict, allow_decompose: bool = False, use_canned: bool = False,
-          depth: int = 0, llm_call_counter: list | None = None) -> Node:
+          depth: int = 0, llm_call_counter: list | None = None,
+          available_deps: dict | None = None,
+          inbound_examples: dict | None = None) -> Node:
     """The core recursive procedure (§4).
 
     Takes a contract, returns a verified Node or raises BuildFailure.
     depth: current recursion depth (0 = root).
     llm_call_counter: mutable list wrapper to track global LLM call count.
+    available_deps: {contract_id: contract} for the dependencies this node may hold —
+        the sibling contracts the PARENT passes down (Phase 7). A LEAF that declares an
+        injected dependency resolves its contract here and threads it into BOTH
+        DERIVE_TESTS and IMPLEMENT, so the two halves agree on the leaf's shape (closing
+        the leaf-injection gap). None at the root / for a leaf with no declared deps.
+    inbound_examples: {upstream_id: concrete_output_example} — Phase 11 Fix 2. When this
+        node consumes a sibling's DATAFLOW output, the parent runs the already-built
+        upstream and passes its concrete output shape here, threaded into BOTH DERIVE_TESTS
+        and IMPLEMENT so the node is built+tested against the real shape it will receive
+        (the data analogue of the Phase-7 capability handoff). None when no dataflow input.
     """
     if llm_call_counter is None:
         llm_call_counter = [0]
+        # Phase 9 (§2.3): tag this top-level invocation so manifest entries from each
+        # resumption window are distinguishable. A new run-id per build() entry call.
+        global _manifest_run_id
+        _manifest_run_id = f"run-{int(_time.time())}"
+
+    node_id = contract["id"]
 
     # Hard cap: max depth
     if depth > MAX_DEPTH:
         raise BuildFailure(contract["id"], f"Max depth {MAX_DEPTH} exceeded at depth {depth}")
 
-    # Hard cap: max LLM calls
+    # Hard cap: max LLM calls (Phase 9: now a REAL ceiling — the counter is incremented
+    # at every live call site below, repairing a previously dead guardrail and giving
+    # the unattended multi-window spend a hard cost cap + a clean checkpoint boundary).
     if llm_call_counter[0] >= MAX_LLM_CALLS:
         raise BuildFailure(contract["id"], f"LLM call ceiling ({MAX_LLM_CALLS}) exceeded")
 
-    # Memoization: if this contract was verified before, return cached node
+    # Memoization / resumption (§2.2): if this contract was verified before, return the
+    # cached subtree — no LLM calls. Across a quota cut this carries every hash-identical
+    # verified node; the build spends only on the unbuilt remainder.
     cached = _load_verified_node(contract)
     if cached is not None:
+        _manifest(node_id, "memo-hit", contract)
         return cached
 
     # 1. PLAN
@@ -420,8 +812,19 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
         import skills as _skills
         decision = _skills.plan_canned(contract)
     else:
-        decision = plan(contract, allow_decompose=allow_decompose)
-    node_id = contract["id"]
+        # Resumption (§2.2): reuse this node's OWN prior live-authored decision if a
+        # hash-identical one is persisted (frozen tree shape → no redundant PLAN call,
+        # no memo-busting drift). Otherwise PLAN live.
+        prior = _load_prior_decision(contract)
+        if prior is not None:
+            decision = prior
+            _manifest(node_id, "decision-reuse", contract)
+        else:
+            decision = plan(contract, allow_decompose=allow_decompose)
+            llm_call_counter[0] += 1
+            _manifest(node_id, "live-PLAN", contract, model=_PLAN_LABEL,
+                      extra={"allow_decompose": allow_decompose,
+                             "is_leaf": decision.get("is_leaf", True)})
 
     # Create node
     node = Node(
@@ -439,12 +842,42 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
     save_status(node, "planned")
 
     if node.is_leaf:
-        # 2a. DERIVE_TESTS
+        # Phase 6: a leaf may be STATEFUL — a component holding state across
+        # operation calls (a class), verified by operation SEQUENCES — rather than a
+        # pure stateless transformation (top-level functions). The signal comes from
+        # the contract itself (set by the goal author / PLAN), not from coaching the
+        # model: stateful goals describe history-dependent behavior. Defaults False,
+        # so the dataflow path is byte-for-byte unchanged.
+        stateful = bool(contract.get("stateful", False))
+
+        # Phase 7: a leaf may DECLARE injected dependencies — a sibling CAPABILITY it
+        # HOLDS and CALLS at points of its own choosing (not a value the parent threads).
+        # Source those dep contracts from `available_deps` (the sibling contracts the
+        # parent passed down), keyed by the SAME _injection_deps convention internal
+        # nodes use. Threading them into BOTH DERIVE_TESTS and IMPLEMENT closes the
+        # leaf-injection gap: the two halves read the same dependency contract and agree
+        # on the leaf's shape BY CONSTRUCTION. A leaf with NO declared deps → empty dict
+        # → dep_contracts=None → byte-for-byte the pre-Phase-7 leaf path.
+        leaf_dep_contracts = {}
+        for param_name, src_id in _injection_deps(node):
+            if available_deps and src_id in available_deps:
+                leaf_dep_contracts[param_name] = available_deps[src_id]
+        dc = leaf_dep_contracts or None
+
+        # 2a. DERIVE_TESTS — deps present → assume-guarantee test against a
+        # contract-derived fake of the held capability (the same machinery internal
+        # nodes use). pipeline=False: a held capability is CALLED at arbitrary points
+        # by this leaf, not threaded sequentially by a parent.
         if use_canned:
             import skills as _skills4
             tests_src = _skills4.derive_tests_canned(contract)
         else:
-            tests_src = derive_tests(contract)
+            tests_src = derive_tests(contract, dep_contracts=dc, pipeline=False,
+                                     stateful=stateful, inbound_examples=inbound_examples)
+            llm_call_counter[0] += 1
+            _manifest(node_id, "live-DERIVE_TESTS", contract, model=_TESTS_LABEL,
+                      extra={"leaf": True, "stateful": stateful,
+                             "inbound_example": bool(inbound_examples)})
         node.tests_path().mkdir(parents=True, exist_ok=True)
         test_file = node.tests_path() / f"test_{node_id}.py"
         test_file.write_text(tests_src)
@@ -454,10 +887,15 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
         for attempt in range(1, K_IMPL + 1):
             if use_canned:
                 import skills as _skills5
-                src = _skills5.implement_canned(contract, dep_contracts=None, pipeline=False)
+                src = _skills5.implement_canned(contract, dep_contracts=dc, pipeline=False)
             else:
-                src = implement(contract, dep_contracts=None, pipeline=False,
-                              prior_failures=failures if failures else None)
+                src = implement(contract, dep_contracts=dc, pipeline=False,
+                              stateful=stateful,
+                              prior_failures=failures if failures else None,
+                              inbound_examples=inbound_examples)
+                llm_call_counter[0] += 1
+                _manifest(node_id, "live-IMPLEMENT", contract, model=_IMPL_LABEL,
+                          extra={"leaf": True, "attempt": attempt})
             node.src_path().mkdir(parents=True, exist_ok=True)
             src_file = node.src_path() / f"{node_id}.py"
             src_file.write_text(src)
@@ -494,16 +932,58 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
                 child_allow_decompose = (depth + 1) < MAX_DEPTH
                 children_nodes = {}
                 failed_child = None
+                # Phase 11 Fix 2: concrete output example of each built upstream sibling,
+                # filled in topo order, so a downstream sibling is built against the REAL
+                # shape it will receive (not a guess). Reset per replan attempt.
+                example_outputs: dict = {}
+
+                # Phase 7: each child may HOLD a sibling capability. Pass the sibling
+                # contracts down (merged over any deps this node itself received) so a
+                # leaf child can resolve the contract of a dependency it declares.
+                sibling_contracts = {**(available_deps or {}),
+                                     **{c["id"]: c for c in children_ordered}}
 
                 for child_contract in children_ordered:
+                    # Phase 11 Fix 2: gather concrete examples for this child's INBOUND
+                    # DATAFLOW edges (upstream sibling → this child). A held-capability
+                    # edge (upstream listed in this child's own dependencies) is excluded
+                    # — that path is already covered by Phase 7's contract threading.
+                    child_dep_ids = {d["id"] for d in (child_contract.get("dependencies") or [])
+                                     if isinstance(d, dict) and "id" in d}
+                    child_inbound = {}
+                    for e in edges:
+                        if (e.get("to") == child_contract["id"]
+                                and e.get("from") not in child_dep_ids):
+                            ex = example_outputs.get(e.get("from"))
+                            if ex is not None:
+                                child_inbound[e.get("from")] = ex
                     try:
                         child_node = build(child_contract, allow_decompose=child_allow_decompose,
                                           use_canned=use_canned, depth=depth + 1,
-                                          llm_call_counter=llm_call_counter)
+                                          llm_call_counter=llm_call_counter,
+                                          available_deps=sibling_contracts,
+                                          inbound_examples=child_inbound or None)
                         children_nodes[child_contract["id"]] = child_node
                     except BuildFailure as e:
                         failed_child = child_contract
                         raise  # Propagate to replan handler
+
+                    # Capture this child's REAL output example IFF a downstream sibling
+                    # consumes it — running the verified node (no LLM/quota). Best-effort;
+                    # None on any failure (downstream falls back to its contract).
+                    if not use_canned and any(e.get("from") == child_contract["id"]
+                                              for e in edges):
+                        if child_inbound:
+                            # Consumer: run on the concrete value(s) its upstream produced.
+                            run_inputs = _run_inputs_for(child_node, child_inbound)
+                            example_outputs[child_contract["id"]] = (
+                                _capture_example_output(child_node, run_inputs)
+                                if run_inputs else None)
+                        else:
+                            # Head: pick the test seed whose OUTPUT is richest (exercises
+                            # real per-entry structure, not an empty edge case).
+                            example_outputs[child_contract["id"]] = \
+                                _capture_head_example(child_node)
 
                 break  # Success — all children built
 
@@ -513,6 +993,9 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
                     print(f"  [{node_id}] replan attempt {replan_attempt + 1}/{REPLANS_MAX}...")
                     # Call PLAN again with failure context
                     new_decision = plan(contract, allow_decompose=True)
+                    llm_call_counter[0] += 1
+                    _manifest(node_id, "live-REPLAN", contract, model=_PLAN_LABEL,
+                              extra={"replan_attempt": replan_attempt + 1})
                     if new_decision.get("is_leaf", True):
                         raise BuildFailure(node_id, "REPLAN fell back to leaf — decomposition failed")
                     children_contracts = new_decision.get("children", [])
@@ -553,7 +1036,12 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
             import skills as _skills6
             tests_src = _skills6.derive_tests_canned(contract)
         else:
-            tests_src = derive_tests(contract, dep_contracts=dep_contracts, pipeline=True)
+            tests_src = derive_tests(contract, dep_contracts=dep_contracts, pipeline=True,
+                                     inbound_examples=inbound_examples)
+            llm_call_counter[0] += 1
+            _manifest(node_id, "live-DERIVE_TESTS", contract, model=_TESTS_LABEL,
+                      extra={"leaf": False,
+                             "inbound_example": bool(inbound_examples)})
         node.tests_path().mkdir(parents=True, exist_ok=True)
         test_file = node.tests_path() / f"test_{node_id}.py"
         test_file.write_text(tests_src)
@@ -566,7 +1054,11 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
                 src = _skills3.implement_canned(contract, dep_contracts=dep_contracts, pipeline=True)
             else:
                 src = implement(contract, dep_contracts=dep_contracts, pipeline=True,
-                              prior_failures=failures if failures else None)
+                              prior_failures=failures if failures else None,
+                              inbound_examples=inbound_examples)
+                llm_call_counter[0] += 1
+                _manifest(node_id, "live-IMPLEMENT", contract, model=_IMPL_LABEL,
+                          extra={"leaf": False, "attempt": attempt})
             node.src_path().mkdir(parents=True, exist_ok=True)
             src_file = node.src_path() / f"{node_id}.py"
             src_file.write_text(src)
@@ -582,6 +1074,29 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
 
             result = run_tests(node.src_path(), node.tests_path())
             if result["passed"]:
+                # Phase 8: ADD integration verification when children share a stateful
+                # dependency (§1.3). Per-module unit tests just passed, but they fake the
+                # shared store and so cannot see interaction bugs through it. The integration
+                # trace test exercises the REAL subtree (interleaved multi-writer sequence).
+                # Additive: the trigger never fires for non-shared-stateful trees, so every
+                # existing build path is byte-for-byte unchanged.
+                shared = _shares_stateful_dep(node)
+                if shared and not use_canned:
+                    try:
+                        itest = derive_integration_test(contract)
+                        llm_call_counter[0] += 1
+                        _manifest(node_id, "live-INTEGRATION", contract, model=_TESTS_LABEL,
+                                  extra={"shared_stateful": shared})
+                        ires = verify_integration(node, itest)
+                    except (LLMNotConfigured, LLMParseError) as e:
+                        # generation unavailable/failed — record, do not silently pass
+                        ires = {"passed": True, "failures": [f"integration generation skipped: {e}"]}
+                    if not ires["passed"]:
+                        save_status(node, "failed",
+                                    reason=f"integration (shared stateful '{shared}'): {ires['failures'][:2]}")
+                        raise BuildFailure(node_id,
+                            f"integration test FAILED on shared stateful dep '{shared}' "
+                            f"(units passed, interaction wrong): {ires['failures'][:2]}")
                 save_status(node, "verified")
                 save_deps(node)
                 # Update decision with children contracts

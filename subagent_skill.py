@@ -10,9 +10,12 @@ parse_json_response — WITHOUT touching build.py, node.py, the recursion, or th
 deterministic engine. This is the same boundary-swap pattern test_harness.py
 uses, so RICH's mechanical spine is unchanged.
 
-Firewall (RICH D5, hardened): the worker is spawned with all file/exec tools
-disabled, so it is a pure text generator. The dependency *contracts* arrive in
-the prompt; the worker physically cannot read dependency *source*.
+Firewall (RICH D5, hardened): the worker is spawned with `--tools ""` (ZERO
+built-in tools) PLUS an explicit `--disallowedTools` denylist, so it is a pure
+text generator with no tool affordance at all. The dependency *contracts* arrive
+in the prompt; the worker physically cannot read dependency *source* — and with
+no tools in context it cannot emit a tool_use block, so a large generation call
+cannot trip `--max-turns` (Phase 11 Fix 1).
 
 Parse defense: reuses llm.parse_json_response (fence stripping, escape repair,
 raw-dump-on-failure) and HARDENS it with a balanced-brace extractor, since a
@@ -55,27 +58,64 @@ DISALLOWED_TOOLS = [
 
 
 # ── Telemetry ──────────────────────────────────────────────────────
+# Phase 11 (efficiency/logging audit): the `claude -p` envelope returns a full `usage`
+# block (input/output/cache tokens) and a stop_reason per call. The old _record threw all
+# of that away — keeping only cost/wall/turns — so per-call token accounting and cost
+# attribution were impossible, and prompts/responses were never logged at all. We now
+# (a) keep the full usage in the in-memory ledger AND (b) append one self-describing JSONL
+# line per call to RICH_CALL_LOG (default build/llm_calls.jsonl), so every live call is
+# auditable after the fact: which model, what it cost, how many input/output/cached tokens,
+# how big the prompts were, and whether it errored. Purely additive — no build path changes.
 _calls: list[dict] = []
 
+CALL_LOG = os.environ.get("RICH_CALL_LOG", "build/llm_calls.jsonl")
 
-def _record(env: dict, model: str, wall_s: float):
-    _calls.append({
+
+def _record(env: dict, model: str, wall_s: float,
+            sys_chars: int = 0, user_chars: int = 0):
+    usage = env.get("usage") or {}
+    entry = {
+        "ts": round(time.time(), 3),
         "model": model,
         "wall_s": round(wall_s, 2),
         "cost_usd": env.get("total_cost_usd"),
         "duration_ms": env.get("duration_ms"),
         "num_turns": env.get("num_turns"),
-    })
+        "stop_reason": env.get("stop_reason"),
+        "subtype": env.get("subtype"),
+        "is_error": bool(env.get("is_error")),
+        # token accounting (previously discarded)
+        "input_tokens": usage.get("input_tokens"),
+        "output_tokens": usage.get("output_tokens"),
+        "cache_creation_tokens": usage.get("cache_creation_input_tokens"),
+        "cache_read_tokens": usage.get("cache_read_input_tokens"),
+        # prompt sizes (chars) so payload growth is visible without storing the prompt
+        "sys_chars": sys_chars,
+        "user_chars": user_chars,
+        "session_id": env.get("session_id"),
+    }
+    _calls.append(entry)
+    try:
+        with open(CALL_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
 
 
 def get_telemetry() -> dict:
     total_cost = sum((c["cost_usd"] or 0) for c in _calls)
     total_wall = sum(c["wall_s"] for c in _calls)
+    total_in = sum((c.get("input_tokens") or 0) for c in _calls)
+    total_out = sum((c.get("output_tokens") or 0) for c in _calls)
+    total_cache_r = sum((c.get("cache_read_tokens") or 0) for c in _calls)
     return {
         "n_calls": len(_calls),
         "total_cost_usd": round(total_cost, 4),
         "total_wall_s": round(total_wall, 1),
         "avg_wall_s": round(total_wall / len(_calls), 1) if _calls else 0,
+        "total_input_tokens": total_in,
+        "total_output_tokens": total_out,
+        "total_cache_read_tokens": total_cache_r,
         "calls": _calls,
     }
 
@@ -85,6 +125,9 @@ def print_telemetry():
     print(f"  [subagent telemetry] {t['n_calls']} calls, "
           f"${t['total_cost_usd']} total, {t['total_wall_s']}s wall "
           f"(avg {t['avg_wall_s']}s/call)")
+    print(f"  [subagent tokens] in={t['total_input_tokens']} "
+          f"out={t['total_output_tokens']} cache_read={t['total_cache_read_tokens']} "
+          f"(per-call ledger: {CALL_LOG})")
 
 
 def reset_telemetry():
@@ -99,13 +142,29 @@ def is_available() -> bool:
 
 
 def _invoke(system_prompt: str, user_prompt: str, *, model: str,
-            max_turns: int = 1, timeout: int = TIMEOUT_S) -> str:
+            max_turns: int = 6, timeout: int = TIMEOUT_S) -> str:
     """One `claude -p` call. Returns the model's raw text (envelope `.result`)."""
     cmd = [
         CLAUDE_BIN, "-p",
         "--model", model,
         "--output-format", "json",
         "--append-system-prompt", system_prompt,
+        # Phase 11 Fix 1 (the max_turns / tool_use wall) — THREE layers, because a single
+        # one proved insufficient:
+        #  (1) `--tools ""` removes ALL built-in tools (Read/Bash/… verified gone), so the
+        #      subagent cannot touch the filesystem — the SOURCE-FIREWALL is intact (in fact
+        #      tightened: with no built-ins there is nothing to read). --disallowedTools is
+        #      KEPT below as belt-and-suspenders (Phase 11 §3 invariant: do not relax it).
+        #  (2) BUT the Anthropic API SERVER tools (web_search/web_fetch) are NOT governed by
+        #      --tools/--disallowedTools, and sonnet on a large render reached for one →
+        #      error_max_turns/stop_reason:tool_use (the P8/P10 wall). So the IMPLEMENT/
+        #      DERIVE_TESTS system prompts now explicitly forbid ALL tool use (the Phase-8
+        #      rewording), telling the model to emit only the JSON.
+        #  (3) max_turns is raised from 1 (see _invoke default) so that even if the model
+        #      still emits a stray server tool_use, it gets turns to RECOVER to final text
+        #      instead of dying at turn 1. A server tool cannot read dependency source, so
+        #      the source-firewall holds regardless of the turn budget.
+        "--tools", "",
         "--disallowedTools", *DISALLOWED_TOOLS,
         "--max-turns", str(max_turns),
         user_prompt,
@@ -130,7 +189,7 @@ def _invoke(system_prompt: str, user_prompt: str, *, model: str,
     if env.get("is_error"):
         raise LLMError(f"claude reported error: {str(env.get('result',''))[:300]}")
 
-    _record(env, model, wall)
+    _record(env, model, wall, sys_chars=len(system_prompt), user_chars=len(user_prompt))
     return env.get("result", "") or ""
 
 

@@ -1,352 +1,360 @@
 # RICH — Recursive Agent Build System
 
-> A system that takes a single high-level goal and recursively decomposes it into a
-> tree of modules, where each module is built by an LLM agent. Modules are specified
-> by contracts authored by their parent, implemented against dependency contracts
-> only (never source), verified by consumer-derived tests, and assembled by a
-> deterministic topological fold that injects each module's dependencies into it,
-> producing a runnable deliverable.
+RICH builds software by **recursive decomposition with bounded LLM agents**. You give it
+one top-level *contract* (what a program must do); a single recursive procedure
+`build(contract)` either implements it directly as a **leaf** or asks an LLM **architect**
+to split it into child modules whose contracts it authors, then recurses. Three LLM skills
+do the thinking — **PLAN** (decompose), **IMPLEMENT** (write code), **DERIVE_TESTS** (write
+the verification) — and two deterministic engines do the rest — **run_tests** (verify) and
+**assemble** (a topological fold that injects each module's dependencies and emits one
+runnable `main.py`). Every module is written against its dependencies' *contracts*, never
+their source; tests are derived by the *consumer*; and what gets verified is exactly what
+ships.
 
-## Architecture
+> **Status (honest, after Phase 11):** RICH is a working tool for genuinely-useful,
+> **stateless-dataflow** programs that decompose into pipelines, fan-in/fan-out diamonds,
+> held-capability sharing, and **compositional depth** (a stage that is itself several
+> sub-modules — builds two levels deep, uncoached, live). It correctly keeps
+> *algorithmically* recursive code (e.g. an expression parser) in a single leaf.
+>
+> **Delivery at depth is YELLOW, not GREEN (Phase 11).** A depth-2 goal builds, assembles,
+> and RUNS, producing **correct aggregate output** — but a *clean, coherent* delivery from
+> the verified source is not yet guaranteed. Two residuals are located and partially fixed:
+> (1) the **dataflow shape handoff** is threaded across *sibling* edges (Phase 11 Fix 2) but
+> **not yet parent→child**, so a child can still guess its input's item-shape wrong and pass
+> per-module verification while breaking the assembled whole; (2) **REPLAN has unbounded blast
+> radius**, rebuilding verified siblings against changed contracts and manufacturing
+> cross-module inconsistency. It does **not** yet do cross-module conditional/branching
+> composition or distribution across processes. See
+> [§7](#7-what-is-proven--the-verification-boundary-map),
+> [§8](#8-known-boundaries--non-goals), and `PHASE11_REPORT.md` for the precise regime.
+
+---
+
+## 1. What RICH is
+
+The entire system is **one recursive procedure + three LLM skills + two deterministic
+engines.**
 
 ```
                     ┌─────────────────────────────┐
-                    │  build(contract) → Node     │  ← single recursive procedure
+                    │  build(contract) → Node      │  ← single recursive procedure
                     └─────────────┬───────────────┘
                                   │
               ┌───────────────────┼───────────────────┐
-              ▼                   ▼                   ▼
+              ▼                   ▼                    ▼
         ┌──────────┐       ┌────────────┐      ┌────────────┐
-        │   PLAN   │       │ IMPLEMENT  │      │DERIVE_TESTS│    ← 3 LLM skills
-        │ (architect)      │ (coder)    │      │ (tester)   │
-        └──────────┘       └────────────┘      └────────────┘
-              │                   │                   │
-              ▼                   ▼                   ▼
+        │   PLAN   │       │ IMPLEMENT  │      │DERIVE_TESTS│   ← 3 LLM skills
+        │(architect)│      │  (coder)   │      │  (tester)  │      (non-deterministic)
+        └────┬─────┘       └─────┬──────┘      └─────┬──────┘
+             ▼                   ▼                    ▼
         ┌──────────┐       ┌────────────┐      ┌────────────┐
-        │ DAG      │       │ Retry loop │      │ Pytest     │    ← deterministic
-        │ validate │       │ K_IMPL=3   │      │ subprocess │       engines
-        └──────────┘       └────────────┘      └────────────┘
-                                                     │
+        │   DAG    │       │ verify loop│      │  pytest    │   ← deterministic engines
+        │ validate │       │  K_IMPL=3  │      │ subprocess │      (rock-solid)
+        └──────────┘       └────────────┘      └─────┬──────┘
                                                      ▼
                                               ┌────────────┐
-                                              │  assemble  │    ← topological fold
-                                              │  → main.py │       + injection
+                                              │  assemble  │   ← topological fold
+                                              │  → main.py │      + dependency injection
                                               └────────────┘
 ```
 
-**The entire system is one recursive procedure + three LLM skills + two deterministic engines.**
-
-### The three LLM skills (non-deterministic)
-
 | Skill | Role | Input | Output |
 |-------|------|-------|--------|
-| **PLAN** | Architect | Module contract | `{is_leaf: true}` or `{is_leaf: false, children: [...], edges: [...]}` |
-| **IMPLEMENT** | Coder | Contract + dep contracts | Python source code |
-| **DERIVE_TESTS** | Tester | Contract | pytest test file |
+| **PLAN** | Architect | A module contract | `{is_leaf:true}` or `{is_leaf:false, children:[…], edges:[…]}` (children's contracts authored here) |
+| **IMPLEMENT** | Coder | Contract + dependency *contracts* | Python source |
+| **DERIVE_TESTS** | Tester | Contract (+ dep contracts) | pytest source |
 
-### The two deterministic engines (rock-solid)
+| Engine | Role | How |
+|--------|------|-----|
+| **run_tests** | Verification | pytest in a timeout-guarded subprocess; returns pass/fail + failure detail |
+| **assemble** | Delivery | topological fold → `build/main.py`; shared deps instantiated once and injected by name |
 
-| Engine | Role | Implementation |
-|--------|------|---------------|
-| **run_tests** | Verification | Pytest subprocess, timeout-guarded, captures pass/fail detail |
-| **assemble** | Delivery | Topological fold, generates `build/main.py`, shared deps instantiated once |
+---
 
-### The central idea
+## 2. Core principles
 
-**Contracts flow DOWN from demand, not UP from supply.** A module's contract describes
-what it must provide to its consumer. The consumer (the parent) authors it. A module
-never writes its own contract — it receives it as its task and is responsible only
-for satisfying it.
+- **The information firewall.** A module is generated by a single stateless LLM call that
+  sees its *own* contract and its dependencies' *contracts* — never their source. The
+  firewall is the prompt: dependency source is never placed in context. This is what makes
+  the decomposition compositional rather than one giant prompt.
 
-### Key architecture properties
+- **Contracts flow DOWN from demand, not UP from supply.** A module never writes its own
+  contract. The **consumer (parent)** authors it: PLAN's decomposition output *is* the
+  children's contracts. A module receives its contract as its task and is responsible only
+  for satisfying it.
 
-| # | Property | How |
-|---|----------|-----|
-| D1 | Contract authored by parent | PLAN's decomposition output IS the children's contracts |
-| D2 | Leaf XOR internal | PLAN chooses; governed by budget |
-| D3 | Implementation against dep CONTRACTS only | IMPLEMENT receives dep contracts, never source |
-| D4 | Dependencies injected by name | Modules receive deps as named constructor params; never `import` |
-| D5 | Firewall is the prompt | Single stateless LLM call; dep source never in context |
-| D6 | Assembly is deterministic | Topological fold instantiates leaves, injects upward by name |
-| D7 | Budget is the base case | PLAN decides leaf vs decompose; soft (PLAN) + hard (post-check) |
-| D8 | Verification is existential | "Passed" = no violation observed on tested inputs — not a proof |
-| D9 | Wiring is pipeline-only | Sequential/dataflow composition; no conditionals/loops in v1 |
+- **Dependencies are injected by name, never imported.** A module that needs a sibling
+  receives it as a named constructor parameter and calls it (`self.<dep>.<op>(…)`). It never
+  `import`s another module. Assembly does the wiring.
 
-## File Reference
+- **The budget is the recursion's base case — and it is PLAN's disposition, not a code
+  enforcer.** PLAN decides leaf-vs-decompose on *behavior*: a leaf is "one cohesive
+  computation a competent engineer would write as a single small module"; it decomposes when
+  the behavior names separable stages or concerns. A hard `MAX_DEPTH` cap bounds runaway
+  recursion. **There is no implement-then-check size enforcer** that measures generated code
+  and forces a split — see [§8](#8-known-boundaries--non-goals). In practice PLAN's judgment
+  tracks genuine modular structure well (Phase 10): it keeps an algorithmic leaf whole and
+  decomposes a genuinely compositional stage.
+
+- **Assembly is a deterministic topological injection fold.** `assemble` traverses the
+  verified tree in dependency order, instantiates each leaf, injects dependencies (a shared
+  dependency is constructed **once** and injected into every consumer), and instantiates each
+  internal node's wiring class with its children. No LLM is involved in delivery.
+
+- **Verify-it / ship-it consistency.** Assembly instantiates the *same* IMPLEMENT class that
+  passed verification. What was verified is what runs. Verification is **existential** —
+  "passed" means no violation was observed on the tested inputs, not a proof of correctness.
+
+---
+
+## 3. Architecture / file reference
 
 | File | Lines | Purpose |
-|------|-------|---------|
-| `build.py` | 1057 | Core recursive procedure, verification engine, assembly engine, CLI, memoization, REPLAN, caps |
-| `skills.py` | 742 | PLAN / IMPLEMENT / DERIVE_TESTS — LLM prompts + canned fallback data + contract validation |
-| `llm.py` | 183 | OpenRouter client — call, retry with backoff, JSON parse defense, error types |
-| `node.py` | 124 | Node dataclass, on-disk persistence (YAML/JSON), topological sort |
-| `deep_test.py` | 194 | M-G canned test data for depth-2 recursion |
-| `spec.md` | 272 | Full design document — locked decisions, milestones, contract schema, non-goals |
+|------|------:|---------|
+| `build.py` | 1368 | The recursion (`build`), verification (`run_tests`), delivery (`assemble`), memoization + resumption, REPLAN/backtracking, hard caps, integration verification, the call manifest, the CLI |
+| `skills.py` | 1058 | PLAN / IMPLEMENT / DERIVE_TESTS — prompts, JSON/DAG validation, canned (no-LLM) fallback data, model routing |
+| `subagent_skill.py` | ~330 | **The real backend.** Runs each skill as a `claude -p --model <m> --tools "" --max-turns 6` subprocess (Phase 11 Fix 1: zero tool affordance + recovery headroom, firewall via `--disallowedTools` kept); `install()` monkeypatches the skills' LLM seam onto it; per-call token/cost logging → `build/llm_calls.jsonl` |
+| `llm.py` | 183 | An *alternate* backend seam — an OpenRouter HTTP client (call/retry/JSON-defense). Present but unused by default (no API key needed for the `claude -p` path) |
+| `node.py` | 125 | `Node` dataclass + on-disk persistence (contract.yaml / decision.json / status.json / deps.yaml) + topological sort |
+| `run_tests.py` | 448 | The pytest subprocess engine + result parsing |
+| `tree_viewer.py` | 232 | **Read-only** inspector: renders `build/` to a graphviz HTML (structure + state views; highlights fan-in and shared-stateful "dragon" nodes). Never writes into `build/` |
+| `spec.md` | — | The locked design document |
 
-### `build.py` — Core driver
-
-Constants:
-```
-K_IMPL = 3          Leaf implementation retry limit
-K_WIRE = 3          Internal wiring retry limit
-MAX_DEPTH = 3       Maximum recursion depth (hard cap)
-MAX_CHILDREN = 8    Maximum children per node (hard cap)
-MAX_LLM_CALLS = 50  Global LLM call ceiling (hard cap)
-REPLANS_MAX = 2     Maximum replan attempts on child failure
-```
-
-Key functions:
-```
-build(contract, allow_decompose, use_canned, depth, llm_call_counter) → Node
-run_tests(src_dir, tests_dir) → {passed, failures}
-assemble(root) → main.py path
-_contract_hash(contract) → 16-char SHA-256
-_load_verified_node(contract) → Node | None      (memoization)
-_save_memo(node, contract)                        (memoization)
-_topo_sort_contracts(children, edges) → list      (DAG sort for dicts)
-_validate_dag(children, edges, parent_id)         (cycle detection)
-_validate_child_contracts(children, parent_id)    (schema validation)
-_print_tree(node, indent)                         (debug)
-test_single_leaf(module_id, desc)                 (--test-leaf)
-test_decompose(desc, goal)                        (--decompose)
-test_fan_in()                                     (--fan-in)
-test_deep()                                       (--deep)
-test_memo()                                       (--memo-test)
-```
-
-### `skills.py` — LLM skills + canned data
-
-Functions:
-```
-plan(contract, allow_decompose) → decision       (LLM or fallback)
-plan_canned(contract) → decision                 (always canned)
-implement(contract, dep_contracts, pipeline, prior_failures) → source
-implement_canned(contract, ...) → source         (always canned)
-derive_tests(contract) → pytest source
-derive_tests_canned(contract) → pytest source    (always canned)
-```
-
-Canned data:
-```
-CANNED_PIPELINE_DEMO_DECISION    normalize → validate (2 children, 1 edge)
-CANNED_FAN_IN_DECISION           email checker — regex_engine shared by format + domain checker
-CANNED_IMPLS                     10 canned source implementations
-CANNED_TESTS                     10 canned pytest files
-```
-
-### `llm.py` — OpenRouter client
+`build.py` constants (hard caps + retry limits):
 
 ```
-call_llm(system, user, ...) → raw text      One API call
-call_with_retry(...) → raw text              Exponential backoff (3 attempts)
-parse_json_response(raw, context) → dict     Defensive JSON parsing
-is_available() → bool                        API key check
+K_IMPL       = 3    leaf IMPLEMENT retry limit (verify loop)
+MAX_DEPTH    = 3    maximum recursion depth (hard cap; permits depth, does not force it)
+MAX_CHILDREN = 8    maximum children per node (hard cap)
+MAX_LLM_CALLS = 50  global live-call ceiling (hard cost cap; also a clean resume checkpoint)
+REPLANS_MAX  = 2    maximum REPLAN attempts when a child fails to build
 ```
 
-Error types: `LLMError`, `LLMParseError` (dumps raw response to disk), `LLMNotConfigured`
+---
 
-Config: `RICH_MODEL` env var, defaults to `google/gemini-2.0-flash-001`. API key via `OPENROUTER_API_KEY`.
+## 4. The build lifecycle
 
-### `node.py` — Node model
+`build(contract, allow_decompose)`:
 
-```
-Node(id, contract, is_leaf, children, edges, dependencies)   Dataclass
-save_contract(node)        → build/<id>/contract.yaml
-save_decision(node)        → build/<id>/decision.json
-save_status(node, status)  → build/<id>/status.json
-save_deps(node)            → build/<id>/deps.yaml
-topological_order(children, edges) → sorted Node list
-```
+1. **Memo / resume check.** If a hash-identical contract was verified before, return the
+   cached subtree (no LLM). This is what makes builds **resumable** across a quota cut.
+2. **PLAN.** Decide leaf or decompose. On resume, a node's *own* prior live decision is
+   reused if the contract hash matches (frozen tree shape) — the PLAN-level analogue of
+   memoization. Either path is recorded to the call manifest.
+3. **Leaf path:** DERIVE_TESTS → IMPLEMENT, then `run_tests`; retry up to `K_IMPL` with the
+   failure detail fed back into the next IMPLEMENT prompt. A leaf may be a **stateless
+   transformation** (top-level functions) or a **stateful component** (one class verified by
+   operation *sequences*), and it may **hold an injected capability** (a sibling utility it
+   calls) — resolved from the sibling contracts the parent passes down.
+4. **Internal path:** recurse on each child in dependency order; if a child fails, **REPLAN**
+   the decomposition (up to `REPLANS_MAX`); then generate + verify the **wiring class** that
+   threads the children. When an internal node's children **share a stateful dependency**,
+   an additional **integration test** runs over the *real* assembled subtree (no fakes) — the
+   sound check for cross-module shared state (Phase 8).
+5. **Assemble.** `assemble(root)` folds the verified tree into `build/main.py`.
 
-## On-Disk Layout
+---
 
-Each node is a directory under `build/`:
-
-```
-build/<id>/
-  contract.yaml      # Authored by parent (or root seed)
-  decision.json      # {is_leaf: true} or {is_leaf: false, children: [...], edges: [...]}
-  deps.yaml          # Resolved dependencies [{name, id}, ...]
-  src/               # Implementation source
-    <id>.py
-  tests/             # Pytest from DERIVE_TESTS
-    test_<id>.py
-  status.json        # {status: planned|implemented|verified|failed, reason?}
-  memo.txt           # SHA-256 hash of contract (for memoization)
-build/main.py         # Generated entrypoint — assembly fold
-```
-
-## Contract Schema
+## 5. The contract schema
 
 ```yaml
-id: <unique string>              # Also the node directory name
-description: <one-line goal>
+id: my_module                    # unique, lowercase_underscore
+description: what it does
 interface:
   operations:
-    - name: <op name>
-      inputs:  {<param>: <type>}          # string|int|float|bool|list<...>
-      outputs: {<param>: <type>}
-      errors:  [<error name>, ...]
-dependencies:                              # Present on internal nodes
-  - name: <inject_param_name>
-    id: <child id this name binds to>
-behavior:                                   # Consumer-authored, prose in v1
-  - id: <stable prop id>
-    prose: <what must be true>
+    - name: do_thing
+      inputs:  {text: string}    # types: string | int | float | bool | list  (and dict)
+      outputs: {result: float, error: string}
+      errors:  []
+dependencies: []                 # [{name: <param>, id: <module_id>}] — capabilities this module HOLDS
+behavior:                        # prose properties with stable ids — the basis for derived tests
+  - id: precedence
+    prose: "multiplication binds tighter than addition, so 2+3*4 = 14"
+stateful: false                  # true → a class verified by operation sequences
 ```
 
-## CLI Reference
+- A **live root** has **no** `dependencies` key — PLAN authors the children and edges.
+- **Edges** (`{from, to, name}`) express **dataflow handoff**: the parent threads one
+  child's output into the next as a named argument; the downstream child knows nothing about
+  the upstream one.
+- **Dependencies** express a **held capability**: a utility a consumer holds and calls at
+  points of its own choosing. A utility shared by several consumers is **one** child injected
+  into each (fan-in), constructed once by assembly.
+- The type vocabulary is `string | int | float | bool | list` (plus `dict`). Nested lists /
+  dicts carry structured data (e.g. an AST as `["+", 3, ["*", 4, 2]]`). There are **no
+  opaque module-defined types** across contract boundaries.
+
+---
+
+## 6. How to run it
+
+### Canned demos (no LLM, deterministic — start here)
 
 ```bash
-# Canned pipeline demo — always works, zero LLM calls
-python build.py
-
-# Single-module LLM generate + verify (PLAN→leaf, IMPLEMENT, DERIVE_TESTS, run_tests)
-python build.py --test-leaf <module_id> --contract "<description>"
-
-# Decomposition pipeline — PLAN can decompose, all skills real LLM
-python build.py --decompose "<desc>" --contract "<goal description>"
-
-# Shared dependency test (fan-in) — regex_engine instantiated once
-python build.py --fan-in
-
-# Depth-2 recursion test — validate_registration → password_pipeline → children
-python build.py --deep
-
-# Memoization test — build twice, second run is ~0.01s from cache
-python build.py --memo-test
+python build.py              # M-A/B: a normalize→validate pipeline, assembled + run
+python build.py --fan-in     # M-F: a shared regex_engine injected into two checkers (one construct)
+python build.py --deep       # M-G: a depth-2 tree (password_pipeline → length + complexity checks)
+python build.py --memo-test  # memoization: second build is instant from cache
 ```
 
-## Milestone History
+These exercise the engine end-to-end with **canned** PLAN/IMPLEMENT/DERIVE_TESTS — no
+backend, no key — and are the regression suite (keep them green).
 
-Built in strict milestone order per `spec.md` §8. Each milestone leaves the system runnable.
+### The live backend (`claude -p` — no API key needed)
 
-| Milestone | Commit | What | Test |
-|-----------|--------|------|------|
-| **M-A** | `aa2f647` | Skeleton + node model + build() recursion + canned pipeline demo (normalize→validate). **Zero LLM.** | `python build.py` |
-| **M-B** | `ea5737a` | Real pytest verification (subprocess) + real assembly (topological fold → `main.py`). Deterministic back-half trustworthy. | `python build.py` |
-| **M-C** | `c0d406b` | Real IMPLEMENT + DERIVE_TESTS via OpenRouter. Retry+backoff, parse defense, prior-failure injection, canned fallback. | `--test-leaf` |
-| **M-D** | `ab88106` | Real PLAN (leaf-only). All 3 skills real — full autonomous single-module loop. | `--test-leaf` |
-| **M-E** | `54b4f90` | Decomposition enabled. PLAN authors child contracts, DAG validation, depth-1 recursion. MVP architecture proven. | `--decompose` |
-| **M-F** | `a642ea0` | Shared dependency (fan-in). regex_engine instantiated once, injected into both format_checker and domain_checker. | `--fan-in` |
-| **M-G** | `02fa0e1` | Depth>1 recursion, REPLAN on child failure, hard caps (max_depth/max_children/max_llm_calls), memoization (contract hash). | `--deep`, `--memo-test` |
+The default backend runs each skill as a `claude -p --model sonnet --tools "" --max-turns 6`
+subprocess through `subagent_skill.install()`. A live build harness looks like:
 
-## Configuration
+```python
+import build, subagent_skill
+subagent_skill.install()                 # monkeypatch the skills onto claude -p
+build.MAX_DEPTH = 3
+root = build.build(MY_ROOT_CONTRACT, allow_decompose=True)   # live, recursive
+build.assemble(root)                      # → build/main.py
+```
 
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `OPENROUTER_API_KEY` | (required) | OpenRouter API key for LLM calls |
-| `RICH_MODEL` | `google/gemini-2.0-flash-001` | Model for all LLM skills |
+Model routing (optional): `RICH_PLAN_MODEL` / `RICH_IMPL_MODEL` / `RICH_TESTS_MODEL` select
+per-skill models (default `sonnet`; the seam exists but is **inert** unless you set these).
+Keep IMPLEMENT strong; routing DERIVE_TESTS (and possibly PLAN) to `haiku` is the main quota
+lever — see `EFFICIENCY_REPORT.md` (one depth-2 build = ~64 live `claude -p` sessions on a
+shared 5-hour Pro window; cheap-model routing + an `ANTHROPIC_API_KEY` are the durable fixes).
 
-## Running the Tests
+> An **alternate** backend (`llm.py`, OpenRouter, `OPENROUTER_API_KEY`, `RICH_MODEL`) exists
+> as a drop-in seam for higher rate limits / lower per-call overhead, but is unused by
+> default and requires a key.
+
+### Resumption across a quota cut (first-class)
+
+Subscription session limits are real. If a live build is cut (a `429`), **just re-run the
+same build** (no reset): `build()` memo-hits every verified subtree, reuses prior live
+decisions, and spends new calls only on the unbuilt remainder. An append-only **call
+manifest** (`build/manifest.jsonl`) records one line per event — `live-PLAN`,
+`live-IMPLEMENT`, `live-DERIVE_TESTS`, `live-INTEGRATION`, `live-REPLAN`, `memo-hit`,
+`decision-reuse` — so a build's integrity is **auditable**: every node was live-authored or
+is a hash-traceable memo-hit, and "0 forbidden events" is a proof of no pinning, not an
+assertion. The manifest doubles as the cost ledger.
+
+### Inspect the tree (read-only)
 
 ```bash
-# All canned tests (0 LLM cost):
-python build.py                    # Pipeline demo
-python build.py --fan-in           # Shared dependency
-python build.py --deep             # Depth-2 recursion
-python build.py --memo-test        # Memoization
-
-# Real LLM tests (costs API credits):
-python build.py --test-leaf reverse_str --contract "Reverse a string"
-python build.py --decompose "text_pipeline" --contract "Count chars then check > 50"
+python tree_viewer.py        # renders build/ → /tmp/rich_tree.html (structure + state views)
 ```
 
-## How to Add a New Canned Test
+---
 
-1. Define a `ROOT_CONTRACT` dict with `id`, `description`, `interface`, `dependencies`, `behavior`
-2. Register a matching decision in `plan_canned()` (in `skills.py`)
-3. Add source implementations to `CANNED_IMPLS` keyed by module id
-4. Add pytest files to `CANNED_TESTS` keyed by module id
-5. For internal nodes (decomposition), add the child contracts to the decision's `children` array
-6. Wire a new `--flag` and `test_*()` function in `build.py`
+## 7. What is proven — the verification-boundary map
 
-## Implementation Notes
+Established phase-by-phase, on real live runs (`PHASE*_REPORT.md`). Honest about what is
+proven *by a live end-to-end carry* vs *by mechanism only*.
 
-### Canned functions must be resolved at call time, not import time
+| Regime | Status | Evidence |
+|---|---|---|
+| **Linear dataflow pipeline** | ✅ proven live | P3 (`comment_ingest`), P9 |
+| **Dataflow fan-in/out (diamond)** | ✅ proven live | P4 (`publish_article`), P9 (`statement_analyzer`) |
+| **Held-capability fan-in** (a shared utility several leaves call) | ✅ proven live, end-to-end | P7 (`financial_report` — one `currency_formatter` injected into 3 consumers) |
+| **Stateful module** (a class verified by operation sequences) | ✅ proven live | P6 (`todo_store`) |
+| **Stateful composition** (a stateful core + readers) | ✅ proven live | P6 (via REPLAN to a dataflow shape) |
+| **Shared-mutable state *verification*** | ✅ proven (mechanism + generation) | P8 — per-module fakes are *unsound* when modules share mutable state (the frame rule's disjoint-footprint side-condition); an **integration trace test over the real subtree** catches the false pass and is auto-generated from behavior prose |
+| **A real, useful, wide-shallow build, end-to-end** | ✅ proven live | P9 (`statement_analyzer`, across a real ~4.7h quota cut, $1, 0 pins) |
+| **Compositional depth (depth-2) — builds & computes** | ✅ proven live | **P10/P11** (`log_health_report` → `assess_health` decomposes into 3 analyses + a fan-in assembler; depth-2, uncoached; verifies, assembles, RUNS, and computes **correct aggregate output** on the real log batch) |
+| **Compositional depth — *coherent* end-to-end delivery** | 🟡 **YELLOW (P11)** | The deliverable runs and the aggregates are right, but a clean delivery from the verified `src/` is not yet guaranteed: the dataflow shape handoff is wired across *sibling* edges (Fix 2) but **not parent→child**, and **REPLAN's unbounded blast radius** rebuilds verified siblings into cross-module-inconsistent shapes. See `PHASE11_REPORT.md` §4–§5. |
+| **Algorithmic recursion** (e.g. a precedence parser) | ✅ correctly kept in **one leaf** | P10 (a full expression evaluator built correctly as a single leaf, 13/13) |
 
-`build()` calls `skills.plan_canned(contract)` via `import skills as _skills` at the call
-site. This is intentional — test functions patch `skills.plan_canned` at runtime. If you
-use a module-level `from skills import plan_canned`, the patch won't take effect.
+**The single-owner / stateless-dataflow regime is the sound, PLAN-preferred regime.** When
+state is offered but not forced, PLAN routes around shared mutability toward a stateless fold
+(P9). And **depth arises for the right reason**: compositional nesting (separable
+sub-modules) summons depth-2 and it carries; algorithmic nesting (one recursive algorithm)
+is correctly kept whole. RICH finds the depth that is really there.
 
-### Leaf vs pipeline IMPLEMENT modes
+---
 
-- **Leaf:** Export top-level functions (no classes). Tests import functions directly.
-- **Pipeline:** Use a class with `__init__` receiving deps. Compose dependencies sequentially.
-  Do NOT reimplement logic that belongs in children.
+## 8. Known boundaries / non-goals
 
-### JSON parse defense for LLM output
+- **No implement-then-check budget enforcer.** The base case is PLAN's disposition + the
+  `MAX_DEPTH` cap. There is no mechanism that measures generated code and forces a split.
+  (Confirmed in P10 §5.1 — the brief assumed one existed; it does not.) In practice PLAN's
+  leaf-vs-decompose judgment is good, so this has not been a correctness problem — but depth
+  cannot be *forced*, only offered by problem structure.
 
-LLMs produce invalid JSON containing unescaped special characters (`\{`, `\}`, `\'`).
-The parse defense in `llm.py`:
-1. Strips markdown fences (` ```json ... ``` `)
-2. Fixes backslashes before non-standard JSON escape characters via regex
-3. Uses `json.loads(text, strict=False)`
-4. On failure, dumps raw response to `/tmp/rich_parse_failure_*.txt`
+- **No cross-module conditional / branching composition.** Wiring is dataflow (threaded
+  values + held capabilities). Conditionals, loops, and error-branching currently live
+  *inside* leaves as ordinary code, not as graph structure between modules. The
+  "composition-language" frontier (a module that routes between siblings on a condition) is
+  not built.
 
-### Memoization
+- **Backend friction on large IMPLEMENT calls — mostly fixed (P11 Fix 1), residual remains.**
+  `claude -p` now runs with `--tools ""` (zero tool affordance) + a no-tools system rule +
+  `--max-turns 6`. This removed the `error_max_turns`/`stop_reason: tool_use` wall for ordinary
+  leaves (render_report builds reliably). It still **recurs on harder generations** (a complex
+  section-renderer hit it at `num_turns: 7`). Follow-up: higher max-turns / a per-node
+  hard-generation retry. Firewall unchanged (`--disallowedTools` kept).
 
-Before building a node, `build()` calls `_load_verified_node(contract)` which:
-1. Checks `build/<id>/memo.txt` exists
-2. Compares stored SHA-256 hash against current contract hash
-3. If match + status is "verified" → returns cached Node from disk
-4. If not → proceeds with full build
+- **Global shape coherence is the gating delivery residual (P11).** Per-module verification +
+  REPLAN rebuilds can leave the `src/` tree mutually inconsistent (a leaf rebuilt against fake
+  inputs whose shape its real upstream doesn't match). Two fixes are the path to GREEN:
+  **(a)** thread the parent's inbound shape down to children (Fix 2 currently covers only
+  sibling edges); **(b)** bound REPLAN's blast radius so one leaf failure does not rebuild
+  verified siblings. The assembler was *masking* this with a stale-copy bug, now fixed
+  (`assemble()` always refreshes top-level copies from `src/`).
 
-After successful verification, `_save_memo(node, contract)` writes the contract hash.
+- **Distribution / deployment topology is deferred.** Genuinely-unavoidable shared-mutable
+  state *across processes* (separate services, a shared DB) is a future frontier; in-process
+  shared state is verifiable today (P8).
 
-### Decision persistence
+- **The canvas authoring half is not built.** `tree_viewer.py` is read-only / inspect-only.
 
-PLAN's raw output (with children contracts) must be persisted immediately as
-`decision.json` via `_save_raw_decision()`. The Node's `children` attribute is
-empty at that point — this function serializes the PLAN dict directly.
+- **Type vocabulary is closed** (`string|int|float|bool|list|dict`). No opaque
+  module-defined types cross contract boundaries → **self-hosting is blocked**.
 
-### Topological sort
+- **Verification is existential, not formal.** "Passed" = no violation observed on the
+  derived tests' inputs.
 
-Two versions exist:
-- `node.topological_order(children: list[Node], edges)` — for Node objects
-- `build._topo_sort_contracts(children: list[dict], edges)` — for contract dicts (used during build before children are constructed)
+---
 
-Both detect cycles via DFS with three-color marking (WHITE/GRAY/BLACK).
+## 9. Roadmap
 
-### Recursion depth and caps
+- **The drag-and-drop canvas** (design-then-compile). `tree_viewer.py` is its standalone
+  read-only back-half; **memoization + resumption is the seed of the incremental
+  blast-radius rebuild** the canvas needs (change one node → rebuild only its cone).
+- **Parent→child shape handoff** (P11 next increment) — Fix 2 carries a concrete shape across
+  *sibling* dataflow edges (closed render_report's residual); extend it to thread the parent's
+  inbound shape down to the children that consume it, so a leaf like `latency_analyzer` is not
+  built blind to the real event shape. This is the gating fix for *coherent* depth delivery.
+- **Bound REPLAN's blast radius** — a single leaf failure should retry/replan that node, not
+  re-decompose the parent and rebuild verified siblings. Biggest combined quota + correctness
+  win (see `EFFICIENCY_REPORT.md` / `PHASE11_REPORT.md`).
+- **Backend robustness** for large IMPLEMENT calls — Fix 1 removed the `tool_use`/`max_turns`
+  wall for ordinary leaves; it still recurs on harder generations (raise max-turns / per-node
+  hard-generation retry).
+- **Named forks:** cross-module conditional composition; distribution / deployment topology;
+  SMT / formal verification to replace existential tests; multi-language generation;
+  self-hosting (needs opaque types).
 
-`build()` tracks `depth` (parent + 1) and a shared `llm_call_counter` (mutable list).
-Hard caps are checked at entry:
-- `depth > MAX_DEPTH` → raises BuildFailure
-- `llm_call_counter >= MAX_LLM_CALLS` → raises BuildFailure
-- `len(children) > MAX_CHILDREN` → raises BuildFailure at decomposition site
+---
 
-### REPLAN / backtracking
+## 10. A note on the journey
 
-When a child fails, the parent's build loop catches `BuildFailure` and:
-1. Logs the failed child id and reason
-2. Calls `plan(contract, allow_decompose=True)` again for a fresh decomposition
-3. Updates `children_contracts` and `edges` from the new decision
-4. Restarts the child-building loop
-5. Capped at `REPLANS_MAX` attempts; if exhausted, propagates the failure
+RICH's boundaries were not designed up front — they were *established by probe*, one
+thesis-critical question per phase, each willing to return a deflating result. The record is
+in the phase reports, and the README's claims are traceable to them:
 
-## Design Decisions (Locked, from spec.md §3)
+- `PHASE3_REPORT.md` — live PLAN decomposition is real (GO).
+- `PHASE4_REPORT.md` — dataflow fan-in carries; recursion still dark.
+- `PHASE6_REPORT.md` — state is a leaf shape; stateful composition carries; the dragon sighted.
+- `PHASE7_REPORT.md` — the leaf-injection gap closed; held capabilities carry end-to-end.
+- `PHASE8_REPORT.md` — the dragon reframed as a *verification* wall and slain in-process;
+  the read-only tree viewer.
+- `PHASE9_REPORT.md` — RICH is a **tool**: one real useful build, end-to-end, live, resumable
+  across a real quota cut, for ~$1.
+- `PHASE10_REPORT.md` — **real recursion arises and carries** for compositional depth (and is
+  correctly withheld for algorithmic recursion); the remaining friction is backend + hard-leaf
+  IMPLEMENT quality, not depth.
+- `PHASE11_REPORT.md` — **delivery at depth is YELLOW**: a depth-2 goal builds, assembles, and
+  RUNS with correct aggregates; Fix 1 removes the tool_use wall (with a residual) and Fix 2
+  carries shape across sibling edges — but *coherent* delivery needs parent→child shape
+  threading + bounded REPLAN. Plus `CAPABILITY_LEDGER.md` (wired-vs-specced) and
+  `EFFICIENCY_REPORT.md` (why quota hits; complete per-call logging now wired).
 
-These are not open for relitigation. They are load-bearing for parts of the system not yet built.
-
-| ID | Decision |
-|----|----------|
-| D1 | A node's contract is authored by its parent. PLAN's output includes full children contracts. |
-| D2 | A node is leaf XOR internal. PLAN chooses, governed by budget. |
-| D3 | Implementation is written against dependency CONTRACTS, never dependency source. |
-| D4 | Dependencies are injected by NAME, not imported. Name-keying makes assembly deterministic. |
-| D5 | The firewall for v1 is the prompt. Implementation is a single stateless LLM call. |
-| D6 | Assembly is deterministic. No LLM involved. Shared dep instantiated once. |
-| D7 | The budget is the recursion's base case. PLAN judges + post-implementation size check. |
-| D8 | Verification is running consumer-derived tests. It is existential, not a proof. |
-| D9 | v1 wiring is pipeline-only. No conditional routing, error-branching, or loops. |
-
-## Non-Goals (from spec.md §9)
-
-- No filesystem firewall / sandbox / OS jail
-- No "compiler agent" or intelligent assembler
-- No SMT / formal / machine-checked behavioral verification
-- No non-pipeline wiring (conditionals, error-branching, rollback, loops)
-- No global reconciliation component
-- No self-hosting, no multi-language
-- No rich type system beyond string|int|float|bool|list<...>
+Each report states what was proven, what was only shown by mechanism, and what the failure
+mode said about the next move. This README is the map; those are the survey notes.

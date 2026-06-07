@@ -5,6 +5,7 @@ M-C onward: IMPLEMENT and DERIVE_TESTS become real LLM calls.
 PLAN stays stubbed (only is_leaf:true) until M-D.
 """
 
+import os
 import json
 import yaml
 from llm import (
@@ -14,6 +15,17 @@ from llm import (
     LLMNotConfigured,
     LLMParseError,
 )
+
+
+# ── Phase 9 (§2.4): selective per-skill model routing ──────────────
+# PLAN (the bet) and IMPLEMENT (the code) stay on the strong default model — these are
+# the thing under test and must NOT be cheaped out. DERIVE_TESTS / integration-test
+# generation MAY be routed to a cheaper model via env to save quota on a long live build.
+# Default is None → the backend's default model (sonnet) → behavior unchanged unless an
+# operator opts in. model=None flows through call_with_retry to the backend default.
+PLAN_MODEL = os.environ.get("RICH_PLAN_MODEL") or None
+IMPL_MODEL = os.environ.get("RICH_IMPL_MODEL") or None
+TESTS_MODEL = os.environ.get("RICH_TESTS_MODEL") or None
 
 
 # ── PLAN (real LLM from M-D, decomposition from M-E) ───────────────
@@ -51,6 +63,29 @@ DECISION RULES:
   as soon as it is directly implementable.
 - Choose clean, descriptive child ids (lowercase, underscore-separated).
 - Each child's contract must include: id, description, interface (operations with typed inputs/outputs), dependencies, behavior (prose).
+- MODULE KINDS: a child is usually a STATELESS TRANSFORMATION (input→output, no memory).
+  But a child may instead be a STATEFUL COMPONENT — one thing that HOLDS state across
+  calls and offers several operations that share it (e.g. a store you can add to and
+  later list). When a child's behavior is history-dependent (a later operation's result
+  depends on earlier calls), it is a stateful component: keep its operations TOGETHER in
+  ONE child (do NOT split add/list into separate modules — that would break the shared
+  state) and mark that child "stateful": true. Use this ONLY when the behavior genuinely
+  needs persisted state; do not prefer it. Most children remain stateless transformations.
+- DEPENDENCY KINDS: there are two distinct ways one child can relate to another, and
+  you express them DIFFERENTLY. Choose by what the behavior actually requires; neither
+  is preferred.
+  (a) DATAFLOW HANDOFF — one child's OUTPUT becomes the next child's INPUT, threaded in
+      order. The downstream child stays a plain input→output module that knows nothing
+      about the upstream one. Express this with an EDGE only ({from, to, name}); leave
+      the downstream child's "dependencies" empty. The PARENT does the threading.
+  (b) HELD CAPABILITY — a child is a UTILITY that one or more OTHER children must HOLD
+      and CALL at points of their OWN choosing, on values only the caller has (e.g. a
+      shared formatter/validator/logger a consumer calls on several values it computes
+      itself). This is NOT a single value threaded once. Express it by listing the
+      utility in EACH consumer child's "dependencies" as {"name": "<param>", "id":
+      "<utility_id>"} AND adding an edge from the utility to each consumer. The consumer
+      HOLDS the utility (constructor-injected) and calls it. A utility shared by several
+      consumers is ONE child injected into each (do not duplicate it).
 
 OUTPUT FORMAT (JSON):
 For leaf: {"is_leaf": true}
@@ -62,7 +97,8 @@ For decompose: {
       "description": "<what it does>",
       "interface": {"operations": [{"name": "<op>", "inputs": {...}, "outputs": {...}, "errors": []}]},
       "dependencies": [],
-      "behavior": [{"id": "<prop_id>", "prose": "<what must hold>"}]
+      "behavior": [{"id": "<prop_id>", "prose": "<what must hold>"}],
+      "stateful": false
     }
   ],
   "edges": [{"from": "<child_id>", "to": "<child_id>", "name": "<inject_param_name>"}]
@@ -107,6 +143,7 @@ Decide: leaf or decompose?"""
             raw = call_with_retry(
                 system_prompt=system,
                 user_prompt=user_prompt,
+                model=PLAN_MODEL,
                 temperature=0.15 if allow_decompose else 0.05,
                 max_tokens=2048 if allow_decompose else 256,
             )
@@ -183,31 +220,101 @@ def _validate_child_contracts(children: list[dict], parent_id: str):
             raise ValueError(f"Child '{child['id']}' has no operations in decomposition of {parent_id}")
 
 
+# ── Phase 11 Fix 2: dataflow shape-handoff block ───────────────────
+# A downstream leaf consuming a sibling's dataflow OUTPUT is otherwise built knowing
+# only its own contract (its input TYPE + prose) — never the concrete SHAPE of the
+# value that will flow across the edge. So it guesses the upstream's encoding and can
+# guess wrong (Phase 10 Probe B: the evaluator, blind to the parser's AST shape
+# ["+", 3, ["*", 4, 2]], failed its own tests 3×). This threads a CONCRETE EXAMPLE of
+# the upstream's real output into BOTH IMPLEMENT and DERIVE_TESTS, so the two halves —
+# and the real upstream — agree on the shape BY CONSTRUCTION. It is the DATA analogue
+# of Phase 7's capability-contract threading (same convention, not a parallel one).
+
+def _inbound_examples_block(inbound_examples: dict | None) -> str:
+    """Render the concrete-input-example block, or '' when there is none (so any
+    non-dataflow / canned build is byte-for-byte unchanged)."""
+    if not inbound_examples:
+        return ""
+    rendered = {}
+    for src_id, example in inbound_examples.items():
+        if example is None:
+            continue
+        try:
+            rendered[src_id] = json.dumps(example, default=repr)
+        except Exception:
+            rendered[src_id] = repr(example)
+    if not rendered:
+        return ""
+    body = "\n".join(f"  • from upstream stage '{sid}': {val[:1500]}"
+                     + ("  …(truncated)" if len(val) > 1500 else "")
+                     for sid, val in rendered.items())
+    return f"""
+CONCRETE INPUT EXAMPLE(S) — Phase 11 dataflow handoff. At assembly time the value(s)
+flowing into THIS module from the previous, already-built and verified pipeline
+stage(s) are shaped EXACTLY like the following. Build and test against THIS concrete
+shape — do NOT guess the upstream's data shape from its declared type alone:
+{body}
+"""
+
+
 # ── IMPLEMENT (real LLM from M-C) ──────────────────────────────────
 
 IMPLEMENT_SYSTEM = """You are a code generator for a recursive agent build system called RICH.
+You WRITE Python source and RETURN it as JSON text. You do NOT run code, you do NOT execute
+anything, you do NOT search the web, you do NOT read or write files, you do NOT use ANY
+tools whatsoever — emit ONLY the JSON object described at the end, as raw text. (Phase 11
+Fix 1: reaching for a tool here strands the call; just write the code.)
 Your job: given a module CONTRACT, produce the Python source code that satisfies it.
 
 RULES:
-1. Return ONLY valid Python source code. No markdown fences, no prose.
-2. CRITICAL: Export each operation as a TOP-LEVEL FUNCTION matching the operation name exactly.
-   Do NOT wrap operations in classes. The test harness imports functions directly.
+1. Return ONLY valid Python source code (inside the JSON object below). No markdown
+   fences, no prose, no tool calls.
+2. SHAPE IS DECIDED BY DEPENDENCIES (see rule 4), not by preference. A leaf module
+   with NO injected dependencies exports each operation as a TOP-LEVEL FUNCTION
+   matching the operation name exactly (do NOT wrap it in a class). The test harness
+   imports such functions directly.
    Example: def normalize(text: str) -> dict:
                 return {"normalized": text.strip().lower()}
 3. Each operation returns a dict matching its declared outputs.
-4. Dependencies arrive as injected constructor/factory parameters — NEVER import them.
-   PIPELINE MODE ONLY (not leaf): use a class with __init__ receiving deps.
-   Example: class MyPipeline:
-                def __init__(self, dep_a, dep_b):
-                    self.dep_a = dep_a
-                    self.dep_b = dep_b
-                def run(self, text):
-                    r1 = self.dep_a.op(text)
-                    r2 = self.dep_b.op(r1["output_key"])
-                    return {"result": r2["output_key"]}
-5. PIPELINE MODE: You MUST compose the injected dependencies sequentially.
-   Call dep1's operation, pass its output dict to dep2, etc. Do NOT reimplement.
-6. LEAF MODE: Export plain functions. No classes needed.
+4. INJECTED DEPENDENCIES decide the shape. Look at the DEPENDENCY CONTRACTS section:
+   • If dependencies ARE listed there: write exactly ONE class whose __init__ receives
+     each dependency BY NAME (the parameter name == the dependency name shown). Store
+     them on self and call them via self.<name>.<op>(...). NEVER import a dependency
+     and NEVER reimplement it. This is true whether the module is a sequential pipeline
+     OR a module that merely HOLDS a utility and calls it — both receive deps the same way.
+     Example: class MyConsumer:
+                  def __init__(self, dep_a, dep_b):
+                      self.dep_a = dep_a
+                      self.dep_b = dep_b
+                  def run(self, text):
+                      r1 = self.dep_a.op(text)
+                      return {"result": self.dep_b.op(r1["output_key"])["k"]}
+   • If NO dependencies are listed: this is a leaf — follow rule 6.
+5. HOW to use the injected dependencies depends on the PIPELINE MODE hint:
+   • PIPELINE MODE True — the dependencies form a SEQUENTIAL PIPELINE: call the first
+     dependency's operation, pass its output dict into the next, and so on.
+   • PIPELINE MODE False but dependencies ARE present — they are HELD CAPABILITIES
+     (utilities). Call them at the points YOUR OWN logic determines, on values YOU
+     compute yourself (e.g. compute an intermediate result, then call the utility on
+     it). They are NOT a single value threaded once — call the held handle wherever
+     your computation needs it, as many times as needed.
+   Either way: never reimplement a dependency; only call the injected handle.
+6. LEAF MODE — ONLY when there are NO injected dependencies — two kinds, chosen by the
+   contract's behavior, not by preference:
+   (a) STATELESS TRANSFORMATION (default): the operations are pure input→output with no
+       memory between calls. Export each operation as a top-level function (rule 2).
+   (b) STATEFUL COMPONENT: the contract's behavior is HISTORY-DEPENDENT — an operation's
+       result depends on what earlier operations did (e.g. something added is later
+       listable; a counter advances). Implement this as a SINGLE class whose __init__
+       sets up the internal state and whose methods (named exactly as the operations)
+       read and mutate that state across calls. Each method still returns a dict matching
+       its declared outputs. Define exactly ONE class in the module.
+       Example: class Store:
+                    def __init__(self): self._items = []
+                    def add(self, text): self._items.append(text); return {"ok": True}
+                    def list(self): return {"items": list(self._items)}
+   Use (b) ONLY when the behavior genuinely requires state to persist across calls;
+   otherwise use (a). The "STATEFUL: true/false" hint below tells you which the contract is.
 7. If you receive failure output from a prior attempt, fix the bugs.
 
 Output format: a JSON object with a single key "source" containing the Python code as a string."""
@@ -222,7 +329,9 @@ def implement_canned(contract: dict, dep_contracts=None, pipeline=False, prior_f
 
 
 def implement(contract: dict, dep_contracts: dict | None = None,
-              pipeline: bool = False, prior_failures: list[str] | None = None) -> str:
+              pipeline: bool = False, stateful: bool = False,
+              prior_failures: list[str] | None = None,
+              inbound_examples: dict | None = None) -> str:
     """IMPLEMENT(contract, dep_contracts, pipeline) → source code.
 
     M-A/M-B: Canned implementations for the pipeline demo.
@@ -258,7 +367,11 @@ DEPENDENCY CONTRACTS (interfaces only, never source):
 ```
 
 PIPELINE MODE: {pipeline}
+STATEFUL: {stateful}
 """
+
+    # Phase 11 Fix 2: thread the concrete upstream-output shape (if any) into IMPLEMENT.
+    user_prompt += _inbound_examples_block(inbound_examples)
 
     if prior_failures:
         user_prompt += f"""
@@ -266,33 +379,64 @@ PRIOR ATTEMPT FAILURES (fix these):
 {chr(10).join(prior_failures)}
 """
 
-    try:
-        raw = call_with_retry(
-            system_prompt=IMPLEMENT_SYSTEM,
-            user_prompt=user_prompt,
-            temperature=0.1,
-            max_tokens=4096,
-        )
-        result = parse_json_response(raw, context=f"IMPLEMENT({node_id})")
-        return result["source"]
-    except (LLMNotConfigured, LLMParseError) as e:
-        # If LLM fails and we have a canned fallback, use it
-        if node_id in CANNED_IMPLS:
-            print(f"  [implement] LLM failed for {node_id}, using canned fallback: {e}")
-            return CANNED_IMPLS[node_id]
-        raise
+    # Harness hardening (Phase 7): the subagent backend occasionally returns an
+    # empty / non-JSON envelope (observed: a blank DERIVE_TESTS/IMPLEMENT response that
+    # raises LLMParseError "Expecting value: line 1 column 1"). That is transient, not a
+    # contract problem — retry a couple times before falling back. Orthogonal to the
+    # leaf-injection fix; keeps a long live build from aborting on one flaky call.
+    last_err = None
+    for _try in range(3):
+        try:
+            raw = call_with_retry(
+                system_prompt=IMPLEMENT_SYSTEM,
+                user_prompt=user_prompt,
+                model=IMPL_MODEL,
+                temperature=0.1,
+                max_tokens=4096,
+            )
+            result = parse_json_response(raw, context=f"IMPLEMENT({node_id})")
+            # Harden (Phase 11): a tool_use/max_turns-garbled retry can parse to valid JSON
+            # that LACKS a 'source' key. Treat that as a parse failure so the retry loop /
+            # canned fallback handle it — never let a bare KeyError crash the whole build.
+            if not isinstance(result, dict) or not isinstance(result.get("source"), str) \
+                    or not result["source"].strip():
+                keys = list(result.keys()) if isinstance(result, dict) else type(result).__name__
+                raise LLMParseError(f"IMPLEMENT({node_id}) response has no usable 'source' "
+                                    f"(got: {keys})")
+            return result["source"]
+        except LLMParseError as e:
+            last_err = e
+            print(f"  [implement] parse failure for {node_id} (try {_try + 1}/3), retrying: {e}")
+            continue
+        except LLMNotConfigured as e:
+            last_err = e
+            break
+    # If LLM fails and we have a canned fallback, use it
+    if node_id in CANNED_IMPLS:
+        print(f"  [implement] LLM failed for {node_id}, using canned fallback: {last_err}")
+        return CANNED_IMPLS[node_id]
+    raise last_err
 
 
 # ── DERIVE_TESTS (real LLM from M-C) ────────────────────────────────
 
 DERIVE_TESTS_SYSTEM = """You are a test generator for a recursive agent build system called RICH.
+You WRITE a pytest file and RETURN it as JSON text. You do NOT run code, you do NOT execute
+anything, you do NOT search the web, you do NOT read or write files, you do NOT use ANY
+tools whatsoever — emit ONLY the JSON object described at the end, as raw text. (Phase 11
+Fix 1: reaching for a tool here strands the call; just write the tests.)
 Your job: given a module CONTRACT, produce a pytest test file that verifies the implementation.
 
 RULES:
-1. Return ONLY valid Python pytest source. No markdown fences, no prose.
+1. Return ONLY valid Python pytest source (inside the JSON object below). No markdown
+   fences, no prose, no tool calls.
 2. Import the module by name (from <module_id> import <op_name>).
 3. Test every operation in contract.interface.operations.
-4. CRITICAL: Operations return a DICT with keys matching the declared outputs. Extract the right key before asserting. Example: result = op(args); assert result["output_key"] == expected
+4. CRITICAL: call each operation with its INPUTS as KEYWORD ARGUMENTS named exactly as
+   declared — e.g. for inputs {amount: number} call op(amount=1234.5). Do NOT wrap the
+   inputs in a single dict: op({"amount": 1234.5}) is WRONG. Operations RETURN a dict
+   with keys matching the declared outputs — extract the right key before asserting.
+   Example: result = op(amount=1234.5); assert result["output_key"] == expected
 5. For each operation: test normal inputs, edge cases, and declared error conditions.
 6. Tests are consumer-driven — they encode what the consumer needs from this module.
 7. Use descriptive test names: test_<op>_<scenario>.
@@ -307,7 +451,8 @@ Output format: a JSON object with a single key "tests" containing the pytest cod
 # dependencies that honor the dependency contracts (assume-guarantee verification).
 DERIVE_TESTS_INTERNAL_ADDENDUM = """
 
-INTERNAL / PIPELINE NODE — THIS OVERRIDES RULE 2 ABOVE.
+MODULE WITH INJECTED DEPENDENCIES (an internal/pipeline node, OR a leaf that HOLDS a
+utility and calls it) — THIS OVERRIDES RULE 2 ABOVE.
 The module under test does NOT export top-level functions. It defines exactly ONE
 class (the "wiring class") whose __init__ receives the dependencies listed below
 BY NAME. Your test MUST:
@@ -336,7 +481,55 @@ BY NAME. Your test MUST:
      contract (that is what the fakes encode) and verify only that THIS node wires
      them correctly. Drive the fakes with known outputs and assert the composed
      output reflects the data-flow the contract implies (e.g. the final stage's
-     value is what surfaces)."""
+     value is what surfaces). If a dependency is a HELD UTILITY (not a sequential
+     pipeline stage), assert that THIS node CALLS it on the values it computes
+     itself and that the utility's result surfaces in this node's output.
+
+  5. STATEFUL DEPENDENCY: if a dependency's contract is marked stateful (its behavior
+     is history-dependent), a canned-return fake is WRONG — it cannot honor
+     "added-then-listable". Make that dependency's fake a small class that HOLDS state,
+     so a sequence through THIS node (e.g. add via the dep, then read via this node)
+     reflects history. Then test THIS node across an operation SEQUENCE, not one call.
+     Example stateful fake:
+         class _FakeStore:
+             def __init__(self): self._items = []
+             def add(self, text): self._items.append({"text": text, "done": False}); return {"id": len(self._items)}
+             def list(self): return {"items": list(self._items)}"""
+
+
+# Phase 6: a STATEFUL leaf is a single class whose behavior depends on history. Its
+# tests cannot be single input→output asserts — they must drive a SEQUENCE of
+# operations and assert on state-dependent results. This addendum OVERRIDES rule 2
+# (no top-level function import) and rule 4's single-call shape.
+DERIVE_TESTS_STATEFUL_ADDENDUM = """
+
+STATEFUL COMPONENT — THIS OVERRIDES RULES 2 AND 4 ABOVE.
+The module under test does NOT export top-level functions. It defines exactly ONE
+class that holds state across calls. Its behavior is HISTORY-DEPENDENT: an operation's
+result depends on operations called before it. Your test MUST:
+
+  1. Discover the class by introspection (do NOT hard-code its name):
+
+         import importlib, inspect
+         _mod = importlib.import_module("{module_id}")
+         Comp = next(c for _n, c in inspect.getmembers(_mod, inspect.isclass)
+                     if c.__module__ == "{module_id}")
+
+  2. Write TRACE tests: instantiate ONE component, call a SEQUENCE of operations, and
+     assert on results that depend on the prior calls — not single isolated calls.
+     Each behavior property in the contract is a trace invariant; realize it as a
+     sequence. Examples (shape, not literal):
+
+         c = Comp()
+         rid = c.add(text="milk")["id"]
+         assert any(i["text"] == "milk" for i in c.list()["items"])   # add-then-list
+         c.complete(id=rid)
+         assert all(i["done"] for i in c.list()["items"] if i["id"] == rid)  # complete-then-list
+
+  3. Use a FRESH instance per test so tests do not leak state into each other.
+  4. Cover the history-dependent properties (added-things-are-listable, mutation-is-
+     visible-on-later-reads, ids/keys are stable/unique across calls) — these are the
+     properties single-call tests cannot express."""
 
 
 def derive_tests_canned(contract: dict) -> str:
@@ -348,7 +541,8 @@ def derive_tests_canned(contract: dict) -> str:
 
 
 def derive_tests(contract: dict, dep_contracts: dict | None = None,
-                 pipeline: bool = False) -> str:
+                 pipeline: bool = False, stateful: bool = False,
+                 inbound_examples: dict | None = None) -> str:
     """DERIVE_TESTS(contract[, dep_contracts, pipeline]) → pytest source.
 
     M-A/M-B: Canned test files for the pipeline demo.
@@ -375,7 +569,11 @@ def derive_tests(contract: dict, dep_contracts: dict | None = None,
 
     contract_yaml = yaml.dump(contract, default_flow_style=False, sort_keys=False)
 
-    if pipeline and dep_contracts:
+    # Phase 7: route on dep PRESENCE, not the pipeline flag. ANY module that receives
+    # injected dependencies — an internal/pipeline node OR a leaf that holds a utility —
+    # is a single class verified against contract-derived fakes (assume-guarantee). This
+    # is the same machinery; a held-capability leaf now reaches it (closing the gap).
+    if dep_contracts:
         dep_names = list(dep_contracts.keys())
         dep_kwargs = ", ".join(f"{n}=<fake_{n}>" for n in dep_names)
         # .replace (not .format) — the addendum contains literal braces in its
@@ -385,7 +583,7 @@ def derive_tests(contract: dict, dep_contracts: dict | None = None,
                     .replace("{dep_kwargs}", dep_kwargs))
         system_prompt = DERIVE_TESTS_SYSTEM + addendum
         dep_yaml = yaml.dump(dep_contracts, default_flow_style=False, sort_keys=False)
-        user_prompt = f"""CONTRACT (the internal/pipeline node under test):
+        user_prompt = f"""CONTRACT (a module that receives injected dependencies):
 ```yaml
 {contract_yaml}
 ```
@@ -397,6 +595,16 @@ DEPENDENCY CONTRACTS (interfaces only — these are the injected deps; fake them
 
 The module id is '{node_id}'. It contains ONE wiring class that receives these
 dependencies by name. Generate a pytest file per the INTERNAL / PIPELINE NODE rules."""
+    elif stateful:
+        system_prompt = DERIVE_TESTS_SYSTEM + DERIVE_TESTS_STATEFUL_ADDENDUM.replace(
+            "{module_id}", node_id)
+        user_prompt = f"""CONTRACT (a STATEFUL component — its behavior is history-dependent):
+```yaml
+{contract_yaml}
+```
+
+The module id is '{node_id}'. It defines ONE class holding state across calls. Generate a
+pytest file of TRACE tests (operation sequences) per the STATEFUL COMPONENT rules."""
     else:
         system_prompt = DERIVE_TESTS_SYSTEM
         user_prompt = f"""CONTRACT:
@@ -406,20 +614,116 @@ dependencies by name. Generate a pytest file per the INTERNAL / PIPELINE NODE ru
 
 Generate a pytest file that imports from '{node_id}' and tests all operations."""
 
-    try:
-        raw = call_with_retry(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            temperature=0.1,
-            max_tokens=4096,
-        )
-        result = parse_json_response(raw, context=f"DERIVE_TESTS({node_id})")
-        return result["tests"]
-    except (LLMNotConfigured, LLMParseError) as e:
-        if node_id in CANNED_TESTS:
-            print(f"  [derive_tests] LLM failed for {node_id}, using canned fallback: {e}")
-            return CANNED_TESTS[node_id]
-        raise
+    # Phase 11 Fix 2: thread the SAME concrete upstream-output shape that IMPLEMENT
+    # receives, so test and impl exercise the identical input shape (agree by construction).
+    user_prompt += _inbound_examples_block(inbound_examples)
+
+    # Harness hardening (Phase 7): retry transient empty/non-JSON subagent envelopes
+    # (LLMParseError) a couple times before falling back — see implement() for the why.
+    last_err = None
+    for _try in range(3):
+        try:
+            raw = call_with_retry(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=TESTS_MODEL,
+                temperature=0.1,
+                max_tokens=4096,
+            )
+            result = parse_json_response(raw, context=f"DERIVE_TESTS({node_id})")
+            # Harden (Phase 11): a garbled retry can parse to valid JSON lacking 'tests';
+            # treat as a parse failure so the retry loop / canned fallback handle it.
+            if not isinstance(result, dict) or not isinstance(result.get("tests"), str) \
+                    or not result["tests"].strip():
+                keys = list(result.keys()) if isinstance(result, dict) else type(result).__name__
+                raise LLMParseError(f"DERIVE_TESTS({node_id}) response has no usable 'tests' "
+                                    f"(got: {keys})")
+            return result["tests"]
+        except LLMParseError as e:
+            last_err = e
+            print(f"  [derive_tests] parse failure for {node_id} (try {_try + 1}/3), retrying: {e}")
+            continue
+        except LLMNotConfigured as e:
+            last_err = e
+            break
+    if node_id in CANNED_TESTS:
+        print(f"  [derive_tests] LLM failed for {node_id}, using canned fallback: {last_err}")
+        return CANNED_TESTS[node_id]
+    raise last_err
+
+
+# ── DERIVE_TESTS — INTEGRATION mode (Phase 8) ──────────────────────────
+# When an internal node's children SHARE A STATEFUL DEPENDENCY (one mutable component used
+# by >1 sibling writer), per-module unit tests fake that dependency and CANNOT see the
+# interaction through shared state (the frame rule's disjoint-footprint side-condition is
+# violated). This mode generates a test over the REAL assembled subtree (no fakes) running
+# an INTERLEAVED multi-writer sequence, asserting the node's interaction invariants. It is
+# ADDED to — never replaces — the per-module unit tests.
+
+DERIVE_TESTS_INTEGRATION_SYSTEM = """You are a test generator for the RICH build system. You WRITE a pytest file as text and
+return it as JSON. You do NOT run code, you do NOT inspect files, you do NOT use any tools —
+emit only the JSON object described at the end.
+
+The internal node under test composes children that SHARE A STATEFUL DEPENDENCY — one
+mutable component used by MULTIPLE sibling writers. Per-module unit tests fake that
+dependency and therefore cannot observe interactions THROUGH the shared state. Write an
+INTEGRATION test over the REAL assembled subtree (NO fakes) that runs an INTERLEAVED
+sequence spanning MULTIPLE writers through the shared state and asserts the node's
+interaction invariants (its behavior properties).
+
+RULES:
+1. Return ONLY valid pytest source (no markdown fences, no prose, no tool use).
+2. Each test you WRITE begins with these two lines (this is CODE your test contains — you
+   are writing it, not executing it):
+       from main import assemble
+       app = assemble()
+   `app` is the composed node; its shared stateful dependency is ONE real instance shared by
+   all writers. Do not fake or construct anything else.
+3. Interleave operations ACROSS writers through the shared state: change state via one
+   operation, then act via a DIFFERENT operation that must observe that change. A
+   single-writer sequence does NOT exercise the interaction — that is the whole point.
+4. Assert the node's BEHAVIOR invariants over the sequence (e.g. "a withdraw sees prior
+   deposits", "the balance never goes negative across writers"). Turn each behavior property
+   into an interleaved trace, the way a stateful module's behavior becomes a sequence test.
+5. Use a FRESH `app = assemble()` per test so tests do not leak state.
+6. Do NOT coach a particular fix — let the invariant determine what to assert.
+
+Output format: a JSON object with a single key "tests" whose value is the pytest source as a string."""
+
+
+def derive_integration_test(contract: dict, prior_failures: list[str] | None = None) -> str:
+    """Generate an integration trace test (real assembled subtree) for an internal node
+    whose children share a stateful dependency. Phase 8 verification mechanism."""
+    node_id = contract["id"]
+    if not is_available():
+        raise LLMNotConfigured("No API key for integration DERIVE_TESTS.")
+    contract_yaml = yaml.dump(contract, default_flow_style=False, sort_keys=False)
+    user_prompt = f"""INTERNAL NODE CONTRACT (its children share a stateful dependency):
+```yaml
+{contract_yaml}
+```
+
+The real composed system is obtained with `from main import assemble; app = assemble()`.
+Generate an INTEGRATION test: an interleaved multi-writer sequence over the REAL subtree
+asserting the behavior invariants above."""
+    if prior_failures:
+        user_prompt += f"\n\nPRIOR ATTEMPT FAILURES (fix these):\n{chr(10).join(prior_failures)}"
+
+    last_err = None
+    for _try in range(3):
+        try:
+            raw = call_with_retry(system_prompt=DERIVE_TESTS_INTEGRATION_SYSTEM,
+                                  user_prompt=user_prompt, model=TESTS_MODEL,
+                                  temperature=0.1, max_tokens=4096)
+            return parse_json_response(raw, context=f"DERIVE_INTEGRATION({node_id})")["tests"]
+        except LLMParseError as e:
+            last_err = e
+            print(f"  [derive_integration] parse failure for {node_id} (try {_try + 1}/3): {e}")
+            continue
+        except LLMNotConfigured as e:
+            last_err = e
+            break
+    raise last_err
 
 
 # ═════════════════════════════════════════════════════════════════════
