@@ -112,14 +112,17 @@ engines.**
 
 | File | Lines | Purpose |
 |------|------:|---------|
-| `build.py` | 1368 | The recursion (`build`), verification (`run_tests`), delivery (`assemble`), memoization + resumption, REPLAN/backtracking, hard caps, integration verification, the call manifest, the CLI |
-| `skills.py` | 1058 | PLAN / IMPLEMENT / DERIVE_TESTS — prompts, JSON/DAG validation, canned (no-LLM) fallback data, model routing |
+| `build.py` | ~1150 | **The engine.** The recursion (`build`), verification (`run_tests`), delivery (`assemble`), memoization + resumption, REPLAN/backtracking, hard caps, integration verification, the Fix-2 shape handoff, the call manifest |
+| `cli.py` | ~510 | **The CLI + canned demos.** argparse entrypoint and the no-LLM regression demos (M-A pipeline, M-F fan-in, M-G deep + memo) plus the live single-leaf / decompose drivers. `python cli.py --help` |
+| `skills.py` | ~1130 | PLAN / IMPLEMENT / DERIVE_TESTS — prompts, JSON/DAG validation, canned (no-LLM) fallback data, model routing |
 | `subagent_skill.py` | ~330 | **The real backend.** Runs each skill as a `claude -p --model <m> --tools "" --max-turns 6` subprocess (Phase 11 Fix 1: zero tool affordance + recovery headroom, firewall via `--disallowedTools` kept); `install()` monkeypatches the skills' LLM seam onto it; per-call token/cost logging → `build/llm_calls.jsonl` |
 | `llm.py` | 183 | An *alternate* backend seam — an OpenRouter HTTP client (call/retry/JSON-defense). Present but unused by default (no API key needed for the `claude -p` path) |
 | `node.py` | 125 | `Node` dataclass + on-disk persistence (contract.yaml / decision.json / status.json / deps.yaml) + topological sort |
-| `run_tests.py` | 448 | The pytest subprocess engine + result parsing |
+| `deep_test.py` | — | Canned decompositions/impls/tests for the `--deep` regression |
 | `tree_viewer.py` | 232 | **Read-only** inspector: renders `build/` to a graphviz HTML (structure + state views; highlights fan-in and shared-stateful "dragon" nodes). Never writes into `build/` |
-| `spec.md` | — | The locked design document |
+| `tests/run_tests.py` | 448 | Live end-to-end test runner (T0→T6) |
+| `tests/test_harness.py` | 342 | Live test instrumentation: wraps the skills at the boundary, monitors calls, checks the firewall |
+| `docs/spec.md` | — | The v1 design document |
 
 `build.py` constants (hard caps + retry limits):
 
@@ -192,10 +195,10 @@ stateful: false                  # true → a class verified by operation sequen
 ### Canned demos (no LLM, deterministic — start here)
 
 ```bash
-python build.py              # M-A/B: a normalize→validate pipeline, assembled + run
-python build.py --fan-in     # M-F: a shared regex_engine injected into two checkers (one construct)
-python build.py --deep       # M-G: a depth-2 tree (password_pipeline → length + complexity checks)
-python build.py --memo-test  # memoization: second build is instant from cache
+python cli.py                # M-A/B: a normalize→validate pipeline, assembled + run
+python cli.py --fan-in       # M-F: a shared regex_engine injected into two checkers (one construct)
+python cli.py --deep         # M-G: a depth-2 tree (password_pipeline → length + complexity checks)
+python cli.py --memo-test    # memoization: second build is instant from cache
 ```
 
 These exercise the engine end-to-end with **canned** PLAN/IMPLEMENT/DERIVE_TESTS — no

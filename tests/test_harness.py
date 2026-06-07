@@ -19,7 +19,7 @@ if not os.environ.get("OPENROUTER_API_KEY"):
     sys.exit(1)
 os.environ.setdefault("RICH_MODEL", "deepseek/deepseek-chat")
 
-REPO_ROOT = Path(__file__).parent
+REPO_ROOT = Path(__file__).resolve().parent.parent   # tests/ -> repo root
 TESTLOG = REPO_ROOT / "testlog"
 BUILD_ARCHIVE = REPO_ROOT / "build_archive"
 

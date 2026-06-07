@@ -6,6 +6,7 @@ richv1.md
 
 # Generated build artifacts (the recursive engine's output tree + audit logs)
 build/
+build_archive/
 
 # Editor / scratch
 *.swp

@@ -13,7 +13,7 @@ from pathlib import Path
 os.environ.setdefault("OPENROUTER_API_KEY", "sk-or-...12f7")
 os.environ.setdefault("RICH_MODEL", "deepseek/deepseek-chat")
 
-REPO_ROOT = Path(__file__).parent
+REPO_ROOT = Path(__file__).resolve().parent.parent   # tests/ -> repo root
 sys.path.insert(0, str(REPO_ROOT))
 
 # Key comes from environment (set by caller before running)
