@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RICH Canvas</title>
+<style>
+  :root{
+    --bg:#0b0e14; --bg2:#0d111a; --panel:#141a24; --panel2:#1a2230; --line:#28313f;
+    --ink:#e8eef6; --muted:#8b97a8; --accent:#5aa2ff; --accent2:#8957e5;
+    --unplanned:#c9923a; --planned:#4a8df0; --verified:#2fb457; --failed:#f0544a;
+    --building:#e0a52a; --adapter:#f28c38; --shadow:0 18px 48px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);overflow:hidden;
+    font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  #app{display:grid;grid-template-rows:auto auto 1fr;height:100%}
+
+  header{display:flex;align-items:center;gap:12px;padding:11px 18px;
+    background:linear-gradient(180deg,#11161f,#0e131b);border-bottom:1px solid var(--line);z-index:5}
+  .brand{font-size:15px;font-weight:700;letter-spacing:.4px;
+    background:linear-gradient(90deg,#7fb6ff,#b08cff);-webkit-background-clip:text;
+    background-clip:text;color:transparent}
+  header .sp{flex:1}
+  .pill{font-size:12px;color:var(--muted);padding:5px 11px;border:1px solid var(--line);
+    border-radius:20px;white-space:nowrap;background:rgba(255,255,255,.02)}
+  .pill.ok{color:#7ee2a0;border-color:#2c6b43;background:rgba(47,180,87,.1)}
+  .pill.warn{color:#f0c674;border-color:#7a5e23;background:rgba(201,146,58,.12)}
+  button{font:inherit;font-weight:550;color:var(--ink);background:var(--panel2);
+    border:1px solid var(--line);border-radius:8px;padding:8px 13px;cursor:pointer;
+    transition:.12s border-color,.1s transform,.12s background,.12s opacity}
+  button:hover:not(:disabled){border-color:var(--accent)}
+  button:active:not(:disabled){transform:translateY(1px)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.sm{padding:6px 10px;font-size:13px}
+  button.primary{background:linear-gradient(180deg,#2b7bf0,#1f64d8);border-color:#3b86f5}
+  button.vibe{background:linear-gradient(180deg,#7b4fd6,#6a3fc4);border-color:#8d63e8}
+  button.go{background:linear-gradient(180deg,#2bab57,#23924a);border-color:#34c065;
+    box-shadow:0 4px 14px rgba(46,180,87,.25)}
+  button.ghost{background:transparent}
+  button.danger:hover:not(:disabled){border-color:var(--failed);color:#ff8b84}
+  #vibeBar{display:grid;grid-template-columns:minmax(220px,1fr) auto auto auto;gap:8px;align-items:center;
+    padding:9px 18px;background:#0b1018;border-bottom:1px solid var(--line)}
+  #vibeBar input{width:100%;background:var(--bg2);color:var(--ink);border:1px solid var(--line);
+    border-radius:8px;padding:9px 10px;font:inherit;outline:none}
+  #vibeBar input:focus{border-color:var(--accent2)}
+  .vibeChips{grid-column:1/-1;display:flex;gap:7px;flex-wrap:wrap}
+  .vibeChips button{padding:5px 9px;font-size:12px;border-radius:7px;background:#111824}
+
+  main{display:grid;grid-template-columns:1fr 360px;min-height:0}
+  #canvasWrap{position:relative;overflow:hidden;
+    background:radial-gradient(circle at 1px 1px,#19202b 1px,transparent 0) 0 0/26px 26px,
+      radial-gradient(1200px 600px at 50% -10%,rgba(80,120,200,.06),transparent),var(--bg)}
+  #svg{width:100%;height:100%;display:block;cursor:grab;user-select:none}
+  #svg.panning{cursor:grabbing}
+  .zoombar{position:absolute;left:14px;bottom:14px;display:flex;gap:6px}
+  .zoombar button{width:34px;height:34px;padding:0;font-size:16px;line-height:1}
+  .zoombar .lbl{padding:0 10px}
+  .canvas-hint{position:absolute;top:46%;left:50%;transform:translate(-50%,-50%);
+    text-align:center;color:var(--muted);pointer-events:none;font-size:13px}
+
+  #side{border-left:1px solid var(--line);background:var(--panel);
+    display:grid;grid-template-rows:1fr auto auto;min-height:0}
+  #inspector{padding:0;overflow:auto}
+  .insp-empty{padding:18px;color:var(--muted)}
+
+  /* selected-module header */
+  .sel-head{padding:15px 16px 13px;background:linear-gradient(180deg,#19212d,#141a24);
+    border-bottom:1px solid var(--line);position:sticky;top:0;z-index:2}
+  .sel-head .row1{display:flex;align-items:center;gap:9px}
+  .sel-id{font-size:16px;font-weight:700;font-family:ui-monospace,monospace;
+    word-break:break-all;flex:1}
+  .badge{font-size:11px;padding:2px 8px;border-radius:6px;font-weight:600;white-space:nowrap}
+  .badge.leaf{background:rgba(74,141,240,.18);color:#8fbcff}
+  .badge.internal{background:rgba(137,87,229,.2);color:#c4a8ff}
+  .badge.unplanned{background:rgba(201,146,58,.2);color:#f0c674}
+  .badge.adapter{background:rgba(242,140,56,.18);color:#ffb77c}
+  .badge.ui{background:rgba(116,221,207,.14);color:#89e8dd}
+  .actions{padding:13px 16px;border-bottom:1px solid var(--line)}
+  .actions .lead{font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);margin:0 0 9px}
+  .actions .lead b{color:var(--ink);font-family:ui-monospace,monospace;text-transform:none;letter-spacing:0}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .row>button{flex:1}
+  .section{padding:14px 16px;border-bottom:1px solid var(--line)}
+  .section h4{margin:0 0 9px;font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)}
+  .purpose{margin:0 0 4px;color:var(--ink)}
+  .kv{color:var(--muted);font-size:13px}
+  .kv b{color:var(--ink);font-weight:600}
+
+  .op{background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin-bottom:8px}
+  .op .opname{font-family:ui-monospace,monospace;font-weight:650;font-size:13px;margin-bottom:5px}
+  .opio{font-size:12.5px;color:var(--ink);margin:2px 0;display:flex;gap:7px}
+  .opio .iolbl{flex:none;width:42px;color:var(--muted);font-size:11px;text-transform:uppercase;
+    letter-spacing:.5px;padding-top:1px}
+  .opio .iolbl.err{color:#e8896f}
+  .opio .v{font-family:ui-monospace,monospace}
+
+  .field{margin-bottom:11px}
+  .field>label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
+  .field input,.field textarea,.field select{width:100%;background:var(--bg2);color:var(--ink);
+    border:1px solid var(--line);border-radius:8px;padding:8px 9px;font:inherit;outline:none}
+  .field input:focus,.field textarea:focus{border-color:var(--accent)}
+  .field textarea{resize:vertical;min-height:54px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .muted{color:var(--muted)}
+  .edge-row{display:flex;align-items:center;gap:6px;font-size:12.5px;margin-bottom:6px}
+  .edge-row .mono{flex:1}
+  .edge-row select,.edge-row input{background:var(--bg2);color:var(--ink);border:1px solid var(--line);
+    border-radius:6px;padding:5px 6px;font:inherit;font-size:12px}
+  .rel{display:flex;gap:8px;margin-bottom:6px;font-size:13px;align-items:baseline;line-height:1.45}
+  .rel .rlbl{flex:none;width:84px;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;padding-top:1px}
+  .rel-help{margin-top:9px;font-size:11.5px;color:var(--muted);line-height:1.5;
+    border-top:1px solid var(--line);padding-top:9px}
+  .dfv{color:#74ddcf} .uv{color:#c4a8ff}
+  .canvas-legend{position:absolute;top:12px;right:12px;background:rgba(13,17,26,.86);
+    border:1px solid var(--line);border-radius:10px;padding:9px 11px;font-size:11px;color:var(--muted);
+    backdrop-filter:blur(3px);user-select:none}
+  .canvas-legend .lg-row{display:flex;gap:9px;align-items:center;white-space:nowrap}
+  .canvas-legend .lg-row+.lg-row{margin-top:6px}
+  .canvas-legend b.h{color:var(--ink);font-weight:600;width:48px;display:inline-block}
+  .lk{display:inline-flex;align-items:center;gap:5px}
+  .lk::before{content:"";width:18px;border-top:2px solid #33404f}
+  .lk.df::before{border-top-color:#2bb6a6}
+  .lk.uses::before{border-top:2px dashed #8957e5}
+  details summary{cursor:pointer;color:var(--muted);font-size:12px;margin-top:4px}
+  code{background:#11161f;padding:1px 6px;border-radius:5px;font-size:12px;font-family:ui-monospace,monospace}
+
+  #console{border-top:1px solid var(--line);background:#080b10;height:210px;display:flex;flex-direction:column}
+  #console .bar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);
+    font-size:12px;color:var(--muted)}
+  #log{flex:1;overflow:auto;padding:9px 12px;white-space:pre-wrap;color:#c2ccd9;
+    font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+  #log:empty::before{content:"engine output streams here when you Plan / Vibe / Build…";color:#4a5566}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none}
+  .deliverable{margin-top:8px;background:#080b10;border:1px solid var(--line);border-radius:8px;
+    padding:10px;white-space:pre-wrap;max-height:200px;overflow:auto;font:12px/1.45 ui-monospace,monospace}
+  #cards{border-top:1px solid var(--line);background:#101620;max-height:230px;overflow:auto}
+  #cards:empty{display:none}
+  .vcard{margin:9px 10px;padding:10px;border:1px solid var(--line);border-radius:8px;background:#0b1018}
+  .vcard.error{border-color:#7d302d;background:rgba(240,84,74,.08)}
+  .vcard.warning{border-color:#73551f;background:rgba(201,146,58,.09)}
+  .vcard.info{border-color:#2e526f;background:rgba(90,162,255,.08)}
+  .vcard .ct{font-weight:700;font-size:12px;margin-bottom:4px}
+  .vcard .cm{font-size:12px;color:#c4ceda}
+  .vcard .ca{margin-top:8px}
+
+  /* modal */
+  #modal{position:fixed;inset:0;display:grid;place-items:center;z-index:50;
+    background:rgba(5,8,12,.74);backdrop-filter:blur(5px)}
+  #modal.hidden{display:none}
+  .card{width:760px;max-width:94vw;max-height:92vh;overflow:auto;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:22px 24px;box-shadow:var(--shadow)}
+  .card h2{margin:0 0 4px;font-size:19px}
+  .card .lead{margin:0 0 18px;color:var(--muted)}
+  .card .hint{margin:16px 0 0;color:var(--muted);font-size:13px;line-height:1.6}
+  .brief-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .brief-grid .span2{grid-column:1/-1}
+  .inline-check{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:13px}
+  .proposal-box{margin-top:16px;border:1px solid var(--line);border-radius:8px;background:#0b1018;padding:14px}
+  .proposal-box.hidden{display:none}
+  .proposal-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:10px}
+  .proposal-head h3{margin:0;font-size:15px}
+  .proposal-head p{margin:3px 0 0;color:var(--muted);font-size:13px}
+  .proposal-head .sp{flex:1}
+  .proposal-list{margin:10px 0 0;padding:0;list-style:none}
+  .proposal-list li{padding:7px 0;border-top:1px solid var(--line);font-size:13px;color:#c4ceda}
+  .check-row{display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--line)}
+  .check-row b{display:block;font-size:12px}
+  .check-row span{display:block;color:var(--muted);font-size:12px}
+
+  /* svg nodes */
+  .node{cursor:grab}
+  .node.dragging{cursor:grabbing}
+  .node rect.body{fill:url(#nodeGrad);stroke:var(--line);stroke-width:1.5;transition:stroke .1s}
+  .node:hover rect.body{stroke:#3d4a5c}
+  .node.sel rect.body{stroke:var(--accent);stroke-width:2.5}
+  .node.unplanned rect.body{stroke:var(--unplanned);stroke-dasharray:6 4}
+  .node.adapter rect.body{stroke:var(--adapter);stroke-width:2}
+  .node text.title{fill:var(--ink);font-size:12.5px;font-weight:600;pointer-events:none}
+  .node text.sub{fill:var(--muted);font-size:10.5px;pointer-events:none}
+  .node text.q{fill:var(--unplanned);font-size:15px;font-weight:800;pointer-events:none}
+  .edge{stroke:#33404f;stroke-width:1.6;fill:none}
+  .dataflow{stroke:#2bb6a6;stroke-width:1.9;fill:none;marker-end:url(#arrowDf)}
+  .usesedge{stroke:#8957e5;stroke-width:1.6;fill:none;stroke-dasharray:5 4;
+    marker-end:url(#arrowUses);opacity:.92}
+  .elabel rect{fill:#0c1018}
+  .elabel text{font-size:10.5px;text-anchor:middle;font-family:ui-monospace,monospace;font-weight:600}
+  .elabel.df rect{stroke:#2a6f68;stroke-width:1} .elabel.df text{fill:#74ddcf}
+  .elabel.uses rect{stroke:#5a3f9e;stroke-width:1} .elabel.uses text{fill:#c4a8ff}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span class="brand">RICH&nbsp;Canvas</span>
+    <span class="pill" id="backendPill">backend: …</span>
+    <span class="pill" id="projectPill">project: unsaved</span>
+    <span class="sp"></span>
+    <span class="pill" id="readyPill" style="display:none"></span>
+    <button id="briefBtn" class="sm ghost" title="Open architecture brief">Brief</button>
+    <button id="tidyBtn" class="sm ghost" title="Auto-arrange nodes">Tidy ⌗</button>
+    <button id="fitBtn" class="sm ghost" title="Fit to view">Fit</button>
+    <button id="saveProjectBtn" class="sm ghost" title="Save project file">Save</button>
+    <button id="resetBtn" class="sm">Reset</button>
+    <button id="buildBtn" class="go" disabled>Build&nbsp;▶</button>
+  </header>
+  <div id="vibeBar">
+    <input id="vibePrompt" placeholder="Vibe the architecture: make this testable, split external IO out, add caching, simplify the graph…">
+    <button id="vibeApplyBtn" class="vibe">Vibe architecture</button>
+    <button id="undoBtn" class="sm ghost" disabled>Undo</button>
+    <button id="validateBtn" class="sm ghost">Validate</button>
+    <div class="vibeChips">
+      <button class="sm ghost vibeQuick" data-prompt="make this testable by isolating external IO behind adapters">Externalize IO</button>
+      <button class="sm ghost vibeQuick" data-prompt="add a cache boundary for the selected module">Add cache</button>
+      <button class="sm ghost vibeQuick" data-prompt="mark this as the user interface boundary">Mark UI</button>
+      <button class="sm ghost vibeQuick" data-prompt="mark this module as a leaf">Make leaf</button>
+    </div>
+  </div>
+
+  <main>
+    <div id="canvasWrap">
+      <svg id="svg"></svg>
+      <div class="canvas-hint" id="canvasHint" style="display:none"></div>
+      <div class="zoombar">
+        <button id="zoomOut">−</button>
+        <span class="pill lbl" id="zoomLbl">100%</span>
+        <button id="zoomIn">+</button>
+      </div>
+      <div class="canvas-legend">
+        <div class="lg-row"><b class="h">modules</b>
+          <span><i class="dot" style="background:var(--unplanned)"></i> to plan</span>
+          <span><i class="dot" style="background:var(--planned)"></i> planned</span>
+          <span><i class="dot" style="background:var(--verified)"></i> verified</span>
+          <span><i class="dot" style="background:var(--failed)"></i> failed</span></div>
+        <div class="lg-row"><b class="h">links</b>
+          <span class="lk">composed of</span>
+          <span class="lk df">data flow</span>
+          <span class="lk uses">uses</span></div>
+      </div>
+    </div>
+    <div id="side">
+      <div id="inspector"></div>
+      <div id="cards"></div>
+      <div id="console">
+        <div class="bar"><i class="dot" id="jobDot" style="background:var(--unplanned)"></i>
+          <span id="jobLabel">idle</span></div>
+        <div id="log"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="modal">
+  <div class="card">
+    <div class="proposal-head">
+      <div><h2>Architecture brief</h2>
+        <p class="lead">Describe the software and the system qualities RICH should preserve.</p></div>
+      <span class="sp"></span>
+      <button id="closeBriefBtn" class="sm ghost">Close</button>
+    </div>
+    <div class="brief-grid">
+      <div class="field span2"><label>Goal</label>
+        <textarea id="goalDesc" placeholder="Fetch current weather for a city and print a short report."></textarea></div>
+      <div class="field"><label>Root module id</label>
+        <input id="goalId" class="mono" placeholder="weather_reporter"></div>
+      <div class="field"><label>External services</label>
+        <input id="briefExternal" placeholder="Open-Meteo, Stripe, filesystem…"></div>
+      <div class="field"><label>Input example</label>
+        <input id="briefInputs" placeholder="city: London"></div>
+      <div class="field"><label>Output example</label>
+        <input id="briefOutputs" placeholder="Short weather report string"></div>
+      <div class="field"><label>State</label>
+        <select id="briefState">
+          <option value="stateless">stateless</option>
+          <option value="cached">cached</option>
+          <option value="persistent">persistent</option>
+        </select></div>
+      <div class="field"><label>Architecture shape</label>
+        <select id="briefShape">
+          <option value="simple">simple</option>
+          <option value="modular">modular</option>
+          <option value="production">production</option>
+        </select></div>
+      <label class="inline-check"><input type="checkbox" id="briefStrict" checked> strict fakeable unit tests</label>
+      <label class="inline-check"><input type="checkbox" id="briefNoLive" checked> no live provider calls in unit tests</label>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button class="primary" id="draftBtn">Draft architecture proposal</button>
+      <button id="createBtn" class="ghost">Create blank root</button>
+    </div>
+    <div id="proposalBox" class="proposal-box hidden"></div>
+  </div>
+</div>
+
+<script>
+const NODE_W = 184, NODE_H = 64, HGAP = 214, VGAP = 132;
+let tree=null, selectedId=null, MAX_DEPTH=3, polling=false, editMode=false, briefOpen=true;
+let cards=[], history=[], undoStack=[], projectPath='', validateTimer=null, pendingProposal=null;
+let view={x:120,y:60,k:1};
+
+const $=id=>document.getElementById(id);
+const api=(p,b)=>fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json());
+const esc=t=>(t==null?'':String(t)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const trunc=(t,n)=>t.length>n?t.slice(0,n-1)+'…':t;
+
+function flatten(n,o=[]){o.push(n);(n.children||[]).forEach(c=>flatten(c,o));return o;}
+function findNode(n,id){if(n.id===id)return n;for(const c of n.children||[]){const h=findNode(c,id);if(h)return h;}return null;}
+function statusColor(s){return ({unplanned:'var(--unplanned)',planned:'var(--planned)',verified:'var(--verified)',failed:'var(--failed)',building:'var(--building)'})[s]||'var(--unplanned)';}
+function nodeKind(n){return n.kind || (n.stateful?'stateful':'pure');}
+function normalizeNode(n){ n.kind=nodeKind(n); n.external=n.external||{}; n.children=n.children||[]; n.edges=n.edges||[]; n.dependencies=n.dependencies||[]; n.operations=n.operations||[];
+  n.lane=n.lane||'';
+  if(n.kind==='adapter') n.external=Object.assign({provider:'',mock_policy:'unit_tests_mock_provider',live_smoke:false},n.external);
+  n.children.forEach(normalizeNode); return n; }
+function snapshot(){return tree?JSON.parse(JSON.stringify(tree)):null;}
+
+// ── layout / positions ──
+function tidyLayout(){
+  const ctx={next:0};
+  (function walk(n,depth){
+    n._depth=depth;
+    const kids=(n.is_leaf===false?(n.children||[]):[]);
+    if(kids.length){kids.forEach(c=>walk(c,depth+1));
+      n._lx=(kids[0]._lx+kids[kids.length-1]._lx)/2;}
+    else n._lx=ctx.next++;
+  })(tree,0);
+  flatten(tree).forEach(n=>{ n.x=n._lx*HGAP; n.y=n._depth*VGAP; });
+}
+function ensurePositions(){
+  if(!tree) return;
+  const need=flatten(tree).some(n=>typeof n.x!=='number');
+  if(need){ // assign tidy coords only to nodes missing them
+    const saved={}; flatten(tree).forEach(n=>{ if(typeof n.x==='number') saved[n.id]={x:n.x,y:n.y}; });
+    tidyLayout();
+    flatten(tree).forEach(n=>{ if(saved[n.id]){ n.x=saved[n.id].x; n.y=saved[n.id].y; } });
+  }
+}
+
+// ── readiness ──
+function unplanned(){ return tree?flatten(tree).filter(n=>n.is_leaf===null):[]; }
+function blockingCards(){ return cards.filter(c=>c.severity==='error'); }
+function buildReady(){ return !!tree && unplanned().length===0 && blockingCards().length===0; }
+function updateReadiness(){
+  const pill=$('readyPill'), btn=$('buildBtn');
+  if(!tree){ pill.style.display='none'; btn.disabled=true; return; }
+  pill.style.display='inline-block';
+  const u=unplanned().length;
+  const e=blockingCards().length;
+  if(u===0 && e===0){ pill.textContent='✓ ready to build'; pill.className='pill ok'; btn.disabled=polling; btn.title='Build the planned tree'; }
+  else if(e>0){ pill.textContent=`✗ ${e} issue${e===1?'':'s'} to fix`; pill.className='pill warn';
+    btn.disabled=true; btn.title='Fix validation issues before building'; }
+  else { pill.textContent=`⚠ ${u} module${u===1?'':'s'} to plan`; pill.className='pill warn';
+    btn.disabled=true; btn.title='Decompose every module to a leaf (or give it children) before building'; }
+}
+
+function scheduleValidate(){
+  if(validateTimer) clearTimeout(validateTimer);
+  validateTimer=setTimeout(refreshCards,350);
+}
+async function refreshCards(){
+  if(!tree){ cards=[]; renderCards(); updateReadiness(); return; }
+  try{
+    const res=await api('/api/validate',{tree});
+    cards=res.cards||[];
+    renderCards(); updateReadiness();
+  }catch(e){}
+}
+function renderCards(){
+  const box=$('cards'); if(!box)return;
+  const h=(history||[]).slice(0,1).map(item=>({
+    severity:'info', node_id:null,
+    title:'Last vibe edit'+(item.transaction?.source?` · ${item.transaction.source}`:''),
+    message:item.transaction?.summary||item.transaction?.label||'Architecture transaction applied'
+  }));
+  const all=[...cards,...h];
+  box.innerHTML=all.map((c,i)=>`<div class="vcard ${esc(c.severity||'info')}">
+    <div class="ct">${esc(c.title||'Note')}${c.node_id?` · <code>${esc(c.node_id)}</code>`:''}</div>
+    <div class="cm">${esc(c.message||'')}</div>
+    ${c.action==='mark_adapter'&&c.node_id?`<div class="ca"><button class="sm markAdapter" data-node="${esc(c.node_id)}">Mark adapter</button></div>`:''}
+  </div>`).join('');
+  box.querySelectorAll('.markAdapter').forEach(btn=>btn.onclick=()=>runVibeEdit(`mark ${btn.dataset.node} as an external adapter`,btn.dataset.node));
+}
+
+// ── render ──
+function applyView(){ const vp=$('vp'); if(vp) vp.setAttribute('transform',`translate(${view.x},${view.y}) scale(${view.k})`);
+  $('zoomLbl').textContent=Math.round(view.k*100)+'%'; }
+
+function render(){
+  const svg=$('svg'), hint=$('canvasHint');
+  if(!tree){ $('modal').classList.remove('hidden'); svg.innerHTML=''; hint.style.display='none'; updateReadiness(); renderInspector(); return; }
+  $('modal').classList.add('hidden');
+  normalizeNode(tree);
+  ensurePositions();
+  const nodes=flatten(tree), byId={}; nodes.forEach(n=>byId[n.id]=n);
+
+  hint.style.display=(nodes.length===1&&tree.is_leaf===null)?'block':'none';
+  if(hint.style.display==='block') hint.innerHTML='Click the module →<br>then <b>Plan&nbsp;layer</b> or <b>Vibe&nbsp;✨</b>';
+
+  const px=n=>n.x, py=n=>n.y;
+  let edges='', labels='', boxes='';
+  // (1) composition — solid gray, parent→child
+  for(const n of nodes) if(n.is_leaf===false) for(const c of (n.children||[])){
+    const x1=px(n)+NODE_W/2,y1=py(n)+NODE_H,x2=px(c)+NODE_W/2,y2=py(c),my=(y1+y2)/2;
+    edges+=`<path class="edge" d="M${x1} ${y1} C${x1} ${my} ${x2} ${my} ${x2} ${y2}"/>`;
+  }
+  // (2) data flow — teal solid arrow A.right→B.left, labeled with the value name
+  for(const n of nodes) for(const e of (n.edges||[])){
+    const a=byId[e.from],b=byId[e.to]; if(!a||!b)continue;
+    const x1=px(a)+NODE_W,y1=py(a)+NODE_H/2,x2=px(b),y2=py(b)+NODE_H/2;
+    const cx=(x1+x2)/2, cy=(y1+y2)/2-20;
+    edges+=`<path class="dataflow" d="M${x1} ${y1} Q${cx} ${cy} ${x2} ${y2}"/>`;
+    if(e.name) labels+=edgeLabel((x1+x2)/2,(y1+y2)/2-11,e.name,'df');
+  }
+  // (3) held capability — purple dashed arrow holder.bottom→capability.bottom, "uses"
+  for(const B of nodes) for(const d of (B.dependencies||[])){
+    const id=(typeof d==='object'?d.id:d); const A=byId[id]; if(!A||A===B)continue;
+    const x1=px(B)+NODE_W/2,y1=py(B)+NODE_H,x2=px(A)+NODE_W/2,y2=py(A)+NODE_H;
+    const cx=(x1+x2)/2, cy=Math.max(y1,y2)+48;
+    edges+=`<path class="usesedge" d="M${x1} ${y1} Q${cx} ${cy} ${x2} ${y2}"/>`;
+    labels+=edgeLabel(cx,(y1+y2)/2+32,'uses','uses');
+  }
+  for(const n of nodes){
+    const col=statusColor(n.status), sel=n.id===selectedId?' sel':'', un=n.is_leaf===null?' unplanned':'', k=nodeKind(n);
+    const kind=n.is_leaf===true?'leaf':n.is_leaf===false?`${(n.children||[]).length} children`:'needs planning';
+    const ops=(n.operations||[]).length;
+    boxes+=`<g class="node ${esc(k)}${sel}${un}" data-id="${esc(n.id)}" transform="translate(${n.x},${n.y})">
+      <rect class="body" width="${NODE_W}" height="${NODE_H}" rx="12"/>
+      <rect x="0" y="${NODE_H-4}" width="${NODE_W}" height="4" rx="2" fill="${col}"/>
+      <circle cx="17" cy="20" r="4.5" fill="${col}"/>
+      <text class="title" x="30" y="24">${esc(trunc(n.id,18))}</text>
+      <text class="sub" x="14" y="42">${kind} · ${k} · ${ops} op${ops===1?'':'s'}</text>
+      ${n.is_leaf===null?`<text class="q" x="${NODE_W-18}" y="25">?</text>`:''}
+    </g>`;
+  }
+  svg.innerHTML=`<defs>
+    <linearGradient id="nodeGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c2533"/><stop offset="1" stop-color="#161d29"/></linearGradient>
+    <marker id="arrowDf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+      orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#2bb6a6"/></marker>
+    <marker id="arrowUses" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+      orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8957e5"/></marker></defs>
+    <g id="vp">${edges}${labels}${boxes}</g>`;
+  applyView();
+  svg.querySelectorAll('.node').forEach(g=>g.addEventListener('mousedown',e=>startNodeDrag(e,g.dataset.id)));
+  updateReadiness();
+  if(!nodeDrag) renderInspector();   // don't rebuild inspector mid-drag (would nuke an open edit form)
+  if(!nodeDrag && !polling) scheduleValidate();
+}
+
+function edgeLabel(x,y,text,kind){
+  const w=text.length*6.4+14;
+  return `<g class="elabel ${kind}"><rect x="${x-w/2}" y="${y-9}" width="${w}" height="18" rx="6"/>
+    <text x="${x}" y="${y+4}">${esc(text)}</text></g>`;
+}
+
+// ── type → natural language ──
+function typeStr(v){
+  if(v===null) return 'null';
+  if(Array.isArray(v)) return '['+v.map(typeStr).join(', ')+']';
+  if(typeof v==='object') return '{ '+Object.entries(v).map(([k,t])=>`${k}: ${typeStr(t)}`).join(', ')+' }';
+  return String(v);
+}
+function shapeNL(obj){
+  const ks=Object.keys(obj||{});
+  return ks.length? ks.map(k=>`<span class="v">${esc(k)}: ${esc(typeStr(obj[k]))}</span>`).join(', ') : '—';
+}
+function opNL(op){
+  const errs=(op.errors&&op.errors.length)?op.errors.join(', '):null;
+  return `<div class="op"><div class="opname">${esc(op.name||'(unnamed)')}</div>
+    <div class="opio"><span class="iolbl">in</span><span>${shapeNL(op.inputs)}</span></div>
+    <div class="opio"><span class="iolbl">out</span><span>${shapeNL(op.outputs)}</span></div>
+    ${errs?`<div class="opio"><span class="iolbl err">raises</span><span class="v">${esc(errs)}</span></div>`:''}</div>`;
+}
+
+// ── inspector ──
+function renderInspector(){
+  const el=$('inspector');
+  if(!tree){ el.innerHTML='<div class="insp-empty">Create a goal to begin architecting.</div>'; return; }
+  const n=selectedId?findNode(tree,selectedId):null;
+  if(!n){ el.innerHTML='<div class="insp-empty"><b>No module selected.</b><br><span class="muted">Click a module on the canvas to inspect its contract, plan it, or edit it.</span></div>'; return; }
+  const kind=n.is_leaf===true?'leaf':n.is_leaf===false?'internal':'unplanned';
+  const mk=nodeKind(n);
+  const canDecompose=(n._depth??0)<MAX_DEPTH;
+  el.innerHTML = `
+    <div class="sel-head">
+      <div class="row1"><span class="sel-id">${esc(n.id)}</span>
+        <span class="badge ${kind}">${kind==='internal'?(n.children||[]).length+' children':kind}</span>
+        <span class="badge ${esc(mk)}">${esc(mk)}</span></div>
+      <div class="muted" style="font-size:12px;margin-top:5px">status: ${n.status} · depth ${n._depth??0}</div>
+    </div>
+    <div class="actions">
+      <p class="lead">Plan / decompose <b>${esc(n.id)}</b></p>
+      <div class="row">
+        <button id="planBtn" class="primary sm" ${canDecompose?'':'disabled'} title="Decompose ${esc(n.id)} one level">Plan layer</button>
+        <button id="vibeBtn" class="vibe sm" ${canDecompose?'':'disabled'} title="Auto-decompose the ${esc(n.id)} subtree">Vibe ✨</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="addBtn" class="sm" title="Add a child module under ${esc(n.id)}">+ Add child</button>
+        <button id="leafBtn" class="sm" title="Mark ${esc(n.id)} a leaf (no children)">Mark leaf</button>
+        <button id="delBtn" class="sm danger" ${n.id===tree.id?'disabled':''} title="Delete this module">Delete</button>
+      </div>
+    </div>
+    <div id="body"></div>`;
+  $('planBtn').onclick=()=>runJob('/api/plan',{tree,node_id:n.id},'plan');
+  $('vibeBtn').onclick=()=>runJob('/api/vibe',{tree,node_id:n.id},'vibe');
+  $('leafBtn').onclick=()=>{ n.is_leaf=true; n.children=[]; n.edges=[]; n.status='planned'; render(); saveProject(); };
+  $('addBtn').onclick=()=>addChild(n);
+  $('delBtn').onclick=()=>deleteNode(n);
+  renderBody(n);
+}
+
+function renderBody(n){
+  const b=$('body');
+  if(editMode){ renderEdit(n,b); return; }
+  const par=parentOf(n.id);
+  const norm=d=>typeof d==='object'?{name:d.name||d.id,id:d.id||d.name}:{name:d,id:d};
+  const uses=(n.dependencies||[]).map(norm).filter(d=>d.id);
+  const receives=par?(par.edges||[]).filter(e=>e.to===n.id):[];
+  const feeds=par?(par.edges||[]).filter(e=>e.from===n.id):[];
+  const usedBy=flatten(tree).filter(m=>m!==n && (m.dependencies||[]).some(d=>norm(d).id===n.id));
+  const compose=n.is_leaf===false?(n.children||[]).map(c=>c.id):null;
+  const adapter=nodeKind(n)==='adapter';
+  const ext=n.external||{};
+
+  const rel=`<div class="section"><h4>Relationships</h4>
+    <div class="rel"><span class="rlbl">Part of</span>${par?`<b class="mono">${esc(par.id)}</b>`:'<span class="muted">root goal</span>'}</div>
+    <div class="rel"><span class="rlbl">Composed of</span>${compose?compose.map(c=>`<b class="mono">${esc(c)}</b>`).join(', '):'<span class="muted">— leaf (does the work itself)</span>'}</div>
+    <div class="rel"><span class="rlbl">Receives</span>${receives.length?receives.map(e=>`<span class="mono"><b class="dfv">${esc(e.name||'value')}</b> ← ${esc(e.from)}</span>`).join('; '):'<span class="muted">—</span>'}</div>
+    <div class="rel"><span class="rlbl">Feeds</span>${feeds.length?feeds.map(e=>`<span class="mono">→ ${esc(e.to)}${e.name?` <span class="dfv">(${esc(e.name)})</span>`:''}</span>`).join('; '):'<span class="muted">—</span>'}</div>
+    <div class="rel"><span class="rlbl">Uses</span>${uses.length?uses.map(d=>`<span class="mono"><b class="uv">${esc(d.id)}</b> as ${esc(d.name)}</span>`).join('; '):'<span class="muted">— self-contained</span>'}</div>
+    <div class="rel"><span class="rlbl">Used by</span>${usedBy.length?usedBy.map(m=>`<b class="mono">${esc(m.id)}</b>`).join(', '):'<span class="muted">—</span>'}</div>
+    <div class="rel-help"><b class="dfv">data flow</b>: one stage's output becomes the next's input (a pipe). <b class="uv">uses</b>: calls it as a tool (held handle).</div></div>`;
+  const adapterBlock=adapter?`<div class="section"><h4>External adapter</h4>
+    <div class="rel"><span class="rlbl">Provider</span><b>${esc(ext.provider||'external provider')}</b></div>
+    <div class="rel"><span class="rlbl">Unit tests</span><span>${esc(ext.mock_policy||'mock provider I/O')}</span></div>
+    <div class="rel"><span class="rlbl">Live smoke</span><span>${ext.live_smoke?'allowed':'opt-in only / off by default'}</span></div>
+    <div class="rel-help">Adapters isolate API/network/file boundaries. Unit tests should fake provider responses; live calls belong in separate smoke tests.</div></div>`:'';
+
+  let edit='';
+  if(n.is_leaf===false){
+    const opt=(n.children||[]).map(c=>`<option value="${esc(c.id)}">${esc(c.id)}</option>`).join('');
+    edit+=`<div class="section"><h4>Wire children · data flow</h4>
+      ${(n.edges||[]).map((e,i)=>`<div class="edge-row"><span class="mono">${esc(e.from)} <span class="dfv">→ ${esc(e.name||'value')} →</span> ${esc(e.to)}</span>
+        <button class="sm danger rmEdge" data-i="${i}">✕</button></div>`).join('')||'<span class="muted">no data-flow links</span>'}
+      <div class="edge-row" style="margin-top:7px"><select id="efFrom">${opt}</select><span>→</span><select id="efTo">${opt}</select>
+        <input id="efName" placeholder="value" class="mono" style="width:72px"><button id="efAdd" class="sm">+ link</button></div></div>`;
+  }
+  if(par){
+    const sibs=(par.children||[]).map(c=>c.id).filter(id=>id!==n.id);
+    if(sibs.length){
+      const opt=sibs.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
+      edit+=`<div class="section"><h4>Uses · held capabilities</h4>
+        ${uses.map((d,i)=>`<div class="edge-row"><span class="mono"><b class="uv">${esc(d.id)}</b> as ${esc(d.name)}</span>
+          <button class="sm danger rmDep" data-i="${i}">✕</button></div>`).join('')||'<span class="muted">holds nothing</span>'}
+        <div class="edge-row" style="margin-top:7px"><select id="udId">${opt}</select><span>as</span>
+          <input id="udName" placeholder="name" class="mono" style="width:84px"><button id="udAdd" class="sm">+ uses</button></div></div>`;
+    }
+  }
+
+  b.innerHTML=`
+    <div class="section"><h4>Purpose</h4><p class="purpose">${esc(n.description||'(no description yet)')}</p></div>
+    <div class="section"><h4>Interface</h4>${(n.operations||[]).length?(n.operations.map(opNL).join('')):'<span class="muted">no operations defined</span>'}</div>
+    ${adapterBlock}${rel}${edit}
+    <div class="section"><div class="row"><button id="editBtn" class="sm">✎ Edit contract</button></div>
+      <div id="delivWrap"></div></div>`;
+  $('editBtn').onclick=()=>{ editMode=true; renderInspector(); };
+  if(n.is_leaf===false){
+    b.querySelectorAll('.rmEdge').forEach(btn=>btn.onclick=()=>{ n.edges.splice(+btn.dataset.i,1); render(); saveProject(); });
+    const a=$('efAdd'); if(a) a.onclick=()=>{ const f=$('efFrom').value,t=$('efTo').value,nm=$('efName').value.trim()||'value';
+      if(f===t){ alert('pick two different modules'); return; }
+      n.edges=n.edges||[]; if(!n.edges.some(e=>e.from===f&&e.to===t)) n.edges.push({from:f,to:t,name:nm}); render(); saveProject(); };
+  }
+  if(par){
+    b.querySelectorAll('.rmDep').forEach(btn=>btn.onclick=()=>{ n.dependencies.splice(+btn.dataset.i,1); render(); saveProject(); });
+    const a=$('udAdd'); if(a) a.onclick=()=>{ const id=$('udId').value,nm=$('udName').value.trim()||id;
+      n.dependencies=n.dependencies||[]; if(!n.dependencies.some(d=>norm(d).id===id)) n.dependencies.push({name:nm,id}); render(); saveProject(); };
+  }
+}
+
+function kvText(o){ return Object.entries(o||{}).map(([k,v])=>`${k}: ${typeof v==='object'?JSON.stringify(v):v}`).join('\n'); }
+function parseKV(t){ const o={}; (t||'').split('\n').forEach(l=>{ l=l.trim(); if(!l)return;
+  const i=l.indexOf(':'); if(i<0){o[l]='any';return;} const k=l.slice(0,i).trim(); let v=l.slice(i+1).trim();
+  try{ if(/^[\[{]/.test(v)) v=JSON.parse(v); }catch(e){} o[k]=v; }); return o; }
+
+function renderEdit(n,b){
+  const ops=n.operations||[];
+  const kind=nodeKind(n);
+  const ext=Object.assign({provider:'',mock_policy:'unit_tests_mock_provider',live_smoke:false},n.external||{});
+  b.innerHTML=`
+    <div class="section">
+      <div class="field"><label>module id</label><input id="eId" class="mono" value="${esc(n.id)}"></div>
+      <div class="field"><label>purpose (plain language)</label><textarea id="eDesc">${esc(n.description||'')}</textarea></div>
+      <div class="field"><label>module kind</label><select id="eKind">
+        ${['pure','stateful','adapter','ui'].map(k=>`<option value="${k}" ${kind===k?'selected':''}>${k}</option>`).join('')}
+      </select></div>
+      <div class="field"><label>adapter provider</label><input id="eProvider" value="${esc(ext.provider||'')}" placeholder="Open-Meteo, Stripe, filesystem…"></div>
+      <label class="muted" style="display:flex;gap:7px;align-items:center;margin-bottom:8px;font-size:13px">
+        <input type="checkbox" id="eLiveSmoke" ${ext.live_smoke?'checked':''}> allow opt-in live smoke test for this adapter</label>
+    </div>
+    <div class="section"><h4>Operations</h4><div id="opList"></div>
+      <button id="addOp" class="sm" style="margin-top:4px">+ operation</button></div>
+    <div class="section">
+      <div class="row"><button id="saveBtn" class="primary sm">Save</button>
+        <button id="cancelBtn" class="sm ghost">Cancel</button></div>
+      <details style="margin-top:10px"><summary>advanced: raw contract JSON</summary>
+        <textarea id="eRaw" class="mono" style="min-height:130px;margin-top:8px">${esc(JSON.stringify({
+          id:n.id,description:n.description||'',kind,external:ext,operations:ops,dependencies:n.dependencies||[],stateful:!!n.stateful},null,2))}</textarea>
+        <button id="applyRaw" class="sm" style="margin-top:6px">Apply raw JSON</button></details>
+    </div>`;
+  const opList=$('opList');
+  function drawOps(list){
+    opList.innerHTML=list.map((op,i)=>`<div class="op">
+      <div class="field"><label>name</label><input class="mono opn" data-i="${i}" value="${esc(op.name||'')}"></div>
+      <div class="field"><label>inputs (one <code>key: type</code> per line)</label>
+        <textarea class="opin" data-i="${i}">${esc(kvText(op.inputs))}</textarea></div>
+      <div class="field"><label>outputs</label><textarea class="opout" data-i="${i}">${esc(kvText(op.outputs))}</textarea></div>
+      <div class="field"><label>errors (comma-separated)</label>
+        <input class="operr" data-i="${i}" value="${esc((op.errors||[]).join(', '))}"></div>
+      <button class="sm danger oprm" data-i="${i}">remove operation</button></div>`).join('') ||
+      '<span class="muted">no operations — add one</span>';
+    opList.querySelectorAll('.oprm').forEach(btn=>btn.onclick=()=>{ list.splice(+btn.dataset.i,1); drawOps(list); });
+  }
+  let working=JSON.parse(JSON.stringify(ops));
+  drawOps(working);
+  $('addOp').onclick=()=>{ working.push({name:'',inputs:{},outputs:{},errors:[]}); drawOps(working); };
+  function collect(){
+    const get=(sel)=>[...opList.querySelectorAll(sel)];
+    const names=get('.opn'), ins=get('.opin'), outs=get('.opout'), errs=get('.operr');
+    const out=[];
+    names.forEach((el,i)=>{ out.push({ name:el.value.trim(),
+      inputs:parseKV(ins[i]?.value), outputs:parseKV(outs[i]?.value),
+      errors:(errs[i]?.value||'').split(',').map(s=>s.trim()).filter(Boolean) }); });
+    return out;
+  }
+  $('saveBtn').onclick=()=>{
+    n.description=$('eDesc').value; n.kind=$('eKind').value; n.stateful=n.kind==='stateful'; n.operations=collect();
+    n.external={provider:$('eProvider').value.trim(),mock_policy:'unit_tests_mock_provider',live_smoke:$('eLiveSmoke').checked};
+    const nid=$('eId').value.trim(); if(nid&&nid!==n.id){ renameNode(n,nid); }
+    normalizeNode(n); editMode=false; render(); saveProject();
+  };
+  $('cancelBtn').onclick=()=>{ editMode=false; renderInspector(); };
+  $('applyRaw').onclick=()=>{
+    try{ const o=JSON.parse($('eRaw').value);
+      n.description=o.description||''; n.stateful=!!o.stateful;
+      n.kind=o.kind||o.module_kind||(o.stateful?'stateful':'pure'); n.external=o.external||{};
+      n.operations=o.operations||[]; n.dependencies=o.dependencies||[];
+      if(o.id&&o.id!==n.id) renameNode(n,o.id);
+      normalizeNode(n); editMode=false; render(); saveProject();
+    }catch(e){ alert('invalid JSON: '+e.message); }
+  };
+}
+
+// ── structural edits ──
+function uniqueId(base){ const ids=new Set(flatten(tree).map(n=>n.id)); let id=base,i=2; while(ids.has(id)){ id=base+'_'+i++; } return id; }
+function addChild(parent){
+  parent.is_leaf=false; parent.children=parent.children||[]; parent.edges=parent.edges||[];
+  const id=uniqueId(parent.id+'_part');
+  const child={ id, description:'', kind:'pure', external:{}, operations:[], dependencies:[], stateful:false,
+    is_leaf:null, children:[], edges:[], status:'unplanned' };
+  if(typeof parent.x==='number'){ child.x=parent.x+(parent.children.length*40-40); child.y=(parent.y||0)+VGAP; }
+  parent.children.push(child); selectedId=id; editMode=true; render(); saveProject();
+}
+function deleteNode(n){
+  if(n.id===tree.id) return;
+  if(!confirm(`Delete module "${n.id}"${(n.children||[]).length?' and its '+flatten(n).length+' descendants':''}?`)) return;
+  const par=parentOf(n.id);
+  par.children=par.children.filter(c=>c.id!==n.id);
+  par.edges=(par.edges||[]).filter(e=>e.from!==n.id&&e.to!==n.id);
+  if(!par.children.length){ par.is_leaf=null; par.edges=[]; }
+  selectedId=par.id; editMode=false; render(); saveProject();
+}
+function parentOf(id){ let res=null; (function w(n){ for(const c of n.children||[]){ if(c.id===id) res=n; else w(c); } })(tree); return res; }
+function renameNode(n,nid){
+  nid=uniqueId(nid); const old=n.id;
+  const par=parentOf(old);
+  if(par){ (par.edges||[]).forEach(e=>{ if(e.from===old)e.from=nid; if(e.to===old)e.to=nid; }); }
+  flatten(tree).forEach(m=>(m.dependencies||[]).forEach(d=>{ if(typeof d==='object'&&d.id===old)d.id=nid; }));
+  n.id=nid; if(selectedId===old) selectedId=nid;
+}
+
+// ── jobs ──
+function setBusy(b,label){
+  $('buildBtn').disabled=b||!buildReady(); $('resetBtn').disabled=b; $('tidyBtn').disabled=b;
+  $('vibeApplyBtn').disabled=b; document.querySelectorAll('.vibeQuick').forEach(x=>x.disabled=b);
+  document.querySelectorAll('#inspector button').forEach(x=>{ if(x.id!=='editBtn'&&x.id!=='cancelBtn') x.disabled=b; });
+  $('jobDot').style.background=b?'var(--building)':'var(--unplanned)';
+  $('jobLabel').textContent=label||(b?'running…':'idle');
+}
+function logLine(t){ const l=$('log'); l.textContent+=t+'\n'; l.scrollTop=l.scrollHeight; }
+async function saveProject(){
+  const res=await api('/api/project/save',{tree,history});
+  if(res.ok){ projectPath=res.path||projectPath; $('projectPill').textContent='project: saved'; }
+}
+async function runVibeEdit(prompt,nodeId){
+  if(!tree||polling)return;
+  const text=(prompt||$('vibePrompt').value||'').trim();
+  if(!text)return;
+  undoStack.push(snapshot()); $('undoBtn').disabled=false;
+  setBusy(true,'vibing architecture …'); polling=true;
+  try{
+    const res=await api('/api/vibe-edit',{tree,node_id:nodeId||selectedId,prompt:text,history});
+    if(res.error){ logLine('✗ '+res.error); return; }
+    tree=res.tree; history=res.history||history; cards=res.cards||[];
+    const src=res.transaction?.source?` [${res.transaction.source}]`:'';
+    logLine('vibe'+src+': '+(res.transaction?.summary||res.transaction?.label||'architecture updated'));
+    if($('vibePrompt').value.trim()===text)$('vibePrompt').value='';
+    render(); renderCards(); updateReadiness(); saveProject();
+  }finally{
+    polling=false; setBusy(false,'idle');
+  }
+}
+function undoLast(){
+  const prev=undoStack.pop(); if(!prev)return;
+  tree=prev; if(!undoStack.length)$('undoBtn').disabled=true;
+  render(); refreshCards();
+}
+async function runJob(path,body,kind){
+  if(polling) return;
+  $('log').textContent=''; setBusy(true,kind+' …'); polling=true;
+  const start=await api(path,body);
+  if(start.error){ logLine('✗ '+start.error); setBusy(false,'error'); polling=false; return; }
+  const jid=start.job_id; let since=0;
+  while(true){
+    await new Promise(r=>setTimeout(r,700));
+    const snap=await fetch(`/api/job?id=${jid}&since=${since}`).then(r=>r.json());
+    (snap.log||[]).forEach(logLine); since=snap.log_len;
+    if(snap.status!=='running'){ polling=false;
+      if(snap.status==='error'){ setBusy(false,'error'); $('jobDot').style.background='var(--failed)'; return; }
+      onResult(kind,snap.result); setBusy(false,'done'); $('jobDot').style.background='var(--verified)'; return;
+    }
+  }
+}
+function onResult(kind,result){
+  if(!result) return;
+  if(result.cards){ cards=result.cards; renderCards(); }
+  if(kind==='plan'||kind==='vibe'){ mergeTree(result.tree); ensurePositions(); render(); saveProject(); }
+  else if(kind==='build'){
+    const st=result.statuses||{}; flatten(tree).forEach(n=>{ if(st[n.id]) n.status=st[n.id]; });
+    if(result.cards){ cards=result.cards; renderCards(); }
+    render();
+    logLine(`\n— build done · ${result.calls} LLM calls · ${result.ok?'OK':'FAILED'} —`);
+    if(result.error) logLine('build error: '+result.error);
+    showDeliverable(result);
+  }
+}
+// merge server-returned tree (decisions) while preserving manual x/y positions
+function mergeTree(srv){
+  const pos={}; if(tree) flatten(tree).forEach(n=>{ if(typeof n.x==='number') pos[n.id]={x:n.x,y:n.y}; });
+  tree=srv; flatten(tree).forEach(n=>{ if(pos[n.id]){ n.x=pos[n.id].x; n.y=pos[n.id].y; } });
+}
+function showDeliverable(result){
+  const w=$('delivWrap'); if(!w) return;
+  const out=(result.run_stdout||'').trim()||(result.run_stderr||'').trim()||'(no output)';
+  w.innerHTML=`<div class="field" style="margin-top:12px"><label>deliverable — <code>build/main.py</code> (exit ${result.run_returncode})</label>
+    <div class="deliverable">${esc(out)}</div></div>`;
+}
+
+// ── pan / zoom / drag ──
+const svgEl=()=>$('svg');
+function svgPoint(e){ const r=svgEl().getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top}; }
+let panning=null;
+svg_init();
+function svg_init(){
+  const svg=$('svg');
+  svg.addEventListener('mousedown',e=>{ if(e.target.closest('.node'))return;
+    panning={sx:e.clientX,sy:e.clientY,vx:view.x,vy:view.y}; svg.classList.add('panning'); });
+  window.addEventListener('mousemove',e=>{ if(!panning)return;
+    view.x=panning.vx+(e.clientX-panning.sx); view.y=panning.vy+(e.clientY-panning.sy); applyView(); });
+  window.addEventListener('mouseup',()=>{ if(panning){panning=null; $('svg').classList.remove('panning');} });
+  svg.addEventListener('wheel',e=>{ e.preventDefault(); const p=svgPoint(e);
+    const f=Math.exp(-e.deltaY*0.0015); zoomAt(p.x,p.y,f); },{passive:false});
+}
+function zoomAt(mx,my,f){
+  const k=Math.min(2.4,Math.max(0.35,view.k*f)); const cx=(mx-view.x)/view.k, cy=(my-view.y)/view.k;
+  view.x=mx-cx*k; view.y=my-cy*k; view.k=k; applyView();
+}
+let nodeDrag=null;
+function startNodeDrag(e,id){
+  e.stopPropagation();
+  selectedId=id;
+  const n=findNode(tree,id);
+  nodeDrag={id,sx:e.clientX,sy:e.clientY,nx:n.x,ny:n.y,moved:false};
+  const g=e.target.closest('.node'); if(g) g.classList.add('dragging');
+}
+window.addEventListener('mousemove',e=>{ if(!nodeDrag)return;
+  const dx=(e.clientX-nodeDrag.sx)/view.k, dy=(e.clientY-nodeDrag.sy)/view.k;
+  if(Math.abs(e.clientX-nodeDrag.sx)+Math.abs(e.clientY-nodeDrag.sy)>3) nodeDrag.moved=true;
+  const n=findNode(tree,nodeDrag.id); n.x=nodeDrag.nx+dx; n.y=nodeDrag.ny+dy; render(); });
+window.addEventListener('mouseup',()=>{ if(!nodeDrag)return;
+  if(!nodeDrag.moved){ /* a click → just (re)select & show inspector */ }
+  const moved=nodeDrag.moved; editMode=false; nodeDrag=null; render(); if(moved) saveProject(); });
+
+function fitView(){
+  if(!tree){ return; } ensurePositions();
+  const ns=flatten(tree); const xs=ns.map(n=>n.x), ys=ns.map(n=>n.y);
+  const minx=Math.min(...xs), maxx=Math.max(...xs)+NODE_W, miny=Math.min(...ys), maxy=Math.max(...ys)+NODE_H;
+  const r=$('svg').getBoundingClientRect(); const pad=60;
+  const k=Math.min(2.2,(r.width-pad*2)/(maxx-minx||1),(r.height-pad*2)/(maxy-miny||1));
+  view.k=Math.max(0.4,Math.min(1.2,k));
+  view.x=(r.width-(maxx-minx)*view.k)/2-minx*view.k;
+  view.y=pad-miny*view.k; applyView();
+}
+
+// ── top-level ──
+$('createBtn').onclick=()=>{
+  const desc=$('goalDesc').value.trim(); let id=$('goalId').value.trim();
+  if(!desc){ alert('Describe the goal first.'); return; }
+  if(!id) id=desc.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,32)||'root';
+  tree={ id, description:desc, kind:'pure', external:{}, stateful:false,
+    operations:[{name:'run',inputs:{input:'string'},outputs:{result:'string'},errors:[]}],
+    dependencies:[], is_leaf:null, children:[], edges:[], status:'unplanned' };
+  selectedId=id; editMode=false; view={x:120,y:80,k:1}; ensurePositions(); render(); fitView(); saveProject();
+};
+$('resetBtn').onclick=()=>{ if(tree&&!confirm('Clear the current tree?'))return;
+  tree=null; selectedId=null; editMode=false; cards=[]; history=[]; undoStack=[]; $('log').textContent=''; setBusy(false,'idle'); render(); renderCards(); saveProject(); };
+$('buildBtn').onclick=()=>{ if(!buildReady())return;
+  if(!confirm('Build the planned tree? This spends LLM calls (IMPLEMENT + DERIVE_TESTS per module).'))return;
+  runJob('/api/build',{tree},'build'); };
+$('tidyBtn').onclick=()=>{ if(!tree)return; tidyLayout(); render(); fitView(); saveProject(); };
+$('fitBtn').onclick=fitView;
+$('zoomIn').onclick=()=>{ const r=$('svg').getBoundingClientRect(); zoomAt(r.width/2,r.height/2,1.2); };
+$('zoomOut').onclick=()=>{ const r=$('svg').getBoundingClientRect(); zoomAt(r.width/2,r.height/2,1/1.2); };
+$('saveProjectBtn').onclick=saveProject;
+$('vibeApplyBtn').onclick=()=>runVibeEdit();
+$('vibeBar').querySelectorAll('.vibeQuick').forEach(btn=>btn.onclick=()=>runVibeEdit(btn.dataset.prompt));
+$('vibePrompt').addEventListener('keydown',e=>{ if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)) runVibeEdit(); });
+$('undoBtn').onclick=undoLast;
+$('validateBtn').onclick=refreshCards;
+
+async function boot(){
+  try{
+    const cfg=await fetch('/api/config').then(r=>r.json()); MAX_DEPTH=cfg.max_depth; projectPath=cfg.project_path||'';
+    const p=$('backendPill'); p.textContent='backend: '+(cfg.backend||'unknown')+(cfg.backend_available?' ✓':' ✗');
+  p.style.color=cfg.backend_available?'var(--verified)':'var(--failed)';
+    $('projectPill').textContent=projectPath?('project: '+projectPath.split('/').pop()):'project: unsaved';
+  }catch(e){}
+  try{
+    const doc=await fetch('/api/project').then(r=>r.json());
+    if(doc.tree){ tree=doc.tree; normalizeNode(tree); history=doc.history||[]; selectedId=tree.id; ensurePositions(); fitView(); }
+  }catch(e){}
+  render(); refreshCards();
+}
+boot();
+</script>
+</body>
+</html>
