@@ -27,11 +27,12 @@ build(contract) -> Node | FAILURE:
 """
 
 import ast
+import os
 import shutil
 import subprocess
 import sys
+import time as _time
 from pathlib import Path
-from typing import Optional
 
 from node import (
     BUILD_ROOT,
@@ -40,10 +41,9 @@ from node import (
     save_decision,
     save_deps,
     save_status,
-    topological_order,
+    validate_module_id,
 )
-from skills import (plan, implement, derive_tests, derive_integration_test,
-                    plan_canned, implement_canned, derive_tests_canned)
+from skills import (plan, implement, derive_tests, derive_integration_test)
 from llm import LLMNotConfigured, LLMParseError
 
 
@@ -63,8 +63,6 @@ REPLANS_MAX = 2        # M-G: max replan attempts on child failure
 # cross-window audit survives resumption: a memo-hit's hash is traceable to the earlier
 # live-build line carrying the same hash. The manifest is what PROVES "no pins" rather
 # than asserting it (§2.3) — and it doubles as the cost ledger (one line per LLM call).
-import os
-import time as _time
 
 MANIFEST_NAME = "manifest.jsonl"
 _manifest_run_id = None
@@ -105,14 +103,16 @@ def _manifest(node_id: str, event: str, contract: dict,
 
 def _contract_hash(contract: dict) -> str:
     """Stable hash of a contract for memoization."""
-    import hashlib, json
+    import hashlib
+    import json
     raw = json.dumps(contract, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def _load_verified_node(contract: dict) -> Node | None:
     """If this contract has a verified build on disk, return the Node. Otherwise None."""
-    import json, yaml as _yaml
+    import json
+    import yaml as _yaml
     node_path = BUILD_ROOT / contract["id"]
     status_path = node_path / "status.json"
     memo_path = node_path / "memo.txt"
@@ -131,6 +131,15 @@ def _load_verified_node(contract: dict) -> Node | None:
         # Reconstruct Node
         contract_on_disk = _yaml.safe_load((node_path / "contract.yaml").read_text())
         decision = json.loads((node_path / "decision.json").read_text())
+        if not decision.get("is_leaf", True):
+            # Internal-node unit tests construct the wiring class with faked children.
+            # Since v2's composition gate was added, that evidence alone is insufficient:
+            # do not reuse an older "verified" memo unless its report proves the same
+            # consumer assertions also ran against the real assembled subtree.
+            report = json.loads((node_path / "test_report.json").read_text())
+            composition = (report.get("evidence") or {}).get("real_composition") or {}
+            if not report.get("passed") or not composition.get("passed"):
+                return None
         deps_path = node_path / "deps.yaml"
         deps = _yaml.safe_load(deps_path.read_text()) if deps_path.exists() else []
 
@@ -152,6 +161,56 @@ def _save_memo(node: Node, contract: dict):
     """Save memoization hash for a verified node."""
     node.path().mkdir(parents=True, exist_ok=True)
     (node.path() / "memo.txt").write_text(_contract_hash(contract))
+
+
+def _save_test_report(node: Node, result: dict, attempts: int):
+    """Persist the last test run for a node so the canvas can show pass/fail detail.
+
+    `run_tests` returns {passed, failures} but only a generic `reason` reaches status.json.
+    This writes build/<id>/test_report.json so the inspector can surface the actual failing
+    test(s) and error, not just 'failed'."""
+    import json
+    report = {
+        "passed": bool(result.get("passed")),
+        "failures": result.get("failures", []),
+        "attempts": attempts,
+    }
+    if "evidence" in result:
+        report["evidence"] = result["evidence"]
+    try:
+        node.path().mkdir(parents=True, exist_ok=True)
+        (node.path() / "test_report.json").write_text(json.dumps(report, indent=2))
+    except Exception:
+        pass
+
+
+def invalidate_node(node_id: str):
+    """Force a single node to rebuild on the next build(): drop its memo + verified status.
+
+    Because `_load_verified_node` fails a parent when ANY descendant is unverified,
+    `build(root)` then descends past every memo-hit sibling and rebuilds ONLY this node
+    (plus the ancestor wiring that must re-verify against it). This is how the canvas does
+    a scoped 'rebuild this module' without rebuilding verified siblings."""
+    import json
+    node_path = BUILD_ROOT / validate_module_id(node_id)
+    try:
+        (node_path / "memo.txt").unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    status_path = node_path / "status.json"
+    try:
+        data = json.loads(status_path.read_text()) if status_path.exists() else {}
+    except Exception:
+        data = {}
+    data["status"] = "planned"
+    data.pop("reason", None)
+    try:
+        node_path.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
 
 
 def _load_prior_decision(contract: dict) -> dict | None:
@@ -187,6 +246,27 @@ def _load_prior_decision(contract: dict) -> dict | None:
         return None
 
 
+def _prior_decision_source(contract: dict) -> str:
+    """Return persisted decision provenance for a prior decision, if any."""
+    marker = BUILD_ROOT / contract["id"] / "decision_source.txt"
+    try:
+        value = marker.read_text().strip()
+        return value or "live"
+    except Exception:
+        return "live"
+
+
+def _clear_decision_source(node: Node):
+    """A freshly live-authored decision clears stale manual provenance markers."""
+    marker = node.path() / "decision_source.txt"
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
 class BuildFailure(Exception):
     """A node could not be built."""
     def __init__(self, contract_id: str, reason: str):
@@ -206,7 +286,10 @@ def run_tests(src_dir: Path, tests_dir: Path) -> dict:
     """
     test_files = list(tests_dir.glob("test_*.py"))
     if not test_files:
-        return {"passed": True, "failures": []}
+        return {
+            "passed": False,
+            "failures": [f"No tests found in {tests_dir}; verification is unavailable"],
+        }
 
     # Copy source files into a temp test dir so imports work
     import tempfile
@@ -328,21 +411,21 @@ def assemble(root: Node) -> str:
             # class defined) is unchanged.
             result.append(f"# Module (no injected deps): {node.id} — stateful class (one instance) or top-level fns")
             result.append(f"def construct_{node.id}():")
-            result.append(f"    import inspect")
+            result.append("    import inspect")
             result.append(f"    import {node.id} as _m")
-            result.append(f"    _own = [c for _n, c in inspect.getmembers(_m, inspect.isclass)")
+            result.append("    _own = [c for _n, c in inspect.getmembers(_m, inspect.isclass)")
             result.append(f"            if c.__module__ == {node.id!r}]")
-            result.append(f"    if len(_own) == 1:")
-            result.append(f"        return _own[0]()          # stateful component — instantiate once")
-            result.append(f"    class _Handle:")
+            result.append("    if len(_own) == 1:")
+            result.append("        return _own[0]()          # stateful component — instantiate once")
+            result.append("    class _Handle:")
             if ops:
                 for op in ops:
                     op_name = op["name"]
                     result.append(f"        def {op_name}(self, *args, **kwargs):")
                     result.append(f"            return _m.{op_name}(*args, **kwargs)")
             else:
-                result.append(f"        pass")
-            result.append(f"    return _Handle()")
+                result.append("        pass")
+            result.append("    return _Handle()")
         else:
             params = [p for p, _src in inj]
             dep_params = ", ".join(params)
@@ -539,6 +622,152 @@ def verify_integration(node: Node, test_src: str) -> dict:
             return {"passed": False, "failures": ["integration test timed out (30s)"]}
 
 
+def _subtree_nodes(root: Node) -> list[Node]:
+    """Return a subtree once per node id, root first, for transient verification copies."""
+    ordered: list[Node] = []
+    seen: set[str] = set()
+
+    def visit(current: Node):
+        if current.id in seen:
+            return
+        seen.add(current.id)
+        ordered.append(current)
+        for child in current.children:
+            visit(child)
+
+    visit(root)
+    return ordered
+
+
+def verify_real_composition(node: Node) -> dict:
+    """Run an internal node's consumer tests against its REAL assembled children.
+
+    DERIVE_TESTS intentionally isolates wiring logic by constructing the parent class with
+    contract-derived fakes. That is useful unit evidence, but it cannot establish that the
+    real children implement the semantics those fakes assumed. For this second pass pytest
+    loads a conftest shim that redirects construction of the node's one wiring class to
+    ``main.assemble()``. The original assertions and inputs are unchanged; only the
+    collaborators become the real recursively assembled subtree.
+
+    A marker written by the shim proves at least one test actually constructed the real
+    subtree. Empty, skipped, structurally incompatible, or unexercised suites fail closed.
+    """
+    import tempfile
+
+    if node.is_leaf or not node.children:
+        return {
+            "passed": False,
+            "failures": ["Real-composition verification requires an internal node"],
+        }
+
+    test_files = sorted(node.tests_path().glob("test_*.py"))
+    if not test_files:
+        return {
+            "passed": False,
+            "failures": [
+                f"No tests found for internal node '{node.id}'; "
+                "real-composition evidence is unavailable"
+            ],
+        }
+
+    try:
+        assemble(node)
+    except Exception as exc:
+        return {
+            "passed": False,
+            "failures": [f"Could not assemble real subtree for '{node.id}': {exc}"],
+        }
+
+    with tempfile.TemporaryDirectory(prefix="rich_real_composition_") as tmp:
+        tmp_path = Path(tmp)
+        try:
+            for subtree_node in _subtree_nodes(node):
+                for source_file in subtree_node.src_path().glob("*.py"):
+                    shutil.copy2(source_file, tmp_path / source_file.name)
+            shutil.copy2(BUILD_ROOT / "main.py", tmp_path / "main.py")
+            for test_file in test_files:
+                shutil.copy2(test_file, tmp_path / test_file.name)
+
+            # Pytest imports conftest before collecting test modules. Replace the target
+            # module's own wiring class with a factory. The factory briefly restores the
+            # original class while main.assemble() introspects it, then re-applies itself
+            # so every later test/import also receives a fresh real subtree.
+            (tmp_path / "conftest.py").write_text(
+                "import inspect as _rich_inspect\n"
+                "from pathlib import Path as _RichPath\n"
+                f"import {node.id} as _rich_target\n"
+                "from main import assemble as _rich_assemble\n"
+                "\n"
+                "_rich_originals = {\n"
+                "    name: value\n"
+                "    for name, value in _rich_inspect.getmembers(_rich_target, "
+                "_rich_inspect.isclass)\n"
+                f"    if value.__module__ == {node.id!r}\n"
+                "}\n"
+                "if len(_rich_originals) != 1:\n"
+                "    raise RuntimeError(\n"
+                f"        \"real composition [{node.id}]: expected exactly one wiring "
+                "class, found \"\n"
+                "        + repr(sorted(_rich_originals))\n"
+                "    )\n"
+                "\n"
+                "class _RichRealCompositionFactory:\n"
+                "    def __new__(cls, *args, **kwargs):\n"
+                "        for _name, _value in _rich_originals.items():\n"
+                "            setattr(_rich_target, _name, _value)\n"
+                "        try:\n"
+                "            app = _rich_assemble()\n"
+                "            _RichPath('.rich_real_composition_used').write_text('1')\n"
+                "            return app\n"
+                "        finally:\n"
+                "            for _name in _rich_originals:\n"
+                "                setattr(_rich_target, _name, "
+                "_RichRealCompositionFactory)\n"
+                "\n"
+                "for _rich_name in _rich_originals:\n"
+                "    setattr(_rich_target, _rich_name, _RichRealCompositionFactory)\n"
+            )
+        except Exception as exc:
+            return {
+                "passed": False,
+                "failures": [
+                    f"Could not materialize real-composition test for '{node.id}': {exc}"
+                ],
+            }
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "--tb=short", str(tmp_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(tmp_path),
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "passed": False,
+                "failures": ["real-composition test timed out (30s)"],
+            }
+
+        marker = tmp_path / ".rich_real_composition_used"
+        passed = result.returncode == 0 and marker.exists()
+        failures = []
+        if result.returncode != 0:
+            combined = (result.stdout + "\n" + result.stderr).splitlines()
+            for line in combined:
+                if ("FAILED" in line or "ERROR" in line or "Error" in line
+                        or "assert" in line):
+                    failures.append(line.strip())
+            if not failures:
+                tail = [line.strip() for line in combined if line.strip()][-8:]
+                failures.extend(tail)
+        if result.returncode == 0 and not marker.exists():
+            failures.append(
+                f"Tests for '{node.id}' passed without constructing the real assembled subtree"
+            )
+        return {"passed": passed, "failures": failures[:20]}
+
+
 # ── Phase 11 Fix 2: dataflow shape-handoff (concrete example capture) ──────────
 # A downstream leaf consuming a sibling's dataflow output is built knowing only its own
 # contract — not the concrete SHAPE of the value crossing the edge (Probe B's evaluator
@@ -605,11 +834,13 @@ def _extract_test_input_candidates(node: Node) -> list[dict]:
                 kwargs, ok = {}, True
                 for kw in call.keywords:
                     if kw.arg is None:
-                        ok = False; break
+                        ok = False
+                        break
                     try:
                         kwargs[kw.arg] = _resolve(kw.value, local_syms)
                     except Exception:
-                        ok = False; break
+                        ok = False
+                        break
                 if ok and kwargs:
                     candidates.append(kwargs)
 
@@ -634,7 +865,8 @@ def _extract_test_input_candidates(node: Node) -> list[dict]:
         for c in candidates:
             key = _json.dumps(c, sort_keys=True, default=repr)
             if key not in seen:
-                seen.add(key); uniq.append(c)
+                seen.add(key)
+                uniq.append(c)
         uniq.sort(key=lambda k: len(_json.dumps(k, default=repr)), reverse=True)
         return uniq
     except Exception:
@@ -693,6 +925,29 @@ def _run_inputs_for(node: Node, inbound_examples: dict | None) -> dict | None:
     if len(decl) == 1 and len(whole_by_src) == 1:
         return {decl[0]: next(iter(whole_by_src.values()))}
     return run or None
+
+
+def _project_parent_inputs_for_child(parent_id: str, child_contract: dict,
+                                     parent_inputs: dict | None) -> dict | None:
+    """Project a parent's concrete run kwargs into a child-shaped inbound example.
+
+    Sibling handoff already captures concrete outputs from upstream children. This helper
+    covers the other direction: an internal node that received concrete caller inputs
+    should pass the relevant subset to its own head children, so they build against the
+    real parent input shape rather than only their isolated unit-test literals.
+    """
+    if not parent_inputs:
+        return None
+    ops = child_contract.get("interface", {}).get("operations", [])
+    child_inputs = list((ops[0].get("inputs", {}) if ops else {}).keys())
+    if not child_inputs:
+        return None
+    direct = {name: parent_inputs[name] for name in child_inputs if name in parent_inputs}
+    if direct:
+        return {parent_id: direct}
+    if len(child_inputs) == 1 and len(parent_inputs) == 1:
+        return {parent_id: {child_inputs[0]: next(iter(parent_inputs.values()))}}
+    return None
 
 
 def _capture_example_output(node: Node, concrete_inputs: dict | None):
@@ -763,7 +1018,8 @@ def _capture_head_example(node: Node, max_seeds: int = 24):
 def build(contract: dict, allow_decompose: bool = False, use_canned: bool = False,
           depth: int = 0, llm_call_counter: list | None = None,
           available_deps: dict | None = None,
-          inbound_examples: dict | None = None) -> Node:
+          inbound_examples: dict | None = None,
+          force_plan: bool = False) -> Node:
     """The core recursive procedure (§4).
 
     Takes a contract, returns a verified Node or raises BuildFailure.
@@ -779,6 +1035,9 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
         upstream and passes its concrete output shape here, threaded into BOTH DERIVE_TESTS
         and IMPLEMENT so the node is built+tested against the real shape it will receive
         (the data analogue of the Phase-7 capability handoff). None when no dataflow input.
+    force_plan: bypass any persisted planned-but-unverified decision for this node. Used
+        by local child recovery so a failed child can re-PLAN without rebuilding siblings
+        or changing the parent's decomposition.
     """
     if llm_call_counter is None:
         llm_call_counter = [0]
@@ -808,6 +1067,7 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
         return cached
 
     # 1. PLAN
+    reused_decision_source = None
     if use_canned:
         import skills as _skills
         decision = _skills.plan_canned(contract)
@@ -815,10 +1075,12 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
         # Resumption (§2.2): reuse this node's OWN prior live-authored decision if a
         # hash-identical one is persisted (frozen tree shape → no redundant PLAN call,
         # no memo-busting drift). Otherwise PLAN live.
-        prior = _load_prior_decision(contract)
+        prior = None if force_plan else _load_prior_decision(contract)
         if prior is not None:
             decision = prior
-            _manifest(node_id, "decision-reuse", contract)
+            reused_decision_source = _prior_decision_source(contract)
+            event = "manual-plan-reuse" if reused_decision_source == "manual" else "decision-reuse"
+            _manifest(node_id, event, contract, extra={"source": reused_decision_source})
         else:
             decision = plan(contract, allow_decompose=allow_decompose)
             llm_call_counter[0] += 1
@@ -837,6 +1099,8 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
     # Also save raw PLAN output so decision.json reflects what PLAN authored
     if not node.is_leaf:
         _save_raw_decision(node, decision)
+    if not use_canned and reused_decision_source is None:
+        _clear_decision_source(node)
     # Resolve dependencies from contract (for both leaf and internal)
     node.dependencies = contract.get("dependencies", [])
     save_status(node, "planned")
@@ -905,12 +1169,14 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
                 save_status(node, "verified")
                 save_deps(node)
                 _save_memo(node, contract)
+                _save_test_report(node, result, attempt)
                 return node
 
             # Include failures in next attempt's prompt (wired in M-C)
             print(f"  [{node_id}] attempt {attempt}/{K_IMPL} FAILED: {result.get('failures', 'unknown')}")
             failures = result.get("failures", [])
 
+        _save_test_report(node, result, K_IMPL)
         save_status(node, "failed", reason=f"leaf unsatisfiable after {K_IMPL} attempts")
         raise BuildFailure(node_id, f"leaf unsatisfiable after {K_IMPL} attempts")
 
@@ -919,91 +1185,96 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
         children_contracts = decision["children"]
         edges = decision.get("edges", [])
 
-        # Build child nodes — allow decomposition if below max depth (M-G)
+        children_ordered = _topo_sort_contracts(children_contracts, edges)
+
+        if len(children_ordered) > MAX_CHILDREN:
+            raise BuildFailure(node_id, f"Too many children ({len(children_ordered)} > {MAX_CHILDREN})")
+
+        child_allow_decompose = (depth + 1) < MAX_DEPTH
         children_nodes = {}
 
-        for replan_attempt in range(REPLANS_MAX + 1):  # 0 = first try, 1..N = replans
-            try:
-                children_ordered = _topo_sort_contracts(children_contracts, edges)
+        # Phase 11 continuation: parent→child concrete shape handoff. If this internal
+        # node itself was built against an inbound example, derive the concrete kwargs
+        # with which its own operation would be called, then project those kwargs into
+        # each child by matching child input names.
+        parent_run_inputs = _run_inputs_for(node, inbound_examples) if inbound_examples else None
 
-                if len(children_ordered) > MAX_CHILDREN:
-                    raise BuildFailure(node_id, f"Too many children ({len(children_ordered)} > {MAX_CHILDREN})")
+        # Phase 11 Fix 2: concrete output example of each built upstream sibling, filled
+        # in topo order, so a downstream sibling is built against the REAL shape it will
+        # receive (not a guess).
+        example_outputs: dict = {}
 
-                child_allow_decompose = (depth + 1) < MAX_DEPTH
-                children_nodes = {}
-                failed_child = None
-                # Phase 11 Fix 2: concrete output example of each built upstream sibling,
-                # filled in topo order, so a downstream sibling is built against the REAL
-                # shape it will receive (not a guess). Reset per replan attempt.
-                example_outputs: dict = {}
+        # Phase 7: each child may HOLD a sibling capability. Pass the sibling contracts
+        # down (merged over any deps this node itself received) so a leaf child can
+        # resolve the contract of a dependency it declares.
+        sibling_contracts = {**(available_deps or {}),
+                             **{c["id"]: c for c in children_ordered}}
 
-                # Phase 7: each child may HOLD a sibling capability. Pass the sibling
-                # contracts down (merged over any deps this node itself received) so a
-                # leaf child can resolve the contract of a dependency it declares.
-                sibling_contracts = {**(available_deps or {}),
-                                     **{c["id"]: c for c in children_ordered}}
+        for child_contract in children_ordered:
+            # Gather concrete examples for this child's INBOUND DATAFLOW edges
+            # (upstream sibling → this child). A held-capability edge is excluded: that
+            # path is already covered by Phase 7's contract threading.
+            child_dep_ids = {d["id"] for d in (child_contract.get("dependencies") or [])
+                             if isinstance(d, dict) and "id" in d}
+            child_inbound = {}
+            for e in edges:
+                if (e.get("to") == child_contract["id"]
+                        and e.get("from") not in child_dep_ids):
+                    ex = example_outputs.get(e.get("from"))
+                    if ex is not None:
+                        child_inbound[e.get("from")] = ex
 
-                for child_contract in children_ordered:
-                    # Phase 11 Fix 2: gather concrete examples for this child's INBOUND
-                    # DATAFLOW edges (upstream sibling → this child). A held-capability
-                    # edge (upstream listed in this child's own dependencies) is excluded
-                    # — that path is already covered by Phase 7's contract threading.
-                    child_dep_ids = {d["id"] for d in (child_contract.get("dependencies") or [])
-                                     if isinstance(d, dict) and "id" in d}
-                    child_inbound = {}
-                    for e in edges:
-                        if (e.get("to") == child_contract["id"]
-                                and e.get("from") not in child_dep_ids):
-                            ex = example_outputs.get(e.get("from"))
-                            if ex is not None:
-                                child_inbound[e.get("from")] = ex
-                    try:
-                        child_node = build(child_contract, allow_decompose=child_allow_decompose,
-                                          use_canned=use_canned, depth=depth + 1,
-                                          llm_call_counter=llm_call_counter,
-                                          available_deps=sibling_contracts,
-                                          inbound_examples=child_inbound or None)
-                        children_nodes[child_contract["id"]] = child_node
-                    except BuildFailure as e:
-                        failed_child = child_contract
-                        raise  # Propagate to replan handler
+            parent_inbound = _project_parent_inputs_for_child(
+                node_id, child_contract, parent_run_inputs)
+            if parent_inbound:
+                merged_inbound = dict(child_inbound)
+                for src, ex in parent_inbound.items():
+                    merged_inbound.setdefault(src, ex)
+                child_inbound = merged_inbound
 
-                    # Capture this child's REAL output example IFF a downstream sibling
-                    # consumes it — running the verified node (no LLM/quota). Best-effort;
-                    # None on any failure (downstream falls back to its contract).
-                    if not use_canned and any(e.get("from") == child_contract["id"]
-                                              for e in edges):
-                        if child_inbound:
-                            # Consumer: run on the concrete value(s) its upstream produced.
-                            run_inputs = _run_inputs_for(child_node, child_inbound)
-                            example_outputs[child_contract["id"]] = (
-                                _capture_example_output(child_node, run_inputs)
-                                if run_inputs else None)
-                        else:
-                            # Head: pick the test seed whose OUTPUT is richest (exercises
-                            # real per-entry structure, not an empty edge case).
-                            example_outputs[child_contract["id"]] = \
-                                _capture_head_example(child_node)
+            child_node = None
+            for local_attempt in range(REPLANS_MAX + 1):
+                try:
+                    child_node = build(child_contract, allow_decompose=child_allow_decompose,
+                                       use_canned=use_canned, depth=depth + 1,
+                                       llm_call_counter=llm_call_counter,
+                                       available_deps=sibling_contracts,
+                                       inbound_examples=child_inbound or None,
+                                       force_plan=(local_attempt > 0))
+                    break
+                except BuildFailure as e:
+                    non_retriable = ("LLM call ceiling" in e.reason
+                                     or "Max depth" in e.reason)
+                    if non_retriable:
+                        raise
+                    if local_attempt < REPLANS_MAX and not use_canned:
+                        print(f"  [{node_id}] child '{child_contract['id']}' failed: {e.reason}")
+                        print(f"  [{node_id}] local child replan {local_attempt + 1}/{REPLANS_MAX}...")
+                        _manifest(node_id, "live-REPLAN", contract,
+                                  extra={"scope": "child",
+                                         "child": child_contract["id"],
+                                         "replan_attempt": local_attempt + 1})
+                        continue
+                    raise BuildFailure(
+                        node_id,
+                        f"child '{child_contract['id']}' failed after local replans: {e.reason}")
 
-                break  # Success — all children built
+            if child_node is None:
+                raise BuildFailure(node_id, f"child '{child_contract['id']}' did not build")
 
-            except BuildFailure as e:
-                if failed_child and replan_attempt < REPLANS_MAX and not use_canned:
-                    print(f"  [{node_id}] child '{failed_child['id']}' failed: {e.reason}")
-                    print(f"  [{node_id}] replan attempt {replan_attempt + 1}/{REPLANS_MAX}...")
-                    # Call PLAN again with failure context
-                    new_decision = plan(contract, allow_decompose=True)
-                    llm_call_counter[0] += 1
-                    _manifest(node_id, "live-REPLAN", contract, model=_PLAN_LABEL,
-                              extra={"replan_attempt": replan_attempt + 1})
-                    if new_decision.get("is_leaf", True):
-                        raise BuildFailure(node_id, "REPLAN fell back to leaf — decomposition failed")
-                    children_contracts = new_decision.get("children", [])
-                    edges = new_decision.get("edges", [])
-                    save_decision(node)  # Update decision
-                    _save_raw_decision(node, new_decision)
+            children_nodes[child_contract["id"]] = child_node
+
+            # Capture this child's REAL output example IFF a downstream sibling consumes
+            # it — running the verified node (no LLM/quota). Best-effort; None on any
+            # failure (downstream falls back to its contract).
+            if not use_canned and any(e.get("from") == child_contract["id"] for e in edges):
+                if child_inbound:
+                    run_inputs = _run_inputs_for(child_node, child_inbound)
+                    example_outputs[child_contract["id"]] = (
+                        _capture_example_output(child_node, run_inputs)
+                        if run_inputs else None)
                 else:
-                    raise
+                    example_outputs[child_contract["id"]] = _capture_head_example(child_node)
 
         node.children = list(children_nodes.values())
         node.edges = edges
@@ -1074,6 +1345,32 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
 
             result = run_tests(node.src_path(), node.tests_path())
             if result["passed"]:
+                # Parent tests verify wiring in isolation with contract-derived fakes.
+                # Re-run those same consumer assertions against the actual recursively
+                # assembled children before this composition may be called verified.
+                unit_result = result
+                composition_result = verify_real_composition(node)
+                evidence = {
+                    "unit": unit_result,
+                    "real_composition": composition_result,
+                }
+                if not composition_result["passed"]:
+                    result = {
+                        "passed": False,
+                        "failures": [
+                            "real assembled-child composition failed",
+                            *composition_result.get("failures", []),
+                        ],
+                        "evidence": evidence,
+                    }
+                else:
+                    result = {
+                        "passed": True,
+                        "failures": [],
+                        "evidence": evidence,
+                    }
+
+            if result["passed"]:
                 # Phase 8: ADD integration verification when children share a stateful
                 # dependency (§1.3). Per-module unit tests just passed, but they fake the
                 # shared store and so cannot see interaction bugs through it. The integration
@@ -1089,9 +1386,20 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
                                   extra={"shared_stateful": shared})
                         ires = verify_integration(node, itest)
                     except (LLMNotConfigured, LLMParseError) as e:
-                        # generation unavailable/failed — record, do not silently pass
-                        ires = {"passed": True, "failures": [f"integration generation skipped: {e}"]}
+                        # Required evidence unavailable: fail closed. A skipped verifier is
+                        # not evidence that the shared-state interaction is correct.
+                        ires = {
+                            "passed": False,
+                            "failures": [f"integration generation unavailable: {e}"],
+                        }
+                    result["evidence"]["shared_stateful_integration"] = ires
                     if not ires["passed"]:
+                        failed_result = {
+                            "passed": False,
+                            "failures": ires["failures"],
+                            "evidence": result["evidence"],
+                        }
+                        _save_test_report(node, failed_result, attempt)
                         save_status(node, "failed",
                                     reason=f"integration (shared stateful '{shared}'): {ires['failures'][:2]}")
                         raise BuildFailure(node_id,
@@ -1102,11 +1410,13 @@ def build(contract: dict, allow_decompose: bool = False, use_canned: bool = Fals
                 # Update decision with children contracts
                 save_decision(node)
                 _save_memo(node, contract)
+                _save_test_report(node, result, attempt)
                 return node
 
             print(f"  [{node_id}] wiring attempt {attempt}/{K_WIRE} FAILED: {result.get('failures', 'unknown')}")
             failures = result.get("failures", [])
 
+        _save_test_report(node, result, K_WIRE)
         save_status(node, "failed", reason=f"wiring failed after {K_WIRE} attempts")
         raise BuildFailure(node_id, f"wiring failed after {K_WIRE} attempts")
 

@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rich-agent-build-system"
+version = "0.1.0"
+description = "Intent-to-verified-software compiler with a recursive agent build engine"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "psycopg[binary]>=3.2,<4",
+    "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8,<10",
+    "ruff>=0.12,<1",
+]
+
+[project.scripts]
+rich-build = "cli:main"
+rich-v2 = "rich_v2.cli:main"
+
+[tool.setuptools]
+packages = ["rich_v2", "rich_v2.target_packs"]
+py-modules = [
+    "backend",
+    "build",
+    "canvas",
+    "cli",
+    "codex_skill",
+    "deep_test",
+    "llm",
+    "node",
+    "skills",
+    "subagent_skill",
+    "tree_viewer",
+]
+
+[tool.setuptools.package-dir]
+rich_v2 = "src/rich_v2"
+"rich_v2.target_packs" = "src/rich_v2/target_packs"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+pythonpath = [".", "src"]
+xfail_strict = true
+markers = [
+    "live: uses an external model or provider and is skipped unless --run-live is supplied",
+]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

@@ -438,8 +438,26 @@ RULES:
    with keys matching the declared outputs — extract the right key before asserting.
    Example: result = op(amount=1234.5); assert result["output_key"] == expected
 5. For each operation: test normal inputs, edge cases, and declared error conditions.
+   For a declared error condition, assert ONLY that the call raises — nothing more:
+       with pytest.raises(Exception):
+           op(<the invalid input>)
+   Do NOT pass a `match=` regex and do NOT name a specific exception subclass. `match=`
+   matches the exception's MESSAGE string (NOT its class name), and IMPLEMENT is free to
+   pick any class/message — so `match="SomeError"` over-fits and fails even a CORRECT
+   implementation whose message simply reads differently. The existential guarantee you
+   are encoding is just "invalid input raises", so a bare pytest.raises(Exception) is
+   both sufficient and robust.
 6. Tests are consumer-driven — they encode what the consumer needs from this module.
 7. Use descriptive test names: test_<op>_<scenario>.
+8. EXTERNAL ADAPTERS: if the contract has module_kind: adapter or an external: block,
+   the module talks to an external provider (HTTP/API/files/shell/database). Unit tests
+   MUST NOT make live external calls. Use pytest monkeypatch or unittest.mock to fake the
+   provider boundary used by the implementation, and use deterministic fake responses.
+   Do not require internet access, provider availability, real city names, real API keys,
+   clocks, files outside tmp_path, or live network behavior in unit tests. If you need to
+   test provider failures, monkeypatch the provider call to raise and assert only that the
+   operation raises Exception. Live smoke tests are out of scope for DERIVE_TESTS unless
+   explicitly requested by the contract.
 
 Output format: a JSON object with a single key "tests" containing the pytest code as a string."""
 

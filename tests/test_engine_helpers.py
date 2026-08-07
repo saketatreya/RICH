@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 import build
 import backend
 import canvas
@@ -238,6 +242,111 @@ def test_canvas_root_cause_flags_live_io_unit_tests(tmp_path, monkeypatch):
     assert any(c["title"] == "Unit tests may hit live external I/O" for c in cards)
 
 
+def test_canvas_root_cause_ignores_stale_artifacts_for_planned_nodes(tmp_path, monkeypatch):
+    monkeypatch.setattr(canvas, "BUILD_ROOT", tmp_path)
+    node_dir = tmp_path / "weather_fetcher"
+    (node_dir / "src").mkdir(parents=True)
+    (node_dir / "tests").mkdir()
+    (node_dir / "src" / "weather_fetcher.py").write_text(
+        "import urllib.request\n"
+        "def fetch(city):\n"
+        "    return urllib.request.urlopen('https://example.test').read()\n"
+    )
+    (node_dir / "tests" / "test_weather_fetcher.py").write_text(
+        "from weather_fetcher import fetch\n"
+        "def test_fetch():\n"
+        "    assert fetch('London')\n"
+    )
+    tree = {
+        "id": "weather_fetcher",
+        "description": "Fetch weather from an external API",
+        "kind": "adapter",
+        "external": {"provider": "Open-Meteo"},
+        "operations": [{"name": "fetch", "inputs": {"city": "string"},
+                        "outputs": {"weather_data": "dict"}, "errors": []}],
+        "dependencies": [],
+        "is_leaf": True,
+        "children": [],
+        "edges": [],
+        "status": "planned",
+    }
+
+    cards = canvas.inspect_external_io_risks(tree)
+
+    assert cards == []
+
+
+def test_canvas_adapter_failed_live_io_card_does_not_suggest_marking_adapter(tmp_path, monkeypatch):
+    monkeypatch.setattr(canvas, "BUILD_ROOT", tmp_path)
+    node_dir = tmp_path / "weather_fetcher"
+    (node_dir / "src").mkdir(parents=True)
+    (node_dir / "tests").mkdir()
+    (node_dir / "src" / "weather_fetcher.py").write_text(
+        "import urllib.request\n"
+        "def fetch(city):\n"
+        "    return urllib.request.urlopen('https://example.test').read()\n"
+    )
+    (node_dir / "tests" / "test_weather_fetcher.py").write_text(
+        "from weather_fetcher import fetch\n"
+        "def test_fetch():\n"
+        "    assert fetch('London')\n"
+    )
+    tree = {
+        "id": "weather_fetcher",
+        "description": "Fetch weather from an external API",
+        "kind": "adapter",
+        "external": {"provider": "Open-Meteo"},
+        "operations": [{"name": "fetch", "inputs": {"city": "string"},
+                        "outputs": {"weather_data": "dict"}, "errors": []}],
+        "dependencies": [],
+        "is_leaf": True,
+        "children": [],
+        "edges": [],
+        "status": "failed",
+    }
+
+    cards = canvas.inspect_external_io_risks(tree)
+
+    assert any(c["title"] == "Adapter tests still hit live I/O" and c["action"] is None
+               for c in cards)
+
+
+def test_canvas_normalize_internal_adapter_back_to_pure():
+    tree = {
+        "id": "weather_reporter",
+        "description": "Coordinate weather report generation",
+        "kind": "adapter",
+        "external": {"provider": "Open-Meteo"},
+        "operations": [{"name": "run", "inputs": {"input": "string"},
+                        "outputs": {"result": "string"}, "errors": []}],
+        "dependencies": [],
+        "is_leaf": False,
+        "children": [
+            {
+                "id": "weather_fetcher",
+                "description": "Fetch weather from an external API",
+                "kind": "adapter",
+                "external": {"provider": "Open-Meteo"},
+                "operations": [{"name": "fetch", "inputs": {"city": "string"},
+                                "outputs": {"weather_data": "dict"}, "errors": []}],
+                "dependencies": [],
+                "is_leaf": True,
+                "children": [],
+                "edges": [],
+                "status": "planned",
+            }
+        ],
+        "edges": [],
+        "status": "planned",
+    }
+
+    canvas.normalize_canvas_node(tree)
+
+    assert tree["kind"] == "pure"
+    assert tree["external"] == {}
+    assert tree["children"][0]["kind"] == "adapter"
+
+
 def test_canvas_transaction_creates_child_and_dataflow_edge():
     tree = {
         "id": "reporter",
@@ -410,3 +519,433 @@ def test_canvas_architecture_proposal_adds_cache_when_requested():
     assert {"name": "cache", "id": "weather_cache"} in fetcher["dependencies"]
     assert any(item["title"] == "State is intentional" and item["ok"]
                for item in proposal["checklist"])
+
+
+def test_canvas_replace_tree_transaction_swaps_entire_canvas():
+    tree = {
+        "id": "old_root",
+        "description": "old",
+        "operations": [{"name": "run", "inputs": {"input": "string"},
+                        "outputs": {"result": "string"}, "errors": []}],
+        "dependencies": [],
+        "is_leaf": True,
+        "children": [],
+        "edges": [],
+        "status": "planned",
+    }
+    next_tree = {
+        "id": "new_root",
+        "description": "new",
+        "operations": [{"name": "run", "inputs": {"input": "string"},
+                        "outputs": {"result": "string"}, "errors": []}],
+        "dependencies": [],
+        "is_leaf": True,
+        "children": [],
+        "edges": [],
+        "status": "planned",
+    }
+
+    updated = canvas.apply_transaction(tree, {"ops": [{"op": "replace_tree", "tree": next_tree}]})
+
+    assert updated["id"] == "new_root"
+    assert updated["description"] == "new"
+    assert updated is not tree
+    assert canvas.find_node(updated, "old_root") is None
+
+
+def test_canvas_suggest_root_brief_uses_deterministic_fallback(monkeypatch):
+    monkeypatch.setattr(canvas, "llm_brief_suggestion", lambda *args, **kwargs: None)
+
+    suggestion = canvas.suggest_root_brief({"goal": "Build a weather app"}, None)
+
+    assert suggestion["source"] == "deterministic"
+    assert suggestion["suggestion"]["root_id"] == "weather_reporter"
+    assert suggestion["preview"]["id"] == "weather_reporter"
+    assert suggestion["preview"]["description"] == "Build a weather app"
+    assert suggestion["preview"]["external_services"] == "Open-Meteo"
+    assert suggestion["preview"]["inputs"] == "city: London"
+    assert suggestion["preview"]["outputs"] == "report: concise weather summary"
+    assert suggestion["preview"]["state"] == "cached"
+    assert suggestion["preview"]["shape"] == "production"
+    assert suggestion["rationale"]
+
+
+def test_canvas_architecture_proposal_handles_empty_brief():
+    proposal = canvas.architecture_proposal({})
+    tree = proposal["preview_tree"]
+
+    assert tree["id"] == "app"
+    assert tree["description"] == "Build a small software system."
+    assert proposal["transaction"]["ops"][0]["op"] == "replace_tree"
+
+
+# ── build-loop: per-node test report + scoped rebuild ──────────────
+
+def test_save_test_report_persists_failure_detail(tmp_path, monkeypatch):
+    monkeypatch.setattr(node, "BUILD_ROOT", tmp_path)
+    n = node.Node(id="m", contract={"id": "m"}, is_leaf=True)
+
+    build._save_test_report(n, {"passed": False,
+                                "failures": ["FAILED test_x - assert 1 == 2"]}, 3)
+
+    report = json.loads((tmp_path / "m" / "test_report.json").read_text())
+    assert report["passed"] is False
+    assert report["attempts"] == 3
+    assert any("FAILED" in f for f in report["failures"])
+
+
+def test_invalidate_node_drops_memo_and_resets_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "BUILD_ROOT", tmp_path)
+    node_dir = tmp_path / "m"
+    node_dir.mkdir()
+    (node_dir / "memo.txt").write_text("deadbeef")
+    (node_dir / "status.json").write_text(json.dumps({"status": "verified",
+                                                       "reason": "stale"}))
+
+    build.invalidate_node("m")
+
+    assert not (node_dir / "memo.txt").exists()
+    status = json.loads((node_dir / "status.json").read_text())
+    assert status["status"] == "planned"
+    assert "reason" not in status
+
+
+def test_invalidate_then_rebuild_only_rebuilds_target(tmp_path, monkeypatch):
+    import cli
+
+    monkeypatch.setattr(build, "BUILD_ROOT", tmp_path)
+    monkeypatch.setattr(node, "BUILD_ROOT", tmp_path)
+
+    build.build(cli.FAN_IN_ROOT_CONTRACT, use_canned=True)        # full build
+    build.invalidate_node("format_checker")
+    (tmp_path / "manifest.jsonl").write_text("")                  # observe the rebuild only
+    build.build(cli.FAN_IN_ROOT_CONTRACT, use_canned=True)
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "manifest.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    memo_hits = {e["node"] for e in events if e["event"] == "memo-hit"}
+
+    assert "format_checker" not in memo_hits      # invalidated → rebuilt
+    assert "regex_engine" in memo_hits            # sibling leaf reused
+    assert "domain_checker" in memo_hits          # sibling leaf reused
+
+
+def test_read_node_artifacts_returns_src_tests_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(canvas, "BUILD_ROOT", tmp_path)
+    node_dir = tmp_path / "m"
+    (node_dir / "src").mkdir(parents=True)
+    (node_dir / "tests").mkdir()
+    (node_dir / "status.json").write_text(json.dumps({"status": "verified"}))
+    (node_dir / "test_report.json").write_text(
+        json.dumps({"passed": True, "failures": [], "attempts": 1}))
+    (node_dir / "src" / "m.py").write_text("def run():\n    return 1\n")
+    (node_dir / "tests" / "test_m.py").write_text("def test_run():\n    assert True\n")
+
+    art = canvas.read_node_artifacts("m")
+
+    assert art["status"] == "verified" and art["built"] is True
+    assert art["report"]["passed"] is True
+    assert "m.py" in art["src"]
+    assert "test_m.py" in art["tests"]
+
+
+def test_read_node_artifacts_missing_node_is_empty():
+    art = canvas.read_node_artifacts("nope_does_not_exist_zzz")
+
+    assert art["built"] is False
+    assert art["status"] == "unplanned"
+    assert art["report"] is None
+    assert art["src"] == {} and art["tests"] == {}
+
+
+# ── fail-closed semantic composition evidence ─────────────────────
+
+def _real_composition_fixture(tmp_path, monkeypatch, child_source):
+    monkeypatch.setattr(build, "BUILD_ROOT", tmp_path)
+    monkeypatch.setattr(node, "BUILD_ROOT", tmp_path)
+
+    child_contract = {
+        "id": "real_child",
+        "interface": {
+            "operations": [{
+                "name": "run",
+                "inputs": {"text": "string"},
+                "outputs": {"value": "string"},
+                "errors": [],
+            }]
+        },
+    }
+    root_contract = {
+        "id": "semantic_root",
+        "interface": {
+            "operations": [{
+                "name": "run",
+                "inputs": {"text": "string"},
+                "outputs": {"value": "string"},
+                "errors": [],
+            }]
+        },
+    }
+    child = node.Node(id="real_child", contract=child_contract, is_leaf=True)
+    root = node.Node(
+        id="semantic_root",
+        contract=root_contract,
+        is_leaf=False,
+        children=[child],
+    )
+
+    child.src_path().mkdir(parents=True)
+    child.src_path().joinpath("real_child.py").write_text(child_source)
+    root.src_path().mkdir(parents=True)
+    root.src_path().joinpath("semantic_root.py").write_text(
+        "class SemanticRoot:\n"
+        "    def __init__(self, real_child):\n"
+        "        self.real_child = real_child\n"
+        "    def run(self, text):\n"
+        "        return self.real_child.run(text=text)\n"
+    )
+    root.tests_path().mkdir()
+    root.tests_path().joinpath("test_semantic_root.py").write_text(
+        "from semantic_root import SemanticRoot\n"
+        "\n"
+        "class FakeChild:\n"
+        "    def run(self, text):\n"
+        "        return {'value': 'todo:' + text}\n"
+        "\n"
+        "def test_required_behavior():\n"
+        "    app = SemanticRoot(FakeChild())\n"
+        "    assert app.run(text='milk') == {'value': 'todo:milk'}\n"
+    )
+    return root
+
+
+def test_real_composition_rejects_fake_real_semantic_split(tmp_path, monkeypatch):
+    root = _real_composition_fixture(
+        tmp_path,
+        monkeypatch,
+        "def run(text):\n"
+        "    return {'value': text.upper()}\n",
+    )
+
+    # The old verifier stopped here: the parent passes against its semantically
+    # stronger fake even though the real child does something else.
+    assert build.run_tests(root.src_path(), root.tests_path())["passed"] is True
+
+    evidence = build.verify_real_composition(root)
+
+    assert evidence["passed"] is False
+    assert any("assert" in failure or "FAILED" in failure
+               for failure in evidence["failures"])
+
+
+def test_real_composition_accepts_matching_real_child(tmp_path, monkeypatch):
+    root = _real_composition_fixture(
+        tmp_path,
+        monkeypatch,
+        "def run(text):\n"
+        "    return {'value': 'todo:' + text}\n",
+    )
+
+    evidence = build.verify_real_composition(root)
+
+    assert evidence == {"passed": True, "failures": []}
+
+
+def test_run_tests_fails_when_verification_suite_is_empty(tmp_path):
+    src_dir = tmp_path / "src"
+    tests_dir = tmp_path / "tests"
+    src_dir.mkdir()
+    tests_dir.mkdir()
+
+    result = build.run_tests(src_dir, tests_dir)
+
+    assert result["passed"] is False
+    assert "No tests found" in result["failures"][0]
+
+
+def test_internal_memo_without_real_composition_evidence_is_not_reused(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "BUILD_ROOT", tmp_path)
+    monkeypatch.setattr(node, "BUILD_ROOT", tmp_path)
+
+    contract = {"id": "legacy_internal", "interface": {"operations": []}}
+    child = node.Node(
+        id="legacy_child",
+        contract={"id": "legacy_child", "interface": {"operations": []}},
+        is_leaf=True,
+    )
+    legacy = node.Node(
+        id="legacy_internal",
+        contract=contract,
+        is_leaf=False,
+        children=[child],
+    )
+    node.save_contract(legacy)
+    node.save_decision(legacy)
+    node.save_status(legacy, "verified")
+    build._save_memo(legacy, contract)
+    build._save_test_report(
+        legacy,
+        {"passed": True, "failures": []},
+        attempts=1,
+    )
+
+    assert build._load_verified_node(contract) is None
+
+
+def test_build_refuses_to_verify_internal_node_from_fake_only_tests(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "BUILD_ROOT", tmp_path)
+    monkeypatch.setattr(node, "BUILD_ROOT", tmp_path)
+    monkeypatch.setattr(build, "K_WIRE", 1)
+
+    child_contract = {
+        "id": "real_child",
+        "interface": {
+            "operations": [{
+                "name": "run",
+                "inputs": {"text": "string"},
+                "outputs": {"value": "string"},
+                "errors": [],
+            }]
+        },
+    }
+    root_contract = {
+        "id": "semantic_root",
+        "interface": {
+            "operations": [{
+                "name": "run",
+                "inputs": {"text": "string"},
+                "outputs": {"value": "string"},
+                "errors": [],
+            }]
+        },
+    }
+
+    def fake_plan(contract, allow_decompose=False):
+        if contract["id"] == "semantic_root":
+            return {"is_leaf": False, "children": [child_contract], "edges": []}
+        return {"is_leaf": True}
+
+    def fake_tests(contract, **kwargs):
+        if contract["id"] == "real_child":
+            return (
+                "from real_child import run\n"
+                "def test_child_generic_behavior():\n"
+                "    assert run(text='milk') == {'value': 'MILK'}\n"
+            )
+        return (
+            "from semantic_root import SemanticRoot\n"
+            "class FakeChild:\n"
+            "    def run(self, text):\n"
+            "        return {'value': 'todo:' + text}\n"
+            "def test_required_behavior():\n"
+            "    assert SemanticRoot(FakeChild()).run(text='milk') == "
+            "{'value': 'todo:milk'}\n"
+        )
+
+    def fake_implement(contract, **kwargs):
+        if contract["id"] == "real_child":
+            return "def run(text):\n    return {'value': text.upper()}\n"
+        return (
+            "class SemanticRoot:\n"
+            "    def __init__(self, real_child):\n"
+            "        self.real_child = real_child\n"
+            "    def run(self, text):\n"
+            "        return self.real_child.run(text=text)\n"
+        )
+
+    monkeypatch.setattr(build, "plan", fake_plan)
+    monkeypatch.setattr(build, "derive_tests", fake_tests)
+    monkeypatch.setattr(build, "implement", fake_implement)
+
+    with pytest.raises(build.BuildFailure, match="wiring failed"):
+        build.build(root_contract, allow_decompose=True)
+
+    status = json.loads(
+        (tmp_path / "semantic_root" / "status.json").read_text())
+    report = json.loads(
+        (tmp_path / "semantic_root" / "test_report.json").read_text())
+    assert status["status"] == "failed"
+    assert report["passed"] is False
+    assert report["evidence"]["unit"]["passed"] is True
+    assert report["evidence"]["real_composition"]["passed"] is False
+    assert not (tmp_path / "semantic_root" / "memo.txt").exists()
+
+
+def test_shared_state_integration_unavailable_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "BUILD_ROOT", tmp_path)
+    monkeypatch.setattr(node, "BUILD_ROOT", tmp_path)
+
+    store = {
+        "id": "store",
+        "stateful": True,
+        "interface": {"operations": []},
+    }
+    writer_a = {
+        "id": "writer_a",
+        "dependencies": [{"name": "store", "id": "store"}],
+        "interface": {"operations": []},
+    }
+    writer_b = {
+        "id": "writer_b",
+        "dependencies": [{"name": "store", "id": "store"}],
+        "interface": {"operations": []},
+    }
+    root_contract = {
+        "id": "shared_root",
+        "interface": {"operations": []},
+    }
+    root_decision = {
+        "is_leaf": False,
+        "children": [store, writer_a, writer_b],
+        "edges": [
+            {"from": "store", "to": "writer_a", "name": "store"},
+            {"from": "store", "to": "writer_b", "name": "store"},
+        ],
+    }
+
+    monkeypatch.setattr(
+        build,
+        "plan",
+        lambda contract, allow_decompose=False:
+            root_decision if contract["id"] == "shared_root" else {"is_leaf": True},
+    )
+    monkeypatch.setattr(
+        build,
+        "derive_tests",
+        lambda contract, **kwargs: "def test_placeholder():\n    assert True\n",
+    )
+    monkeypatch.setattr(
+        build,
+        "implement",
+        lambda contract, **kwargs: "def placeholder():\n    return None\n",
+    )
+    monkeypatch.setattr(
+        build,
+        "run_tests",
+        lambda src_dir, tests_dir: {"passed": True, "failures": []},
+    )
+    monkeypatch.setattr(
+        build,
+        "verify_real_composition",
+        lambda current: {"passed": True, "failures": []},
+    )
+
+    def unavailable(_contract):
+        raise build.LLMNotConfigured("integration model is offline")
+
+    monkeypatch.setattr(build, "derive_integration_test", unavailable)
+
+    with pytest.raises(build.BuildFailure, match="integration test FAILED"):
+        build.build(root_contract, allow_decompose=True)
+
+    report = json.loads(
+        (tmp_path / "shared_root" / "test_report.json").read_text())
+    assert report["passed"] is False
+    shared_evidence = report["evidence"]["shared_stateful_integration"]
+    assert shared_evidence["passed"] is False
+    assert "unavailable" in shared_evidence["failures"][0]

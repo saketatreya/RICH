@@ -6,18 +6,10 @@ checks the firewall, collects parse failures, and archives build artifacts.
 """
 
 import json
-import os
 import shutil
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-
-# ── Must be set before importing skills ────────────────────────────
-if not os.environ.get("OPENROUTER_API_KEY"):
-    print("STOP: OPENROUTER_API_KEY not set. Export it and re-run.", file=sys.stderr)
-    sys.exit(1)
-os.environ.setdefault("RICH_MODEL", "deepseek/deepseek-chat")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # tests/ -> repo root
 TESTLOG = REPO_ROOT / "testlog"
@@ -231,7 +223,8 @@ def install():
         return  # Already installed — don't re-wrap
     _installed = True
 
-    import skills, llm
+    import llm
+    import skills
 
     # Save original
     _orig_call_with_retry = llm.call_with_retry
@@ -262,7 +255,8 @@ def install():
 
 def uninstall():
     """Restore original functions."""
-    import llm, skills
+    import llm
+
     if _orig_call_with_retry:
         llm.call_with_retry = _orig_call_with_retry
 
@@ -284,8 +278,12 @@ def get_stats() -> dict:
     return {
         "phase": _current_phase,
         "total_calls": _call_count,
-        "parse_failures": sum(1 for l in _logs if not l.parsed_ok and l.parse_error),
-        "firewall_breaches": sum(1 for l in _logs if not l.firewall_ok),
+        "parse_failures": sum(
+            1 for log in _logs if not log.parsed_ok and log.parse_error
+        ),
+        "firewall_breaches": sum(
+            1 for log in _logs if not log.firewall_ok
+        ),
     }
 
 

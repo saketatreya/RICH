@@ -1,0 +1,861 @@
+import json
+import threading
+import time
+
+import pytest
+
+from rich_v2.compiler import CompiledArchitecture, CompiledTask
+from rich_v2.models import (
+    AcceptanceScenario,
+    ArchitectureEdge,
+    ArchitectureNode,
+    ArchitectureSpecV2,
+    ContractV2,
+    EdgeKind,
+    Evidence,
+    NodeKind,
+    OperationContract,
+    ProjectSpecV2,
+    Requirement,
+)
+from rich_v2.scheduler import (
+    CancellationToken,
+    DagScheduler,
+    ProducedArtifact,
+    SchedulerError,
+    TaskEvidence,
+    TaskPolicy,
+    TaskResult,
+)
+from rich_v2.store import RevisionConflict, RichStore
+
+
+def _task(
+    node_id: str,
+    order: int,
+    *,
+    dependencies: tuple[str, ...] = (),
+) -> CompiledTask:
+    return CompiledTask(
+        task_id=f"implement:{node_id}",
+        node_id=node_id,
+        order=order,
+        contract_id=f"contract:{node_id}",
+        dependency_ids=dependencies,
+        consumer_ids=(),
+        requirement_ids=(f"requirement:{node_id}",),
+        owned_paths=(f"packages/{node_id}",),
+    )
+
+
+def _prepared(
+    tmp_path,
+    tasks: tuple[CompiledTask, ...],
+    *,
+    run_status: str = "ready",
+    task_statuses: dict[str, str] | None = None,
+):
+    store = RichStore(tmp_path)
+    project = store.create_project("Scheduler", project_id="project.scheduler")
+    requirements = tuple(
+        Requirement(
+            id=task.requirement_ids[0],
+            title=f"Implement {task.node_id}",
+            statement=f"The {task.node_id} component behaves as specified.",
+        )
+        for task in tasks
+    )
+    project_spec = ProjectSpecV2(
+        id=project["id"],
+        name="Scheduler",
+        goal="Prove every scheduled component before release",
+        audiences=("engineer",),
+        requirements=requirements,
+        acceptance_scenarios=tuple(
+            AcceptanceScenario(
+                id=f"scenario:{task.node_id}",
+                title=f"{task.node_id} acceptance",
+                when=(f"{task.node_id} is exercised",),
+                then=(f"{task.node_id} satisfies its contract",),
+                requirement_ids=task.requirement_ids,
+                oracle=(
+                    {"action": "navigate", "value": "/"},
+                    {
+                        "action": "assert_visible",
+                        "locator": {"kind": "role", "value": "heading"},
+                    },
+                ),
+            )
+            for task in tasks
+        ),
+    )
+    spec_revision = store.save_revision(
+        project["id"],
+        kind="project_spec",
+        schema_version=project_spec.schema_version,
+        document=project_spec.to_dict(),
+        expected_revision=0,
+    )
+    root_node_id = tasks[-1].node_id
+    contracts = tuple(
+        ContractV2(
+            id=task.contract_id,
+            node_id=task.node_id,
+            operations=(
+                OperationContract(
+                    id=f"operation:{task.node_id}",
+                    name="execute",
+                    input_schema={"type": "object"},
+                    output_schema={"type": "object"},
+                    requirement_ids=task.requirement_ids,
+                ),
+            ),
+        )
+        for task in tasks
+    )
+    nodes = tuple(
+        ArchitectureNode(
+            id=task.node_id,
+            name=task.node_id,
+            kind=(
+                NodeKind.APPLICATION
+                if task.node_id == root_node_id
+                else NodeKind.MODULE
+            ),
+            contract_id=task.contract_id,
+            requirement_ids=task.requirement_ids,
+            owned_paths=task.owned_paths,
+        )
+        for task in tasks
+    )
+    architecture = ArchitectureSpecV2(
+        id="architecture.scheduler",
+        project_id=project["id"],
+        root_node_id=root_node_id,
+        target_pack="nextjs-monorepo",
+        nodes=nodes,
+        edges=tuple(
+            ArchitectureEdge(
+                id=f"contains:{task.node_id}",
+                kind=EdgeKind.CONTAINS,
+                source_node_id=root_node_id,
+                target_node_id=task.node_id,
+            )
+            for task in tasks
+            if task.node_id != root_node_id
+        ),
+        contracts=contracts,
+    )
+    architecture_revision = store.save_revision(
+        project["id"],
+        kind="architecture",
+        schema_version=architecture.schema_version,
+        document=architecture.to_dict(),
+        expected_revision=1,
+    )
+    run = store.create_run(
+        project["id"],
+        spec_revision_id=spec_revision.id,
+        architecture_revision_id=architecture_revision.id,
+        run_id="run.scheduler",
+        status=run_status,
+    )
+    statuses = task_statuses or {}
+    for task in tasks:
+        status = statuses.get(task.node_id, "ready")
+        durable_task_id = f"{run['id']}:{task.task_id}"
+        store.create_task(
+            run["id"],
+            node_id=task.node_id,
+            kind="implement",
+            task_id=durable_task_id,
+            status=status,
+        )
+        if status in {"succeeded", "cached"}:
+            source = store.put_artifact(
+                f"// previously verified {task.node_id}\n".encode(),
+                media_type="text/plain",
+            )
+            store.attach_artifact(
+                run["id"], source.digest, role="source", task_id=durable_task_id
+            )
+            result = store.put_artifact(
+                json.dumps(
+                    {
+                        "node_id": task.node_id,
+                        "status": "passed",
+                        "scenario_id": f"scenario:{task.node_id}",
+                    },
+                    sort_keys=True,
+                ).encode(),
+                media_type="application/vnd.rich.evidence-result+json",
+            )
+            store.attach_artifact(
+                run["id"],
+                result.digest,
+                role="evidence-result:acceptance",
+                task_id=durable_task_id,
+            )
+            evidence = Evidence(
+                id=f"evidence.{result.digest}",
+                run_id=run["id"],
+                task_id=durable_task_id,
+                node_id=task.node_id,
+                kind="acceptance",
+                status="passed",
+                requirement_ids=task.requirement_ids,
+                acceptance_scenario_ids=(f"scenario:{task.node_id}",),
+                artifact_ids=(result.digest,),
+                metadata={
+                    "attempt": 0,
+                    "summary": "previous acceptance checks passed",
+                },
+            )
+            record = store.put_artifact(
+                (json.dumps(evidence.to_dict(), sort_keys=True) + "\n").encode(),
+                media_type="application/vnd.rich.evidence+json",
+            )
+            store.attach_artifact(
+                run["id"],
+                record.digest,
+                role="evidence:acceptance",
+                task_id=durable_task_id,
+            )
+    plan = CompiledArchitecture(
+        architecture_id="architecture.scheduler",
+        architecture_revision=1,
+        project_id=project["id"],
+        project_revision=project_spec.revision,
+        root_node_id=root_node_id,
+        target_pack="nextjs-monorepo",
+        tasks=tasks,
+    )
+    return store, run, plan
+
+
+def _status_map(report):
+    return dict(report.task_statuses)
+
+
+def _verified_result(
+    context,
+    *,
+    summary: str | None = None,
+    evidence: tuple[TaskEvidence, ...] = (),
+) -> TaskResult:
+    return TaskResult(
+        summary=summary or f"{context.node_id} verified",
+        evidence=(
+            *evidence,
+            TaskEvidence(
+                kind="acceptance",
+                status="passed",
+                summary=f"{context.node_id} acceptance checks passed",
+                requirement_ids=context.compiled_task.requirement_ids,
+                acceptance_scenario_ids=(f"scenario:{context.node_id}",),
+            ),
+        ),
+        artifacts=(
+            ProducedArtifact(
+                (
+                    f"// {context.node_id} verified on attempt "
+                    f"{context.attempt}\n"
+                ).encode(),
+                role="source",
+                media_type="text/plain",
+            ),
+        ),
+    )
+
+
+def test_scheduler_selects_ready_tasks_deterministically_and_bounds_parallelism(
+    tmp_path,
+):
+    tasks = (
+        _task("a", 0),
+        _task("b", 1),
+        _task("c", 2, dependencies=("a",)),
+        _task("d", 3, dependencies=("b",)),
+    )
+    store, run, plan = _prepared(tmp_path, tasks)
+    lock = threading.Lock()
+    two_running = threading.Event()
+    active = 0
+    max_active = 0
+
+    def handler(context):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            if active == 2:
+                two_running.set()
+        if context.node_id in {"a", "b"}:
+            assert two_running.wait(1)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return _verified_result(
+            context,
+            summary=f"{context.node_id} implemented",
+            evidence=(
+                TaskEvidence(
+                    kind="unit",
+                    status="passed",
+                    summary=f"{context.node_id} unit checks passed",
+                ),
+            ),
+        )
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": handler},
+        max_workers=2,
+    ).run()
+
+    assert report.succeeded
+    assert set(_status_map(report).values()) == {"succeeded"}
+    assert max_active == 2
+    started = [
+        event["task_id"]
+        for event in store.list_events(run["id"])
+        if event["event_type"] == "task.started"
+    ]
+    assert started[:2] == [
+        "run.scheduler:implement:a",
+        "run.scheduler:implement:b",
+    ]
+
+
+def test_handler_outputs_and_evidence_are_durable_before_success(tmp_path):
+    tasks = (_task("domain", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={
+            "domain": lambda context: TaskResult(
+                summary="domain verified",
+                evidence=(
+                    TaskEvidence(
+                        kind="acceptance",
+                        status="passed",
+                        summary="behavior matches the approved scenario",
+                        requirement_ids=context.compiled_task.requirement_ids,
+                        acceptance_scenario_ids=("scenario:domain",),
+                    ),
+                ),
+                artifacts=(
+                    ProducedArtifact(
+                        b"export const value = 1;\n",
+                        role="source",
+                        media_type="text/typescript",
+                    ),
+                ),
+            )
+        },
+    ).run()
+
+    assert report.succeeded
+    events = store.list_events(run["id"])
+    evidence_events = [
+        item for item in events if item["event_type"] == "evidence.recorded"
+    ]
+    assert [item["payload"]["kind"] for item in evidence_events] == [
+        "acceptance",
+        "execution",
+    ]
+    for event in evidence_events:
+        artifact = store.get_artifact(event["payload"]["digest"])
+        assert artifact.media_type == "application/vnd.rich.evidence+json"
+        document = json.loads(artifact.path.read_text())
+        assert document["task_id"] == "run.scheduler:implement:domain"
+        assert document["metadata"]["attempt"] == 1
+        result = store.get_artifact(document["artifact_ids"][0])
+        assert (
+            result.media_type
+            == "application/vnd.rich.evidence-result+json"
+        )
+    event_types = [item["event_type"] for item in events]
+    assert event_types.index("evidence.recorded") < event_types.index(
+        "task.succeeded"
+    )
+
+
+def test_exhausted_failure_blocks_dependents_but_finishes_independent_work(
+    tmp_path,
+):
+    tasks = (
+        _task("failed_root", 0),
+        _task("independent", 1),
+        _task("dependent", 2, dependencies=("failed_root",)),
+    )
+    store, run, plan = _prepared(tmp_path, tasks)
+
+    def handler(context):
+        if context.node_id == "failed_root":
+            raise RuntimeError("provider unavailable")
+        return _verified_result(
+            context, summary="independent branch complete"
+        )
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": handler},
+        max_workers=2,
+    ).run()
+
+    assert report.status == "failed"
+    assert _status_map(report) == {
+        "failed_root": "failed",
+        "independent": "succeeded",
+        "dependent": "blocked",
+    }
+    blocked = next(
+        item
+        for item in store.list_events(run["id"])
+        if item["event_type"] == "task.blocked"
+    )
+    assert blocked["payload"]["failed_dependency_ids"] == ["failed_root"]
+
+
+def test_blocking_failed_evidence_prevents_false_success(tmp_path):
+    tasks = (_task("semantic_check", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={
+            "*": lambda _: TaskResult(
+                summary="process exited zero",
+                evidence=(
+                    TaskEvidence(
+                        kind="acceptance",
+                        status="failed",
+                        summary="the generated behavior is semantically wrong",
+                    ),
+                ),
+            )
+        },
+    ).run()
+
+    assert report.status == "failed"
+    assert _status_map(report) == {"semantic_check": "failed"}
+
+
+def test_noop_handler_cannot_false_green(tmp_path):
+    tasks = (_task("noop", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": lambda _: None},
+    ).run()
+
+    assert report.status == "failed"
+    assert _status_map(report) == {"noop": "failed"}
+    failure = next(
+        event
+        for event in store.list_events(run["id"])
+        if event["event_type"] == "task.failed"
+    )
+    assert "without explicit passed blocking evidence" in failure["payload"][
+        "summary"
+    ]
+
+
+def test_passed_evidence_without_source_artifact_cannot_succeed(tmp_path):
+    tasks = (_task("artifactless", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={
+            "*": lambda _: TaskResult(
+                evidence=(
+                    TaskEvidence(
+                        kind="unit",
+                        status="passed",
+                        summary="unit checks passed",
+                    ),
+                ),
+            )
+        },
+    ).run()
+
+    assert report.status == "failed"
+    assert _status_map(report) == {"artifactless": "failed"}
+    failure = next(
+        event
+        for event in store.list_events(run["id"])
+        if event["event_type"] == "task.failed"
+    )
+    assert "required durable artifacts are missing" in failure["payload"][
+        "summary"
+    ]
+
+
+def test_policy_requires_explicit_acceptance_scenario_coverage(tmp_path):
+    tasks = (_task("policy", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={
+            "*": lambda _: TaskResult(
+                evidence=(
+                    TaskEvidence(
+                        kind="unit",
+                        status="passed",
+                        summary="unit checks passed",
+                    ),
+                ),
+                artifacts=(ProducedArtifact(b"source\n", role="source"),),
+            )
+        },
+        default_policy=TaskPolicy(
+            required_acceptance_scenario_ids=("scenario:policy",)
+        ),
+    ).run()
+
+    assert report.status == "failed"
+    assert _status_map(report) == {"policy": "failed"}
+    failure = next(
+        event
+        for event in store.list_events(run["id"])
+        if event["event_type"] == "task.failed"
+    )
+    assert "scenario:policy" in failure["payload"]["summary"]
+
+
+def test_release_traceability_blocks_uncovered_project_scenario(tmp_path):
+    tasks = (_task("trace", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={
+            "*": lambda _: TaskResult(
+                evidence=(
+                    TaskEvidence(
+                        kind="unit",
+                        status="passed",
+                        summary="unit checks passed",
+                    ),
+                ),
+                artifacts=(ProducedArtifact(b"source\n", role="source"),),
+            )
+        },
+    ).run()
+
+    assert report.status == "failed"
+    assert _status_map(report) == {"trace": "succeeded"}
+    release_failure = next(
+        event
+        for event in store.list_events(run["id"])
+        if event["event_type"] == "run.release_validation_failed"
+    )
+    assert "acceptance evidence does not cover" in release_failure["payload"][
+        "message"
+    ]
+
+
+def test_failed_attempt_retries_and_restart_recovers_durable_running_task(
+    tmp_path,
+):
+    tasks = (
+        _task("done", 0),
+        _task("resumed", 1, dependencies=("done",)),
+        _task("after", 2, dependencies=("resumed",)),
+    )
+    store, run, plan = _prepared(
+        tmp_path,
+        tasks,
+        run_status="running",
+        task_statuses={"done": "succeeded", "resumed": "running"},
+    )
+    resumed_id = "run.scheduler:implement:resumed"
+    store.set_task_status(
+        resumed_id,
+        "running",
+        expected_status="running",
+        increment_attempt=True,
+    )
+    calls: list[tuple[str, int]] = []
+
+    def handler(context):
+        calls.append((context.node_id, context.attempt))
+        if context.node_id == "resumed" and context.attempt == 2:
+            return TaskResult(
+                succeeded=False, summary="transient model response"
+            )
+        return _verified_result(context, summary="recovered")
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": handler},
+        default_policy=TaskPolicy(max_attempts=3),
+    ).run()
+
+    assert report.succeeded
+    assert calls == [("resumed", 2), ("resumed", 3), ("after", 1)]
+    assert dict(report.task_attempts) == {"done": 0, "resumed": 3, "after": 1}
+    event_types = [
+        item["event_type"] for item in store.list_events(run["id"])
+    ]
+    assert "task.interrupted" in event_types
+    assert event_types.count("task.retry_scheduled") == 2
+
+
+def test_timeout_requests_cooperative_stop_and_blocks_dependent(tmp_path):
+    tasks = (
+        _task("slow", 0),
+        _task("after", 1, dependencies=("slow",)),
+    )
+    store, run, plan = _prepared(tmp_path, tasks)
+    observed_cancellation = threading.Event()
+
+    def slow(context):
+        assert context.deadline_monotonic is not None
+        assert context.deadline_monotonic > time.monotonic()
+        assert context.remaining_seconds is not None
+        assert 0 < context.remaining_seconds <= 0.03
+        assert context.wait_for_cancellation(1)
+        observed_cancellation.set()
+        return TaskResult(summary="late output")
+
+    started = time.monotonic()
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": slow},
+        default_policy=TaskPolicy(max_attempts=1, timeout_seconds=0.03),
+        cancellation_grace_seconds=0.2,
+    ).run()
+
+    assert time.monotonic() - started < 0.5
+    assert observed_cancellation.wait(0.2)
+    assert report.status == "failed"
+    assert _status_map(report) == {"slow": "failed", "after": "blocked"}
+    failure_evidence = next(
+        item
+        for item in store.list_events(run["id"])
+        if item["event_type"] == "evidence.recorded"
+        and item["payload"]["status"] == "error"
+    )
+    assert "deadline" in failure_evidence["payload"]["summary"]
+
+
+def test_uncooperative_timeout_fails_closed_without_exceeding_worker_bound(
+    tmp_path,
+):
+    tasks = (_task("stuck", 0), _task("other", 1))
+    store, run, plan = _prepared(tmp_path, tasks)
+    release = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def handler(_context):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        release.wait(0.5)
+        with lock:
+            active -= 1
+        return TaskResult()
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": handler},
+        max_workers=1,
+        default_policy=TaskPolicy(max_attempts=2, timeout_seconds=0.01),
+        cancellation_grace_seconds=0.02,
+    ).run()
+    release.set()
+
+    assert report.status == "failed"
+    assert max_active == 1
+    assert set(_status_map(report).values()) <= {
+        "failed",
+        "blocked",
+        "canceled",
+    }
+    assert any(
+        item["event_type"] == "scheduler.uncooperative_handlers"
+        for item in store.list_events(run["id"])
+    )
+
+
+def test_cancellation_marks_running_and_unstarted_tasks_durably(tmp_path):
+    tasks = (
+        _task("active", 0),
+        _task("after", 1, dependencies=("active",)),
+    )
+    store, run, plan = _prepared(tmp_path, tasks)
+    token = CancellationToken()
+    started = threading.Event()
+    report_box = []
+
+    def handler(context):
+        started.set()
+        context.wait_for_cancellation(1)
+        return TaskResult(summary="ignored after cancellation")
+
+    def execute():
+        report_box.append(
+            DagScheduler(
+                store,
+                run_id=run["id"],
+                plan=plan,
+                handlers={"*": handler},
+            ).run(token)
+        )
+
+    worker = threading.Thread(target=execute)
+    worker.start()
+    assert started.wait(1)
+    token.cancel("founder stopped the run")
+    worker.join(1)
+
+    assert not worker.is_alive()
+    report = report_box[0]
+    assert report.status == "canceled"
+    assert _status_map(report) == {"active": "canceled", "after": "canceled"}
+    canceled = [
+        item
+        for item in store.list_events(run["id"])
+        if item["event_type"] == "task.canceled"
+    ]
+    assert {item["payload"]["reason"] for item in canceled} == {
+        "founder stopped the run"
+    }
+
+
+def test_successor_owner_is_the_only_scheduler_that_can_complete(tmp_path):
+    tasks = (_task("owned", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    first_errors: list[BaseException] = []
+
+    def first_handler(context):
+        first_started.set()
+        release_first.wait(2)
+        return _verified_result(context, summary="stale owner output")
+
+    first_lease = store.claim_run_execution(
+        run["id"],
+        lease_seconds=0.03,
+    )
+    first_scheduler = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": first_handler},
+        default_policy=TaskPolicy(max_attempts=2),
+        owner_token=first_lease.owner_token,
+    )
+
+    def execute_first():
+        try:
+            first_scheduler.run()
+        except BaseException as exc:
+            first_errors.append(exc)
+
+    first_thread = threading.Thread(target=execute_first)
+    first_thread.start()
+    assert first_started.wait(1)
+    time.sleep(0.05)
+    successor = store.claim_run_execution(run["id"])
+
+    # Scheduler-level cancellation, evidence publication, and finalization all
+    # pass through the same fenced store boundary.
+    with pytest.raises(RevisionConflict, match="ownership was lost"):
+        first_scheduler._cancel_remaining("stale owner cancellation")
+    with pytest.raises(RevisionConflict, match="ownership was lost"):
+        first_scheduler._record_evidence(
+            tasks[0],
+            1,
+            TaskEvidence(
+                kind="unit",
+                status="passed",
+                summary="stale evidence",
+            ),
+        )
+    with pytest.raises(RevisionConflict, match="ownership was lost"):
+        first_scheduler._finish("failed")
+
+    successor_report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": _verified_result},
+        default_policy=TaskPolicy(max_attempts=2),
+        owner_token=successor.owner_token,
+    ).run()
+
+    assert successor_report.succeeded
+    assert dict(successor_report.task_attempts) == {"owned": 2}
+    release_first.set()
+    first_thread.join(1)
+    assert not first_thread.is_alive()
+    assert len(first_errors) == 1
+    assert isinstance(first_errors[0], RevisionConflict)
+
+    events = store.list_events(run["id"])
+    assert sum(
+        event["event_type"] == "scheduler.completed" for event in events
+    ) == 1
+    assert not any(event["event_type"] == "task.canceled" for event in events)
+    assert store.get_run(run["id"])["status"] == "succeeded"
+    assert store.get_task("run.scheduler:implement:owned")["status"] == "succeeded"
+
+
+def test_plan_mismatch_fails_before_mutating_run(tmp_path):
+    tasks = (_task("only", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+    bad_plan = CompiledArchitecture(
+        architecture_id=plan.architecture_id,
+        architecture_revision=1,
+        project_id="project.someone_else",
+        project_revision=1,
+        root_node_id="only",
+        target_pack=plan.target_pack,
+        tasks=tasks,
+    )
+
+    try:
+        DagScheduler(
+            store,
+            run_id=run["id"],
+            plan=bad_plan,
+            handlers={"*": lambda _: None},
+        )
+    except SchedulerError as exc:
+        assert "different project" in str(exc)
+    else:
+        raise AssertionError("project mismatch was accepted")
+    assert store.get_run(run["id"])["status"] == "ready"

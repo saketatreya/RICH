@@ -7,22 +7,12 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
-
-os.environ.setdefault("OPENROUTER_API_KEY", "sk-or-...12f7")
-os.environ.setdefault("RICH_MODEL", "deepseek/deepseek-chat")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # tests/ -> repo root
 sys.path.insert(0, str(REPO_ROOT))
 
-# Key comes from environment (set by caller before running)
-if not os.environ.get("OPENROUTER_API_KEY"):
-    print("STOP: OPENROUTER_API_KEY not set in environment")
-    sys.exit(1)
-
-import test_harness as H
-import yaml
+import test_harness as H  # noqa: E402
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
@@ -69,8 +59,7 @@ def check_deliverable_runs(expected_substring=None):
 
 def phase_t0():
     H.install()
-    import skills, llm
-    from llm import parse_json_response
+    import skills
 
     contract = {
         "id": "len_fn",
@@ -369,7 +358,6 @@ def phase_t6():
 
     try:
         root = B.build(STRESS_CONTRACT, allow_decompose=True, use_canned=False)
-        status = json.loads(root.status_path().read_text())
 
         # Was it forced to leaf or decomposed?
         is_leaf = root.is_leaf
@@ -419,11 +407,18 @@ ALL_PHASES = [
 
 
 def main():
-    # Verify key
+    # Live execution is explicit. Importing this module remains safe for offline
+    # tooling and test discovery; only the executable entry point requires a key.
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        print("STOP: OPENROUTER_API_KEY not set. Cannot run live tests.")
+        return 2
+
+    os.environ.setdefault("RICH_MODEL", "deepseek/deepseek-chat")
+
     from llm import is_available, RICH_MODEL
     if not is_available():
         print("STOP: OPENROUTER_API_KEY not set. Cannot run.")
-        sys.exit(1)
+        return 2
 
     print(f"Model: {RICH_MODEL}")
     print(f"Phases: {' → '.join(p[0] for p in ALL_PHASES)}")
@@ -443,7 +438,8 @@ def main():
     summary = {"model": RICH_MODEL, "results": results}
     (H.TESTLOG / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
     print(f"\nSummary written to {H.TESTLOG / 'summary.json'}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

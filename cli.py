@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 from build import build, assemble, BuildFailure, K_IMPL, K_WIRE
-from node import BUILD_ROOT, Node
+from node import BUILD_ROOT
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -96,7 +96,7 @@ def test_fan_in():
 
     try:
         root = build(FAN_IN_ROOT_CONTRACT, use_canned=True)
-        print(f"\n✓ Fan-in build succeeded!")
+        print("\n✓ Fan-in build succeeded!")
         print(f"  Root: {root.id}")
         print(f"  Children: {[c.id for c in root.children]}")
         print(f"  Edges: {root.edges}")
@@ -131,7 +131,7 @@ def test_fan_in():
             cwd=str(BUILD_ROOT),
         )
         if result.returncode == 0:
-            print(f"  ✓ Deliverable runs successfully")
+            print("  ✓ Deliverable runs successfully")
             for line in result.stdout.splitlines():
                 print(f"    {line}")
         else:
@@ -146,7 +146,9 @@ def test_fan_in():
 
 def test_single_leaf(module_id: str, description: str):
     """M-C: Test single-leaf generate+verify loop with real LLM."""
-    from llm import is_available as llm_available
+    import backend
+
+    backend_name = backend.install_from_env(default="claude")
 
     print("=" * 60)
     print(f"M-C: Single-leaf test — {module_id}")
@@ -172,15 +174,15 @@ def test_single_leaf(module_id: str, description: str):
         ],
     }
 
-    if not llm_available():
-        print("\n  ⚠ OPENROUTER_API_KEY not set — using canned fallback")
-        print("  Set the env var and re-run to test real LLM calls.\n")
+    if not backend.is_available(default=backend_name):
+        print(f"\n  Selected backend {backend_name!r} is unavailable — using canned fallback")
+        print("  Set RICH_BACKEND/credentials/CLI availability and re-run to test real LLM calls.\n")
         contract["id"] = "normalizer"
-        node = build(contract)
+        node = build(contract, use_canned=True)
         print(f"  ✓ Canned fallback: {node.id} verified")
         return
 
-    print(f"\n  Model: {__import__('llm').RICH_MODEL}")
+    print(f"\n  Backend: {backend_name}")
     print(f"  K_IMPL: {K_IMPL}")
 
     if BUILD_ROOT.exists():
@@ -206,16 +208,18 @@ def test_decompose(desc: str, goal: str):
     DERIVE_TESTS generates all tests.
     Assembly produces runnable deliverable.
     """
-    from llm import is_available as llm_available
+    import backend
+
+    backend_name = backend.install_from_env(default="claude")
 
     print("=" * 60)
-    print(f"M-E: Decomposition test")
+    print("M-E: Decomposition test")
     print(f"     Goal: {goal}")
     print("=" * 60)
 
-    if not llm_available():
-        print("\n  ⚠ OPENROUTER_API_KEY not set — cannot test decomposition")
-        print("  Set the env var and re-run.")
+    if not backend.is_available(default=backend_name):
+        print(f"\n  Selected backend {backend_name!r} is unavailable — cannot test decomposition")
+        print("  Set RICH_BACKEND/credentials/CLI availability and re-run.")
         sys.exit(1)
 
     # Build root contract from goal
@@ -239,10 +243,10 @@ def test_decompose(desc: str, goal: str):
         ],
     }
 
-    print(f"\n  Model: {__import__('llm').RICH_MODEL}")
+    print(f"\n  Backend: {backend_name}")
     print(f"  Root ID: {root_id}")
     print(f"  K_IMPL: {K_IMPL}, K_WIRE: {K_WIRE}")
-    print(f"  Allowing decomposition: YES")
+    print("  Allowing decomposition: YES")
     print()
 
     if BUILD_ROOT.exists():
@@ -253,7 +257,7 @@ def test_decompose(desc: str, goal: str):
         root = build(root_contract, allow_decompose=True)
 
         if root.is_leaf:
-            print(f"\n  ✓ Built as single leaf module")
+            print("\n  ✓ Built as single leaf module")
             print(f"  Source: {root.src_path()}/{root_id}.py")
             print(f"  Tests:  {root.tests_path()}/test_{root_id}.py")
         else:
@@ -277,7 +281,7 @@ def test_decompose(desc: str, goal: str):
             cwd=str(BUILD_ROOT),
         )
         if result.returncode == 0:
-            print(f"  ✓ Deliverable runs successfully")
+            print("  ✓ Deliverable runs successfully")
             for line in result.stdout.splitlines():
                 print(f"    {line}")
         else:
@@ -345,7 +349,7 @@ def test_deep():
 
     try:
         root = build(DEEP_ROOT_CONTRACT, use_canned=True)
-        print(f"\n✓ Depth-2 build succeeded!")
+        print("\n✓ Depth-2 build succeeded!")
         print(f"  Root: {root.id}")
         print(f"  Children: {[c.id for c in root.children]}")
 
@@ -356,12 +360,12 @@ def test_deep():
                 assert len(child.children) == 2, f"Expected 2 grandchildren, got {len(child.children)}"
                 assert {c.id for c in child.children} == {"length_check", "complexity_check"}
 
-        print(f"\n  ✓ Depth-2 tree verified — password_pipeline has 2 children")
-        print(f"\n  Full tree:")
+        print("\n  ✓ Depth-2 tree verified — password_pipeline has 2 children")
+        print("\n  Full tree:")
         _print_tree(root)
 
         # Assemble
-        main_py_path = assemble(root)
+        assemble(root)
         result = subprocess.run(
             [sys.executable, "main.py"],
             capture_output=True, text=True, timeout=10, cwd=str(BUILD_ROOT),
@@ -418,12 +422,11 @@ def test_memo():
     print(f"  Elapsed: {elapsed:.4f}s (should be near-zero)")
     assert root2.id == root1.id
     assert len(root2.children) == len(root1.children)
-    print(f"  ✓ Memoization works — second build instant from cache")
+    print("  ✓ Memoization works — second build instant from cache")
 
 
 def main():
     """M-A through M-G driver."""
-    import argparse
     parser = argparse.ArgumentParser(description="RICH Build System")
     parser.add_argument("--test-leaf", type=str, metavar="MODULE_ID",
                         help="M-C: test single-leaf IMPLEMENT+DERIVE_TESTS with real LLM")
@@ -470,11 +473,11 @@ def main():
 
     try:
         root = build(ROOT_CONTRACT, use_canned=True)
-        print(f"\n✓ Build succeeded!")
+        print("\n✓ Build succeeded!")
         print(f"  Root: {root.id} (is_leaf={root.is_leaf})")
         print(f"  Children: {[c.id for c in root.children]}")
-        print(f"  Status: verified")
-        print(f"\n  Tree on disk:")
+        print("  Status: verified")
+        print("\n  Tree on disk:")
         for p in sorted(BUILD_ROOT.rglob("*")):
             if p.is_file():
                 print(f"    {p}")

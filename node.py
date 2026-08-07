@@ -10,13 +10,25 @@
 """
 
 import json
-import os
 from pathlib import Path
 from dataclasses import dataclass, field
+import re
 from typing import Optional
 
 
 BUILD_ROOT = Path("build")
+_MODULE_ID = re.compile(r"[a-z][a-z0-9_]{0,127}")
+
+
+def validate_module_id(value: object) -> str:
+    """Return one filesystem-safe module identifier or fail closed."""
+
+    if not isinstance(value, str) or _MODULE_ID.fullmatch(value) is None:
+        raise ValueError(
+            "module id must be 1-128 lowercase snake_case characters "
+            "and start with a letter"
+        )
+    return value
 
 
 @dataclass
@@ -29,8 +41,11 @@ class Node:
     edges: list[dict] = field(default_factory=list)
     dependencies: list[dict] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        validate_module_id(self.id)
+
     def path(self) -> Path:
-        return BUILD_ROOT / self.id
+        return BUILD_ROOT / validate_module_id(self.id)
 
     def contract_path(self) -> Path:
         return self.path() / "contract.yaml"

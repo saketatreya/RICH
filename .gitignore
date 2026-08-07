@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 richv1.md
+rich.canvas.json
 
 # Generated build artifacts (the recursive engine's output tree + audit logs)
 build/
@@ -10,6 +11,16 @@ build_archive/
 
 # Editor / scratch
 *.swp
+
+# Python packaging output
+*.egg-info/
+.eggs/
+dist/
+.rich/
+
+# Web frontend (React/Vite): deps + build output
+web/node_modules/
+web/dist/
 
 # Scratch gate / probe harnesses (one-off per-phase test drivers)
 gate_*.py

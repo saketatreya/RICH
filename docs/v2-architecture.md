@@ -1,0 +1,407 @@
+# RICH v2 architecture and operating contract
+
+## Mission
+
+RICH v2 is a kernel for generalizing software development as a controlled
+transformation:
+
+> approved intent → owned implementation work → independently verified release
+
+The central design choice is that code generation is neither the source of truth nor
+the judge of success. Product intent, architecture, authority, budgets, source
+ownership, execution, evidence, and release identity are separate typed objects with
+durable links between them.
+
+This creates a reusable compiler boundary:
+
+- a front end turns domain intent into requirements and acceptance scenarios;
+- an architecture planner turns those requirements into contracts, ownership, and a
+  dependency graph;
+- a target pack defines one language/toolchain/release environment;
+- bounded agents fill approved source-owned regions;
+- a trusted verifier produces evidence;
+- a release adapter freezes and deploys the exact verified source.
+
+The implemented target pack is currently a Next.js 16 monorepo. Generalization comes
+from adding target and resource packs without weakening the invariants below.
+
+## End-to-end state machine
+
+```text
+draft project
+  │ structured interview
+  ▼
+product-spec revision ── product_spec approval ──┐
+                                                │
+                                                ▼
+                                      architecture revision
+                                                │
+                                  architecture approval
+                                                │
+                                                ▼
+                                    compiled durable run
+                                  + complete run budget
+                                                │
+                                      target-pack scaffold
+                                                │
+                                   fenced execution lease
+                                                │
+                      ┌─────────────────────────┴─────────────────────────┐
+                      │ dependency-ordered bounded coding tasks          │
+                      │ source-only model output + durable reservations  │
+                      └─────────────────────────┬─────────────────────────┘
+                                                │
+                           lint → types → unit → production build → browser
+                                                │
+                                  content-addressed evidence
+                                                │
+                                  immutable release-source ZIP
+                                                │
+                                      preview approval
+                                                │
+                               Neon branch + Vercel deployment
+                                                │
+                                      expiry / teardown
+```
+
+A transition fails closed when any identity, approval, ownership, budget, lease,
+sandbox, evidence, or digest check is missing or inconsistent.
+
+## Core invariants
+
+### 1. Intent is immutable and approved
+
+A submitted interview compiles to a `ProjectSpecV2` revision. Requirements have stable
+IDs, priorities, and statements. Each acceptance scenario combines human-readable
+Given/When/Then intent with a mandatory, data-only browser oracle. The oracle supports
+bounded navigation, locator-based interaction, keyboard actions, reloads, and observable
+URL/visibility/focus/text/value assertions. It cannot embed JavaScript or access an
+external URL. Architecture cannot be proposed until the exact spec revision is approved.
+
+Revisions are append-only. Approval records identify the gate, project, exact revision
+claims, actor, decision, reason, and time. Approving one revision never authorizes a
+later revision.
+
+### 2. Architecture owns behavior and files
+
+Every non-resource architecture node has a typed contract, requirement ownership, and
+source ownership. Edges express call, data, event, or resource dependencies. The
+compiler validates the entire graph before emitting tasks and orders providers before
+consumers.
+
+Resource nodes describe externally provisioned capabilities; they do not become coding
+tasks and their paths cannot authorize generated source. The Next.js target pack rejects
+missing ownership, traversal, globs, ambiguous coverage, and source outside an approved
+non-resource owner.
+
+### 3. The scaffold freezes the verifier
+
+The target pack emits:
+
+- exact package manifests and a lockfile snapshot;
+- TypeScript, ESLint, Vitest, Playwright, Next.js, and workspace configuration;
+- requirement-derived unit tests and browser tests compiled from approved oracle steps;
+- a protected reporter that emits only actually passed scenario IDs, bound to the exact
+  run, task, attempt, and nonce;
+- source ownership metadata;
+- an exact file manifest with SHA-256 identities.
+
+The manifest itself is stored in the content-addressed artifact store. Before execution,
+the run engine reconstructs the expected workspace identity and rejects missing,
+unrecorded, altered, oversized, or symbolic-link files.
+
+Model output is restricted to approved owned source paths. Package manifests, lockfiles,
+tests, type declarations, compiler configuration, framework configuration, CI, and RICH
+metadata are protected generation inputs.
+
+### 4. Authority and budget are explicit
+
+Preparing a run binds:
+
+- project/spec/architecture revision IDs;
+- the architecture approval;
+- target-pack identity;
+- the exact compiled node/task set; and
+- a complete budget.
+
+The budget must contain exactly:
+
+```json
+{
+  "max_model_attempts": 12,
+  "max_input_tokens": 384000,
+  "max_output_tokens": 96000,
+  "max_cost_usd": "10.00",
+  "max_execution_seconds": 1800
+}
+```
+
+Money is a decimal string, never a binary float. The default coding attempt reserves
+32,000 input tokens, 8,000 output tokens, $0.22, and 120 seconds. Prompt content is
+limited to 24,000 bytes; the OpenAI adapter then counts the complete canonical request
+envelope, response schema, and framing allowance before any HTTP request. Before a
+provider call, the gateway durably records and reserves the maximum attempt usage. It
+then settles actual usage. A provider-reported overage is recorded exactly and blocks
+further work rather than being clipped to the reservation. On restart, a started attempt
+without a settlement is conservatively charged at its reservation, so a crash cannot
+create free retries.
+
+The trusted default accepts only `openai/gpt-5.6-terra`. Pricing is explicit in code,
+inputs above the priced base tier are refused, credentials are resolved only at the
+network boundary, and there is no provider/model fallback. The model choice follows the
+current official [OpenAI model contract](https://developers.openai.com/api/docs/models/gpt-5.6-terra).
+
+### 5. One fenced owner mutates a run
+
+Execution claims an expiring SQLite lease containing an opaque fencing token. The owner
+heartbeats during work. A stale owner cannot renew or release a successor's lease, and
+coding checks the token before the provider call, after the call, and before/after a
+filesystem mutation.
+
+The same token fences every authoritative scheduler transition, event, evidence link,
+and run-artifact attachment in the exact SQLite transaction that performs the write.
+There is no check-then-write authority window. Losing the lease cancels active work and
+terminates the complete Bubblewrap process group with bounded `TERM`/`KILL` escalation;
+the executor reaps it before returning. Bootstrap and every verification command receive
+the cooperative cancellation source and the scheduler's monotonic attempt deadline, so a
+timed-out or stale owner cannot leave a package manager, build worker, web server, browser,
+or grandchild writing into a successor's workspace.
+
+Source writes use a CAS-backed write-ahead transaction. Original bytes and the proposed
+generated-source artifact are durably prepared under the active fence before mutation;
+commit attaches the exact generated artifact atomically under that fence. A successor
+rolls back any still-prepared transaction before validating the protected tree, and only
+when every path still matches either the original or intended digest. Cancellation or
+lease loss therefore cannot strand an unrecorded workspace or let a delayed provider
+write after another executor takes ownership.
+
+The current live-workspace engine uses one coding worker at a time. Parallel coding will
+require task-isolated worktrees plus a trusted merge/reverification phase; it is not
+implemented by racing agents against one directory.
+
+### 6. Sandboxing has no permissive fallback
+
+Linux Bubblewrap is mandatory for the production runtime. Generated commands see:
+
+- a read-only workspace;
+- read-only, identity-checked Node 22.22.3 and pnpm 10.34.5 bundles;
+- namespace-only aliases for the exact pnpm executable;
+- explicit writable runtime/build/report paths;
+- no network during lint, typecheck, unit, build, or browser verification;
+- bounded wall/CPU time, processes, file size, logs, V8 heaps, and virtual address
+  space.
+
+Dependency and Chromium installation is a distinct network-enabled bootstrap. It uses
+the frozen lockfile, strict peers, store-integrity verification, ignored lifecycle
+scripts, bounded fetch concurrency/retries, and one pnpm import worker.
+
+All sandbox processes run in dedicated process groups. Caller cancellation, lease loss,
+and timeout share the same bounded termination-and-reaping path.
+
+`RLIMIT_AS` measures reserved virtual address space, not resident memory. ARM64 Node
+workers reserve 8 GiB pointer-compression cages before shared libraries and build
+tracing, while Chromium reserves a much larger PartitionAlloc cage. RICH therefore
+combines:
+
+- 1.5 GiB Node V8 heap limits;
+- a finite 16 GiB Node address-space ceiling with cage/runtime headroom;
+- one Next.js build CPU and no webpack build worker;
+- output-file tracing rooted at the web application, excluding the mutable
+  workspace package cache while approved workspace packages are transpiled;
+- one sequential browser worker with a 512 MiB browser JS heap;
+- bounded process counts; and
+- separate finite virtual-address ceilings for Node gates and Chromium acceptance.
+
+The production build uses supported `next build --webpack`, and browser acceptance starts
+the resulting production server. This tests the same artifact produced by the build gate.
+
+### 7. Model output is not evidence
+
+Each task is checked by the trusted command runner. Non-root tasks require static and unit
+evidence. The root release task requires all of:
+
+1. ESLint with zero warnings;
+2. TypeScript with no emit and no incremental cache write;
+3. Vitest requirement tests;
+4. a production Next.js build; and
+5. Playwright scenarios executing every approved data-only browser oracle.
+
+Command, exit status, timeout, bounded stdout/stderr, duration, task attempt, and
+requirement/scenario coverage become content-addressed evidence artifacts. An exit code
+of zero is insufficient: the protected reporter must emit exactly one sorted, duplicate-
+free set of actually passed scenario IDs, with the expected run/task/attempt nonce.
+Missing, stale, forged, skipped, duplicated, unknown, or partial coverage fails closed.
+
+The run cannot publish success merely because a handler returns success. The scheduler
+checks required evidence kinds, blocking status, artifact roles, and exact acceptance
+coverage before committing task and run status.
+
+### 8. What was verified is what can deploy
+
+Before root verification, RICH records the deployment-source digest set. Verification
+may write only declared outputs. After all gates, any source change fails the run except
+Next's narrowly validated generated `next-env.d.ts` grammar.
+
+RICH then creates a deterministic ZIP from exactly the deployable source set and stores
+it as `source:release-snapshot`. The acceptance evidence includes that snapshot's SHA-256.
+
+A preview request is allowed only for a completed run whose live source still exactly
+matches that verified snapshot. Preview approval binds the source digest and deployment
+parameters. Deployment extracts the immutable artifact into a new directory and uploads
+that snapshot—not the mutable working tree.
+
+Neon database branches and Vercel deployments are separate external side effects, use
+lazy secret handles, have durable state, and support expiry/teardown. Approved upload
+bytes are frozen before migration preparation. Migrations run from a disposable
+extraction, but no generated Node process receives the database credential: trusted
+Python code reads only bounded, convention-named UTF-8 SQL files and applies them through
+`psycopg` with lock/statement timeouts and a digest journal. See the official
+[Neon branch workflow](https://neon.com/docs/get-started-with-neon/workflow-primer) and
+[Vercel API integration guidance](https://vercel.com/docs/integrations/create-integration/vercel-api-integrations).
+
+## Trust boundaries
+
+| Component | Trusted for | Not trusted for |
+|---|---|---|
+| Interview/compiler/planner | schema and graph construction | proving generated behavior |
+| Approval/store | authority, revision identity, durable ordering | code correctness |
+| Target pack | toolchain, tests, ownership, release shape | arbitrary domains not modeled by the pack |
+| Model provider | proposing source within owned paths | approvals, budgets, evidence, release status |
+| Coding worker | parsing and bounded file mutation | verification |
+| Bubblewrap runner | observed isolated process results | completeness beyond the approved executable oracle |
+| Scheduler | evidence-policy enforcement and status commit | inventing missing evidence |
+| Preview orchestrator | exact approved snapshot deployment | authorizing a new source digest |
+
+The operator and the installed RICH code/tool bundles are part of the trusted computing
+base. Bubblewrap isolates generated code from the host; it does not defend against an
+operator who modifies RICH itself or replaces the validated tool installation.
+
+## Durable data model
+
+`RichStore` uses SQLite for metadata and a SHA-256 content-addressed artifact directory.
+It stores:
+
+- projects and optimistic revisions;
+- approvals and claims;
+- runs and compiled tasks;
+- append-only run/task events;
+- task attempts and evidence/artifact links;
+- prepared/committed/recovered source transactions and their CAS journals;
+- provider reservations and settlements;
+- execution leases and fencing tokens;
+- idempotency claims/responses;
+- preview requests, resources, expiry, and teardown state.
+
+Filesystem source is not the authority for completion. Durable state plus content-addressed
+artifacts is. A workspace can be reconstructed from the scaffold/release manifests and
+artifact bytes.
+
+## Operating the current vertical
+
+### Prerequisites
+
+- Linux with unprivileged user namespaces and Bubblewrap;
+- Python 3.10+;
+- exact Node 22.22.3;
+- exact pnpm 10.34.5 present in the local Corepack cache;
+- an `OPENAI_API_KEY` for model-backed execution.
+
+`rich-v2 doctor` checks coarse host availability. Runtime construction performs the exact
+Node/pnpm identity checks and fails closed on drift.
+
+### Local Canvas
+
+```bash
+python -m pip install -e '.[test]'
+npm --prefix web ci
+npm --prefix web run build
+python canvas.py
+```
+
+The Canvas runs on `http://127.0.0.1:8765` by default and mounts the v2 API under `/v2`.
+State defaults to `.rich/state`; generated API workspaces default to
+`.rich/workspaces`.
+
+### CLI lifecycle
+
+The CLI mirrors the state machine:
+
+```text
+project-create
+interview-submit
+approve
+architecture-propose
+approve
+run-prepare
+scaffold
+run-execute
+preview-request
+approve
+preview-deploy
+preview-destroy
+```
+
+Commands return JSON so IDs can be captured by an operator or a higher-level workflow.
+Use `rich-v2 events RUN_ID` to inspect the durable proof/recovery trail.
+
+### API rules
+
+- API version: `/v2`.
+- Bind default: loopback only.
+- Mutations require `Idempotency-Key`.
+- Reusing a key with different request content is rejected.
+- Request bodies are bounded.
+- Host/origin checks reject cross-site and non-local control requests.
+- Run execution is backgrounded in the Canvas; status comes from durable run state.
+
+## Validation
+
+The offline suite never calls a model or deployment provider:
+
+```bash
+ruff check .
+python -m pytest
+```
+
+Live host/toolchain tests are opt-in:
+
+```bash
+python -m pytest --run-live tests/test_v2_executor.py
+python -m pytest --run-live \
+  --basetemp=.rich/live-tests \
+  tests/test_v2_public_runtime_live.py
+```
+
+The public-runtime live test creates a fresh approved spec/architecture/scaffold, installs
+the frozen dependency graph and Chromium inside Bubblewrap, and runs the five independent
+gates. It does not use a model credential.
+
+The Canvas frontend is checked independently:
+
+```bash
+npm --prefix web run build
+npm --prefix web run typecheck
+```
+
+## Generalization roadmap
+
+The next work is not “make the prompt bigger.” It is to grow the compiler while preserving
+the proof chain:
+
+1. **Task-isolated parallelism:** per-task worktrees, deterministic merge plans, conflict
+   ownership, and full post-merge reverification.
+2. **Additional target packs:** Python services, mobile, systems code, data/ML pipelines,
+   libraries, and infrastructure, each with pinned tools and native acceptance gates.
+3. **Resource packs:** databases, queues, object stores, identity, secrets, migrations,
+   rollback, observability, and failure injection.
+4. **Richer architecture semantics:** state machines, transactions, concurrency,
+   compatibility/versioning, latency/SLO and data-governance constraints.
+5. **Change compilation:** derive the minimal affected cone from a new approved revision,
+   preserve valid evidence, and prove compatibility across releases.
+6. **Production promotion:** a new approval/evidence layer beyond ephemeral previews,
+   including policy, rollout, health, and automatic rollback.
+7. **Stronger assurance:** property, fuzz, security, performance, accessibility, and formal
+   evidence packs selected from requirement kinds and risk.
+
+The invariant through all of these is unchanged: authority is explicit, generation is
+bounded, verification is independent, and only the exact verified artifact may advance.

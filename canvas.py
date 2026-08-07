@@ -1,18 +1,24 @@
-"""canvas.py — interactive web canvas for planning + building RICH trees.
+"""canvas.py — HTTP backend for the RICH canvas (engine as a JSON API + static app).
 
-A zero-dependency stdlib HTTP server that drives the REAL engine:
+A stdlib HTTP server that drives the REAL engine and serves the built React app
+(`web/dist`). The frontend lives in `web/` (React + Vite + React Flow).
 
   • Plan layer  → skills.plan(contract, allow_decompose=True) on ONE node (1 LLM call).
   • Vibe ✨     → recursively PLAN a subtree down to MAX_DEPTH (the "auto-plan" button).
+  • Vibe-edit   → an architecture transaction (previewable) on the canvas tree.
   • Build ▶     → persist the planned tree's decisions so build() reuses them
                   (the resumption / decision-reuse seam), then assemble() + run main.py.
+                  Optional `node_id` = scoped single-module rebuild (invalidate_node).
+  • /api/node   → a built module's generated src + tests + test report (the build loop).
 
 The backend is selected by RICH_BACKEND (`claude` by default, `codex` supported).
 Long operations run in a single background job (one at a time — the engine writes to
 build/ and is not reentrant, and this caps quota burn). The frontend polls /api/job
-for streamed stdout + the result.
+for streamed stdout + the result, and /api/statuses for live per-module status.
 
-Run:   python canvas.py        # then open http://localhost:8765
+Run:   npm --prefix web run build   (once / after frontend changes)
+       python canvas.py             # serve at http://localhost:8765
+Dev:   npm --prefix web run dev     # Vite hot reload, proxies /api → :8765
 Env:   RICH_CANVAS_PORT (default 8765)
 """
 
@@ -33,16 +39,52 @@ from urllib.parse import urlparse, parse_qs
 import backend
 BACKEND_NAME = backend.install_from_env()
 
-import skills
-import build as buildmod
-from build import build, assemble, BuildFailure, MAX_DEPTH, _contract_hash
-from node import BUILD_ROOT, Node, save_contract, save_decision, save_status
+import skills  # noqa: E402
+import build as buildmod  # noqa: E402
+from build import (  # noqa: E402
+    build,
+    assemble,
+    BuildFailure,
+    MAX_DEPTH,
+    _contract_hash,
+)
+from node import (  # noqa: E402
+    BUILD_ROOT,
+    Node,
+    save_contract,
+    save_decision,
+    save_status,
+)
 
 HERE = Path(__file__).resolve().parent
+WEB_DIST = HERE / "web" / "dist"
 PORT = int(os.environ.get("RICH_CANVAS_PORT", "8765"))
 PROJECT_PATH = Path(os.environ.get("RICH_CANVAS_PROJECT", HERE / "rich.canvas.json"))
+V2_STATE_DIR = Path(
+    os.environ.get("RICH_V2_STATE_DIR", HERE / ".rich" / "state")
+)
 PROJECT_VERSION = 1
 MODULE_KINDS = {"pure", "stateful", "adapter", "ui"}
+
+# Keep the repository runnable without an editable install while v2 lives in src/.
+_SRC_ROOT = HERE / "src"
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
+from rich_v2.api import MAX_BODY_BYTES, V2Application  # noqa: E402
+from rich_v2.store import RichStore  # noqa: E402
+
+_v2_application: V2Application | None = None
+_v2_application_lock = threading.Lock()
+
+
+def _get_v2_application() -> V2Application:
+    global _v2_application
+    if _v2_application is None:
+        with _v2_application_lock:
+            if _v2_application is None:
+                _v2_application = V2Application(RichStore(V2_STATE_DIR))
+    return _v2_application
 
 
 # ── Contract <-> canvas-node conversion ────────────────────────────
@@ -75,6 +117,9 @@ def normalize_canvas_node(cnode: dict) -> dict:
     cnode.setdefault("status", "unplanned")
     cnode.setdefault("lane", "")
     cnode["kind"] = module_kind(cnode)
+    if cnode["kind"] == "adapter" and cnode.get("children"):
+        cnode["kind"] = "pure"
+        cnode["external"] = {}
     cnode["stateful"] = bool(cnode.get("stateful") or cnode["kind"] == "stateful")
     if cnode["kind"] == "adapter":
         ext = cnode.get("external") if isinstance(cnode.get("external"), dict) else {}
@@ -239,11 +284,11 @@ def detach_node(tree: dict, node_id: str) -> dict | None:
 
 
 _EXTERNAL_STRONG_RE = re.compile(
-    r"\b(http|https|api|external|provider|network|request|database|filesystem|file|shell|open-meteo|url)\b",
+    r"\b(http|https|api|external|network|request|database|filesystem|file|shell|open-meteo|url)\b",
     re.I,
 )
 _EXTERNAL_ROLE_RE = re.compile(
-    r"\b(fetcher|client|gateway|adapter|provider|repository|dao)\b",
+    r"\b(client|gateway|adapter|repository|dao)\b",
     re.I,
 )
 
@@ -333,7 +378,8 @@ def validation_cards(tree: dict | None) -> list[dict]:
         if not n.get("operations"):
             card("error", n, "Missing operation",
                  "Every module needs at least one operation in its interface.")
-        if looks_external(n) and module_kind(n) != "adapter":
+        can_be_adapter = n.get("is_leaf") is not False and not n.get("children")
+        if looks_external(n) and module_kind(n) != "adapter" and can_be_adapter:
             card("warning", n, "Likely external adapter",
                  "This module sounds like it talks to an external service. Mark it as an adapter so unit tests use fakes instead of live I/O.",
                  "mark_adapter")
@@ -588,13 +634,14 @@ def vibe_transaction(tree: dict, prompt: str, node_id: str | None = None) -> dic
     ))
     if wants_external:
         for n in flatten_tree(tree):
-            if looks_external(n) and module_kind(n) != "adapter":
+            can_be_adapter = n.get("is_leaf") is not False and not n.get("children")
+            if can_be_adapter and looks_external(n) and module_kind(n) != "adapter":
                 provider = infer_provider(n)
                 ops.append({"op": "mark_adapter", "node_id": n["id"],
                             "external": default_external(provider)})
                 summaries.append(f"marked {n['id']} as {provider} adapter")
     if not ops:
-        if target:
+        if target and target.get("is_leaf") is not False and not target.get("children"):
             provider = infer_provider(target)
             ops.append({"op": "mark_adapter", "node_id": target["id"],
                         "external": default_external(provider)})
@@ -665,6 +712,202 @@ def transaction_for_prompt(tree: dict, prompt: str, node_id: str | None = None) 
     return llm_vibe_transaction(tree, prompt, node_id) or vibe_transaction(tree, prompt, node_id)
 
 
+def _brief_text_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(_brief_text_value(v) for v in value if _brief_text_value(v))
+    if isinstance(value, dict):
+        return ", ".join(f"{k}: {_brief_text_value(v)}" for k, v in value.items()
+                         if _brief_text_value(v))
+    return str(value).strip()
+
+
+def _brief_enum(value: str, allowed: set[str], default: str) -> str:
+    value = _brief_text_value(value).lower()
+    return value if value in allowed else default
+
+
+def _brief_seed(brief: dict, current_tree: dict | None = None) -> dict:
+    goal = _brief_text_value(brief.get("goal"))
+    current_goal = _brief_text_value((current_tree or {}).get("description"))
+    text = " ".join(filter(None, [goal, _brief_text_value(brief.get("root_id")),
+                                  _brief_text_value(brief.get("external_services")),
+                                  _brief_text_value(brief.get("inputs")),
+                                  _brief_text_value(brief.get("outputs")),
+                                  _brief_text_value(brief.get("state")),
+                                  _brief_text_value(brief.get("shape")),
+                                  current_goal])).lower()
+
+    root_id = _brief_text_value(brief.get("root_id")) or _brief_text_value((current_tree or {}).get("id"))
+    if not root_id:
+        if "weather" in text:
+            root_id = "weather_reporter"
+        elif "report" in text:
+            root_id = "reporter"
+        else:
+            root_id = "app"
+    root_id = sanitize_module_id(root_id, "app")
+
+    description = goal or current_goal or "Build a small software system."
+
+    external = _brief_text_value(brief.get("external_services"))
+    if not external:
+        if "weather" in text:
+            external = "Open-Meteo"
+        elif "stripe" in text or "payment" in text:
+            external = "Stripe"
+        elif "database" in text:
+            external = "database"
+        elif "file" in text or "filesystem" in text:
+            external = "filesystem"
+
+    inputs = _brief_text_value(brief.get("inputs"))
+    if not inputs:
+        if "weather" in text:
+            inputs = "city: London"
+        elif "search" in text or "query" in text:
+            inputs = "query: string"
+        else:
+            inputs = "input: string"
+
+    outputs = _brief_text_value(brief.get("outputs"))
+    if not outputs:
+        if "weather" in text:
+            outputs = "report: concise weather summary"
+        elif "report" in text:
+            outputs = "report: string"
+        else:
+            outputs = "result: string"
+
+    state = _brief_enum(brief.get("state"), {"stateless", "cached", "persistent"}, "")
+    if not state:
+        state = "cached" if external or "cache" in text or "production" in text else "stateless"
+
+    shape = _brief_enum(brief.get("shape"), {"simple", "modular", "production"}, "")
+    if not shape:
+        shape = "production" if external or state != "stateless" else "modular"
+
+    rigor = _brief_text_value(brief.get("rigor"))
+    if not rigor:
+        rigor = "strict fakeable unit tests" if external else "strict unit tests"
+
+    return {
+        "goal": description,
+        "root_id": root_id,
+        "external_services": external,
+        "inputs": inputs,
+        "outputs": outputs,
+        "state": state,
+        "shape": shape,
+        "rigor": rigor,
+    }
+
+
+BRIEF_SUGGEST_SYSTEM = """You are an architecture assistant that fills in a root-node brief.
+Return ONLY a JSON object with these keys:
+  root_id, goal, external_services, inputs, outputs, state, shape, rigor, rationale
+
+Rules:
+- Use the user's goal as the anchor, but fill in practical defaults where details are missing.
+- root_id must be lowercase snake_case.
+- goal should be a concise one-sentence root-node description.
+- external_services should be a comma-separated string or empty string if none.
+- inputs and outputs should be short example strings.
+- state must be one of stateless, cached, persistent.
+- shape must be one of simple, modular, production.
+- rigor should describe unit-test discipline in one short phrase.
+- rationale should be a short list of strings explaining the choices.
+Keep it concrete and buildable. No markdown, no prose outside JSON."""
+
+
+def brief_suggestion_enabled() -> bool:
+    flag = os.environ.get("RICH_CANVAS_LLM_BRIEF", "").strip().lower()
+    return flag not in {"0", "false", "no", "off"}
+
+
+def llm_brief_suggestion(brief: dict, current_tree: dict | None = None) -> dict | None:
+    if not brief_suggestion_enabled():
+        return None
+    if not skills.is_available():
+        return None
+    try:
+        raw = skills.call_with_retry(
+            system_prompt=BRIEF_SUGGEST_SYSTEM,
+            user_prompt=(
+                "Current brief JSON:\n"
+                f"{json.dumps(brief, indent=2)[:12000]}\n\n"
+                "Current canvas JSON:\n"
+                f"{json.dumps(current_tree, indent=2)[:12000] if current_tree else 'null'}"
+            ),
+            temperature=0.15,
+            max_tokens=1200,
+        )
+        data = skills.parse_json_response(raw, context="BRIEF_SUGGESTION")
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception as e:
+        print(f"  [brief] LLM suggestion failed, using deterministic fallback: {e}")
+        return None
+
+
+def suggest_root_brief(brief: dict, current_tree: dict | None = None) -> dict:
+    base = _brief_seed(brief, current_tree)
+    llm = llm_brief_suggestion(brief, current_tree) or {}
+    suggestion = {**base}
+    for key in ("root_id", "goal", "external_services", "inputs", "outputs", "state", "shape", "rigor"):
+        value = _brief_text_value(llm.get(key))
+        if value:
+            suggestion[key] = value
+    suggestion["root_id"] = sanitize_module_id(suggestion["root_id"], "app")
+    suggestion["state"] = _brief_enum(suggestion["state"], {"stateless", "cached", "persistent"},
+                                      base["state"])
+    suggestion["shape"] = _brief_enum(suggestion["shape"], {"simple", "modular", "production"},
+                                       base["shape"])
+    if not suggestion["goal"]:
+        suggestion["goal"] = base["goal"]
+    if not suggestion["external_services"]:
+        suggestion["external_services"] = base["external_services"]
+    if not suggestion["inputs"]:
+        suggestion["inputs"] = base["inputs"]
+    if not suggestion["outputs"]:
+        suggestion["outputs"] = base["outputs"]
+    if not suggestion["rigor"]:
+        suggestion["rigor"] = base["rigor"]
+
+    rationale = llm.get("rationale")
+    if isinstance(rationale, str):
+        rationale = [rationale]
+    if not isinstance(rationale, list):
+        rationale = []
+    if not rationale:
+        rationale = [
+            "Fill the root node with a concrete id and a clear interface sketch.",
+            "Keep provider boundaries explicit when the goal hints at external services.",
+        ]
+        if suggestion["state"] != "stateless":
+            rationale.append("Use a cache or persistent state boundary only when the goal benefits from it.")
+
+    preview = {
+        "id": suggestion["root_id"],
+        "description": suggestion["goal"],
+        "external_services": suggestion["external_services"],
+        "inputs": suggestion["inputs"],
+        "outputs": suggestion["outputs"],
+        "state": suggestion["state"],
+        "shape": suggestion["shape"],
+        "rigor": suggestion["rigor"],
+    }
+
+    return {
+        "source": "llm" if llm else "deterministic",
+        "suggestion": suggestion,
+        "preview": preview,
+        "rationale": rationale,
+    }
+
+
 def _op(name: str, inputs: dict, outputs: dict, errors: list[str] | None = None) -> dict:
     return {"name": name, "inputs": inputs, "outputs": outputs, "errors": errors or []}
 
@@ -731,6 +974,7 @@ def weather_architecture_tree(brief: dict) -> dict:
     wants_cache = (
         "cache" in text or "caching" in text or "production" in text
         or str(brief.get("state") or "").lower() in {"cached", "persistent"}
+        or str(brief.get("shape") or "").lower() == "production"
     )
 
     children = [
@@ -750,7 +994,7 @@ def weather_architecture_tree(brief: dict) -> dict:
         ),
         _node(
             "weather_fetcher",
-            "Coordinate weather retrieval through injected capabilities without making direct network calls.",
+            "Coordinate weather retrieval through injected cache and adapter capabilities.",
             [_op("fetch", {"city": "string"}, {"weather_data": "dict"}, ["city_not_found", "fetch_failed"])],
             lane="domain",
             dependencies=[{"name": "weather_api", "id": "weather_api_adapter"}],
@@ -807,7 +1051,8 @@ def generic_architecture_tree(brief: dict) -> dict:
     provider = _provider_from_brief(brief)
     text = _brief_text(brief).lower()
     has_external = any(tok in text for tok in ("api", "http", "external", "provider", "network"))
-    wants_state = any(tok in text for tok in ("cache", "store", "state", "persistent", "database"))
+    wants_state = any(tok in text for tok in ("cache", "store", "state", "persistent", "database")) \
+        or str(brief.get("shape") or "").lower() == "production"
 
     children = [
         _node("input_boundary", "Validate and normalize user input.", [
@@ -941,6 +1186,8 @@ def inspect_external_io_risks(tree: dict | None) -> list[dict]:
     if not tree:
         return cards
     for n in flatten_tree(tree):
+        if n.get("status") != "failed":
+            continue
         node_dir = BUILD_ROOT / n["id"]
         src = "\n".join(p.read_text(errors="replace") for p in (node_dir / "src").glob("*.py")) \
             if (node_dir / "src").exists() else ""
@@ -956,7 +1203,15 @@ def inspect_external_io_risks(tree: dict | None) -> list[dict]:
                 "message": "This looks like provider/network code but is not marked as an adapter. Unit verification can become flaky or provider-dependent.",
                 "action": "mark_adapter",
             })
-        if has_live_io and tests and not tests_patch:
+        if has_live_io and tests and not tests_patch and module_kind(n) == "adapter":
+            cards.append({
+                "severity": "error",
+                "node_id": n["id"],
+                "title": "Adapter tests still hit live I/O",
+                "message": "This node is already an adapter, but its generated tests still appear to call the provider without monkeypatching or faking I/O. Regenerate this module after preserving the adapter boundary.",
+                "action": None,
+            })
+        elif has_live_io and tests and not tests_patch:
             cards.append({
                 "severity": "error",
                 "node_id": n["id"],
@@ -1060,7 +1315,35 @@ def collect_statuses(cnode: dict, out: dict) -> dict:
     return out
 
 
-def do_build(tree: dict) -> dict:
+def read_node_artifacts(node_id: str) -> dict:
+    """Read what a build produced for one module so the canvas can show it inline:
+    status + reason, the persisted test report, and the generated src/ + tests/ files.
+    Read-only; returns empty sections when the node hasn't been built yet."""
+    node_dir = BUILD_ROOT / node_id
+    out = {"id": node_id, "status": "unplanned", "reason": None,
+           "report": None, "src": {}, "tests": {}, "built": node_dir.exists()}
+    try:
+        st = json.loads((node_dir / "status.json").read_text())
+        out["status"] = st.get("status", "unplanned")
+        out["reason"] = st.get("reason")
+    except Exception:
+        pass
+    try:
+        out["report"] = json.loads((node_dir / "test_report.json").read_text())
+    except Exception:
+        pass
+    for section, sub in (("src", "src"), ("tests", "tests")):
+        d = node_dir / sub
+        if d.is_dir():
+            for f in sorted(d.glob("*.py")):
+                try:
+                    out[section][f.name] = f.read_text()
+                except Exception:
+                    pass
+    return out
+
+
+def do_build(tree: dict, only_node_id: str | None = None) -> dict:
     normalize_canvas_node(tree)
     cards = validation_cards(tree)
     blocking = [c for c in cards if c.get("severity") == "error"]
@@ -1081,6 +1364,12 @@ def do_build(tree: dict) -> dict:
     BUILD_ROOT.mkdir(parents=True, exist_ok=True)
     persist_planned(canvas_to_engine_node(tree))
     save_project(tree)
+
+    # Scoped rebuild: invalidate just this node so build(root) descends past every
+    # memo-hit sibling and rebuilds only it (+ the ancestor wiring re-verifying against
+    # it). persist_planned already re-stamped it as a manual planned node above.
+    if only_node_id:
+        buildmod.invalidate_node(only_node_id)
 
     counter = [0]
     ok, err = True, None
@@ -1213,16 +1502,57 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj).encode(), "application/json")
 
     def _read_body(self) -> dict:
-        n = int(self.headers.get("Content-Length", 0))
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+        except ValueError as exc:
+            raise ValueError("Content-Length must be an integer") from exc
+        if n < 0 or n > MAX_BODY_BYTES:
+            raise ValueError(f"request body exceeds {MAX_BODY_BYTES} bytes")
         if not n:
             return {}
-        return json.loads(self.rfile.read(n).decode())
+        value = json.loads(self.rfile.read(n).decode())
+        if not isinstance(value, dict):
+            raise ValueError("JSON request body must be an object")
+        return value
+
+    _CTYPES = {
+        ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8", ".json": "application/json",
+        ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
+        ".woff": "font/woff", ".woff2": "font/woff2", ".map": "application/json",
+    }
+
+    def _serve_static(self, path: str):
+        """Serve the built React app from web/dist (SPA). Clear message if not built."""
+        index = WEB_DIST / "index.html"
+        if not index.exists():
+            msg = (b"<h1>RICH Canvas frontend not built</h1>"
+                   b"<p>Run <code>npm --prefix web install && npm --prefix web run build</code>, "
+                   b"then reload. For development use <code>npm --prefix web run dev</code> "
+                   b"(Vite proxies /api to this server).</p>")
+            return self._send(503, msg, "text/html; charset=utf-8")
+        rel = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
+        target = (WEB_DIST / rel).resolve()
+        try:
+            target.relative_to(WEB_DIST.resolve())
+        except ValueError:
+            return self._send(403, b"forbidden", "text/plain")
+        if not target.is_file():
+            target = index  # SPA fallback
+        ctype = self._CTYPES.get(target.suffix, "application/octet-stream")
+        return self._send(200, target.read_bytes(), ctype)
 
     def do_GET(self):
-        path = urlparse(self.path).path
-        if path in ("/", "/index.html", "/canvas.html"):
-            html = (HERE / "canvas.html").read_bytes()
-            return self._send(200, html, "text/html; charset=utf-8")
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/v2" or path.startswith("/v2/"):
+            response = _get_v2_application().handle(
+                "GET",
+                path,
+                headers={key: value for key, value in self.headers.items()},
+                query=parse_qs(parsed.query),
+            )
+            return self._json(response.status, response.body)
         if path == "/api/job":
             qs = parse_qs(urlparse(self.path).query)
             jid = (qs.get("id") or [""])[0]
@@ -1240,14 +1570,39 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/project":
             return self._json(200, load_project())
-        return self._json(404, {"error": "not found"})
+        if path == "/api/node":
+            qs = parse_qs(urlparse(self.path).query)
+            nid = (qs.get("id") or [""])[0]
+            if not nid:
+                return self._json(400, {"error": "id required"})
+            return self._json(200, read_node_artifacts(nid))
+        if path == "/api/statuses":
+            # Live per-module status (read from build/<id>/status.json on disk) so the
+            # canvas can flip node colors as a build progresses.
+            doc = load_project()
+            tree = doc.get("tree")
+            return self._json(200, {"statuses": collect_statuses(tree, {}) if tree else {}})
+        if path.startswith("/api/"):
+            return self._json(404, {"error": "not found"})
+        return self._serve_static(path)
 
     def do_POST(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         try:
             body = self._read_body()
         except Exception as e:
             return self._json(400, {"error": f"bad body: {e}"})
+
+        if path == "/v2" or path.startswith("/v2/"):
+            response = _get_v2_application().handle(
+                "POST",
+                path,
+                body=body,
+                headers={key: value for key, value in self.headers.items()},
+                query=parse_qs(parsed.query),
+            )
+            return self._json(response.status, response.body)
 
         if path == "/api/plan":
             tree, nid = body.get("tree"), body.get("node_id")
@@ -1277,9 +1632,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/build":
             tree = body.get("tree")
+            only = body.get("node_id")  # optional: rebuild just this module
 
-            def fn(job, tree=tree):
-                return do_build(tree)
+            def fn(job, tree=tree, only=only):
+                return do_build(tree, only_node_id=only)
             return self._start("build", fn)
 
         if path == "/api/validate":
@@ -1294,10 +1650,15 @@ class Handler(BaseHTTPRequestHandler):
             brief = body.get("brief") or {}
             if isinstance(brief, str):
                 brief = {"goal": brief}
-            if not brief.get("goal"):
-                return self._json(400, {"error": "brief.goal required"})
             proposal = architecture_proposal(brief, body.get("tree"))
             return self._json(200, proposal)
+
+        if path == "/api/architecture/suggest-brief":
+            brief = body.get("brief") or {}
+            if isinstance(brief, str):
+                brief = {"goal": brief}
+            suggestion = suggest_root_brief(brief, body.get("tree"))
+            return self._json(200, suggestion)
 
         if path == "/api/vibe-edit":
             tree = body.get("tree")
@@ -1308,6 +1669,11 @@ class Handler(BaseHTTPRequestHandler):
             before = copy.deepcopy(tree)
             tree = apply_transaction(tree, tx)
             cards = validation_cards(tree) + inspect_external_io_risks(tree)
+            # preview mode: compute the change but DON'T commit (no save). The frontend
+            # shows a diff with Apply/Discard; Apply commits via /api/project/save.
+            if body.get("preview"):
+                return self._json(200, {"tree": tree, "transaction": tx, "cards": cards,
+                                        "preview": True})
             history = body.get("history") or []
             history = ([{"ts": round(time.time(), 3),
                          "transaction": tx,

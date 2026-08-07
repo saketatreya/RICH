@@ -1,6 +1,104 @@
 # RICH — Recursive Agent Build System
 
-RICH builds software by **recursive decomposition with bounded LLM agents**. You give it
+> **Active direction — RICH v2:** turn approved product intent into an immutable,
+> budgeted, sandbox-built, independently verified software release. The original
+> recursive Python engine remains below as v1 and is still supported.
+
+## RICH v2: an intent-to-verified-software compiler
+
+The long-term goal is to generalize software development without reducing it to
+“prompt → code.” RICH treats development as a compilation and evidence problem:
+
+```text
+interviewed intent
+  → approved product specification
+  → approved typed architecture and ownership map
+  → durable dependency-ordered tasks
+  → frozen target-pack scaffold
+  → bounded model-authored source
+  → independent lint / type / unit / build / browser gates
+  → content-addressed release snapshot
+  → separately approved preview deployment
+```
+
+The current vertical slice implements that chain for a production-grade Next.js
+monorepo target pack. It includes:
+
+- immutable spec and architecture revisions with explicit approval gates;
+- requirement traceability plus human-approved, data-only browser oracles that
+  compile into protected acceptance tests and attempt-bound coverage evidence;
+- fail-closed source ownership and protected build/test/toolchain inputs;
+- SQLite-backed runs, tasks, events, artifacts, idempotency, and fenced execution
+  leases;
+- atomic owner-token fencing for scheduler state/evidence writes plus reaped
+  process-group cancellation on lease loss or deadline;
+- a complete approved model/cost/time budget with crash-conservative recovery;
+- CAS-backed source write-ahead transactions that recover the apply/persist crash
+  window without trusting unrecorded workspace bytes;
+- one exact OpenAI provider/model policy, with no silent fallback;
+- exact Node 22.22.3 and pnpm 10.34.5 identity checks;
+- Bubblewrap isolation, network-off verification, bounded processes/heaps/output,
+  and no unsafe local fallback;
+- independent lint, TypeScript, unit, production-build, and Playwright gates;
+- an immutable full-source ZIP tied to the acceptance evidence; and
+- digest-bound, separately approved Neon/Vercel previews, immutable uploads,
+  trusted SQL-only migrations, and teardown.
+
+The generated source cannot modify its verifier, tests, dependency graph, or
+toolchain. A successful model response is never evidence. Only independently
+observed command results can publish task/run success.
+
+This is a working generalized-development **kernel**, not yet a claim that arbitrary
+software is solved. The compiler/target-pack boundary is designed for more languages
+and deployment shapes; the implemented pack today is Next.js, local live-workspace
+execution is deliberately serialized, and distributed systems still require new
+resource, migration, observability, and failure-semantics packs. See
+[the v2 architecture and operating contract](docs/v2-architecture.md).
+
+### Run the v2 control plane
+
+```bash
+python -m pip install -e '.[test]'
+python -m rich_v2.cli doctor
+
+npm --prefix web ci
+npm --prefix web run build
+python canvas.py
+```
+
+Open `http://127.0.0.1:8765` for the Canvas. The v2 JSON API is mounted under
+`/v2`. Mutating API calls require an `Idempotency-Key`; execution and external
+preview actions remain approval- and digest-gated.
+
+For a model-backed run, export `OPENAI_API_KEY`. Preview deployment additionally
+uses `NEON_API_TOKEN` and `VERCEL_TOKEN`. Credentials are resolved lazily and are
+not persisted in run documents or model events.
+
+The default test suite is offline:
+
+```bash
+ruff check .
+python -m pytest
+```
+
+Host/toolchain conformance, including a fresh generated app through the complete
+sandbox pipeline, is explicit:
+
+```bash
+python -m pytest --run-live \
+  --basetemp=.rich/live-tests \
+  tests/test_v2_public_runtime_live.py
+```
+
+The generated workspace, locked dependency store, and Chromium installation can
+exceed 2 GiB, so the explicit base directory avoids small RAM-backed `/tmp`
+filesystems.
+
+---
+
+## RICH v1: recursive module synthesis
+
+The original RICH engine builds software by **recursive decomposition with bounded LLM agents**. You give it
 one top-level *contract* (what a program must do); a single recursive procedure
 `build(contract)` either implements it directly as a **leaf** or asks an LLM **architect**
 to split it into child modules whose contracts it authors, then recurses. Three LLM skills
@@ -11,23 +109,20 @@ runnable `main.py`). Every module is written against its dependencies' *contract
 their source; tests are derived by the *consumer*; and what gets verified is exactly what
 ships.
 
-> **Status (honest, after Phase 11):** RICH is a working tool for genuinely-useful,
+> **v1 status:** RICH is a working tool for genuinely-useful,
 > **stateless-dataflow** programs that decompose into pipelines, fan-in/fan-out diamonds,
 > held-capability sharing, and **compositional depth** (a stage that is itself several
 > sub-modules — builds two levels deep, uncoached, live). It correctly keeps
 > *algorithmically* recursive code (e.g. an expression parser) in a single leaf.
 >
-> **Delivery at depth is YELLOW, not GREEN (Phase 11).** A depth-2 goal builds, assembles,
-> and RUNS, producing **correct aggregate output** — but a *clean, coherent* delivery from
-> the verified source is not yet guaranteed. Two residuals are located and partially fixed:
-> (1) the **dataflow shape handoff** is threaded across *sibling* edges (Phase 11 Fix 2) but
-> **not yet parent→child**, so a child can still guess its input's item-shape wrong and pass
-> per-module verification while breaking the assembled whole; (2) **REPLAN has unbounded blast
-> radius**, rebuilding verified siblings against changed contracts and manufacturing
-> cross-module inconsistency. It does **not** yet do cross-module conditional/branching
-> composition or distribution across processes. See
+> **Depth delivery continuation:** the two Phase 11 delivery residuals now have engine fixes:
+> concrete shape examples flow **parent→child** as well as across sibling edges, and a child
+> failure triggers a bounded local child replan instead of re-decomposing the parent and
+> rebuilding verified siblings. This is the candidate GREEN mechanism. The remaining proof
+> step is the fresh live gate with the Codex backend. It still does **not** do cross-module
+> conditional/branching composition or distribution across processes. See
 > [§7](#7-what-is-proven--the-verification-boundary-map),
-> [§8](#8-known-boundaries--non-goals), and `PHASE11_REPORT.md` for the precise regime.
+> and [§8](#8-known-boundaries--non-goals) for the precise regime.
 
 ---
 
@@ -112,12 +207,16 @@ engines.**
 
 | File | Lines | Purpose |
 |------|------:|---------|
-| `build.py` | ~1150 | **The engine.** The recursion (`build`), verification (`run_tests`), delivery (`assemble`), memoization + resumption, REPLAN/backtracking, hard caps, integration verification, the Fix-2 shape handoff, the call manifest |
+| `build.py` | ~1200 | **The engine.** The recursion (`build`), verification (`run_tests`), delivery (`assemble`), memoization + resumption, local child REPLAN, hard caps, integration verification, sibling + parent→child concrete shape handoff, the call manifest |
 | `cli.py` | ~510 | **The CLI + canned demos.** argparse entrypoint and the no-LLM regression demos (M-A pipeline, M-F fan-in, M-G deep + memo) plus the live single-leaf / decompose drivers. `python cli.py --help` |
 | `skills.py` | ~1130 | PLAN / IMPLEMENT / DERIVE_TESTS — prompts, JSON/DAG validation, canned (no-LLM) fallback data, model routing |
-| `subagent_skill.py` | ~330 | **The real backend.** Runs each skill as a `claude -p --model <m> --tools "" --max-turns 6` subprocess (Phase 11 Fix 1: zero tool affordance + recovery headroom, firewall via `--disallowedTools` kept); `install()` monkeypatches the skills' LLM seam onto it; per-call token/cost logging → `build/llm_calls.jsonl` |
-| `llm.py` | 183 | An *alternate* backend seam — an OpenRouter HTTP client (call/retry/JSON-defense). Present but unused by default (no API key needed for the `claude -p` path) |
+| `backend.py` | ~60 | **Backend selector.** `RICH_BACKEND=claude|codex|openrouter`, with shared install/availability/telemetry hooks |
+| `subagent_skill.py` | ~330 | **Claude CLI backend.** Runs each skill as a `claude -p --model <m> --tools "" --max-turns 6` subprocess (Phase 11 Fix 1: zero tool affordance + recovery headroom, firewall via `--disallowedTools` kept); per-call token/cost logging → `build/llm_calls.jsonl` |
+| `codex_skill.py` | ~190 | **Codex CLI backend.** Runs Codex as a bounded schema-validated text generator through `codex exec` in an empty temp dir with read-only sandbox and no approvals |
+| `llm.py` | 183 | **OpenRouter backend seam** (call/retry/JSON-defense), selected with `RICH_BACKEND=openrouter` and `OPENROUTER_API_KEY` |
 | `node.py` | 125 | `Node` dataclass + on-disk persistence (contract.yaml / decision.json / status.json / deps.yaml) + topological sort |
+| `canvas.py` | — | **Canvas backend.** Stdlib HTTP server: the engine as a JSON API (`/api/plan`, `/api/vibe`, `/api/build`, `/api/vibe-edit`, `/api/node`, `/api/statuses`, `/api/architecture/*`) + serves the built React app from `web/dist`. Scoped single-module rebuild via `build.invalidate_node` |
+| `web/` | — | **The canvas (React + Vite + React Flow).** Browser design IDE: module graph, Vibe Bar with previewed diffs, inspector showing each module's **generated code + test results** inline, one-click **rebuild-this-module** + **vibe-a-fix**, live per-module build status, project-file persistence, adapter boundaries, validation/root-cause cards |
 | `deep_test.py` | — | Canned decompositions/impls/tests for the `--deep` regression |
 | `tree_viewer.py` | 232 | **Read-only** inspector: renders `build/` to a graphviz HTML (structure + state views; highlights fan-in and shared-stateful "dragon" nodes). Never writes into `build/` |
 | `tests/run_tests.py` | 448 | Live end-to-end test runner (T0→T6) |
@@ -150,11 +249,14 @@ REPLANS_MAX  = 2    maximum REPLAN attempts when a child fails to build
    transformation** (top-level functions) or a **stateful component** (one class verified by
    operation *sequences*), and it may **hold an injected capability** (a sibling utility it
    calls) — resolved from the sibling contracts the parent passes down.
-4. **Internal path:** recurse on each child in dependency order; if a child fails, **REPLAN**
-   the decomposition (up to `REPLANS_MAX`); then generate + verify the **wiring class** that
-   threads the children. When an internal node's children **share a stateful dependency**,
-   an additional **integration test** runs over the *real* assembled subtree (no fakes) — the
-   sound check for cross-module shared state (Phase 8).
+4. **Internal path:** recurse on each child in dependency order. Concrete shape examples
+   are threaded both across sibling dataflow edges and from a parent's inbound example down
+   to matching child inputs. If a child fails, only that child gets a bounded local replan
+   (up to `REPLANS_MAX`); verified siblings are not rebuilt by a parent re-decomposition.
+   Then generate + verify the **wiring class** that threads the children. When an internal
+   node's children **share a stateful dependency**, an additional **integration test** runs
+   over the *real* assembled subtree (no fakes) — the sound check for cross-module shared
+   state (Phase 8).
 5. **Assemble.** `assemble(root)` folds the verified tree into `build/main.py`.
 
 ---
@@ -204,28 +306,29 @@ python cli.py --memo-test    # memoization: second build is instant from cache
 These exercise the engine end-to-end with **canned** PLAN/IMPLEMENT/DERIVE_TESTS — no
 backend, no key — and are the regression suite (keep them green).
 
-### The live backend (`claude -p` — no API key needed)
+### Live backends
 
-The default backend runs each skill as a `claude -p --model sonnet --tools "" --max-turns 6`
-subprocess through `subagent_skill.install()`. A live build harness looks like:
+Select with `RICH_BACKEND=claude|codex|openrouter`. The CLI and canvas default to
+`claude`. A live build harness looks like:
 
 ```python
-import build, subagent_skill
-subagent_skill.install()                 # monkeypatch the skills onto claude -p
+import backend, build
+backend.install_from_env()                # monkeypatch the skills onto the selected backend
 build.MAX_DEPTH = 3
 root = build.build(MY_ROOT_CONTRACT, allow_decompose=True)   # live, recursive
 build.assemble(root)                      # → build/main.py
 ```
 
-Model routing (optional): `RICH_PLAN_MODEL` / `RICH_IMPL_MODEL` / `RICH_TESTS_MODEL` select
-per-skill models (default `sonnet`; the seam exists but is **inert** unless you set these).
-Keep IMPLEMENT strong; routing DERIVE_TESTS (and possibly PLAN) to `haiku` is the main quota
-lever — see `EFFICIENCY_REPORT.md` (one depth-2 build = ~64 live `claude -p` sessions on a
-shared 5-hour Pro window; cheap-model routing + an `ANTHROPIC_API_KEY` are the durable fixes).
+Claude mode runs each skill as `claude -p --model <m> --tools "" --max-turns 6`.
+Model routing (optional): `RICH_PLAN_MODEL` / `RICH_IMPL_MODEL` / `RICH_TESTS_MODEL`.
 
-> An **alternate** backend (`llm.py`, OpenRouter, `OPENROUTER_API_KEY`, `RICH_MODEL`) exists
-> as a drop-in seam for higher rate limits / lower per-call overhead, but is unused by
-> default and requires a key.
+Codex mode treats Codex as module text generation only: one prompt in, one
+schema-validated JSON object out. It runs from an empty temp directory with
+`codex exec --ephemeral --sandbox read-only --ask-for-approval never --skip-git-repo-check`
+and never needs write access to this repo. Optional: `RICH_CODEX_MODEL`.
+
+OpenRouter mode uses `llm.py` (`OPENROUTER_API_KEY`, `RICH_MODEL`) for higher rate limits /
+lower per-call overhead when desired.
 
 ### Resumption across a quota cut (first-class)
 
@@ -234,9 +337,10 @@ same build** (no reset): `build()` memo-hits every verified subtree, reuses prio
 decisions, and spends new calls only on the unbuilt remainder. An append-only **call
 manifest** (`build/manifest.jsonl`) records one line per event — `live-PLAN`,
 `live-IMPLEMENT`, `live-DERIVE_TESTS`, `live-INTEGRATION`, `live-REPLAN`, `memo-hit`,
-`decision-reuse` — so a build's integrity is **auditable**: every node was live-authored or
-is a hash-traceable memo-hit, and "0 forbidden events" is a proof of no pinning, not an
-assertion. The manifest doubles as the cost ledger.
+`decision-reuse`, `manual-plan-reuse` — so a build's integrity is **auditable**: every node
+was live-authored, hash-traceable, or explicitly marked as a hand-authored canvas plan.
+For live gates, `manual-plan-reuse` remains a forbidden event. The manifest doubles as the
+cost ledger.
 
 ### Inspect the tree (read-only)
 
@@ -248,8 +352,8 @@ python tree_viewer.py        # renders build/ → /tmp/rich_tree.html (structure
 
 ## 7. What is proven — the verification-boundary map
 
-Established phase-by-phase, on real live runs (`PHASE*_REPORT.md`). Honest about what is
-proven *by a live end-to-end carry* vs *by mechanism only*.
+Established phase-by-phase on real live runs. The table distinguishes what is
+proven *by a live end-to-end carry* from what is shown only by mechanism.
 
 | Regime | Status | Evidence |
 |---|---|---|
@@ -261,7 +365,7 @@ proven *by a live end-to-end carry* vs *by mechanism only*.
 | **Shared-mutable state *verification*** | ✅ proven (mechanism + generation) | P8 — per-module fakes are *unsound* when modules share mutable state (the frame rule's disjoint-footprint side-condition); an **integration trace test over the real subtree** catches the false pass and is auto-generated from behavior prose |
 | **A real, useful, wide-shallow build, end-to-end** | ✅ proven live | P9 (`statement_analyzer`, across a real ~4.7h quota cut, $1, 0 pins) |
 | **Compositional depth (depth-2) — builds & computes** | ✅ proven live | **P10/P11** (`log_health_report` → `assess_health` decomposes into 3 analyses + a fan-in assembler; depth-2, uncoached; verifies, assembles, RUNS, and computes **correct aggregate output** on the real log batch) |
-| **Compositional depth — *coherent* end-to-end delivery** | 🟡 **YELLOW (P11)** | The deliverable runs and the aggregates are right, but a clean delivery from the verified `src/` is not yet guaranteed: the dataflow shape handoff is wired across *sibling* edges (Fix 2) but **not parent→child**, and **REPLAN's unbounded blast radius** rebuilds verified siblings into cross-module-inconsistent shapes. See `PHASE11_REPORT.md` §4–§5. |
+| **Compositional depth — *coherent* end-to-end delivery** | 🟡 **candidate GREEN, live proof pending** | The two located P11 residuals now have engine fixes: sibling + parent→child shape handoff, and local child replan instead of parent-wide rebuild. The required proof is a fresh Codex-backed Phase 11 gate. |
 | **Algorithmic recursion** (e.g. a precedence parser) | ✅ correctly kept in **one leaf** | P10 (a full expression evaluator built correctly as a single leaf, 13/13) |
 
 **The single-owner / stateless-dataflow regime is the sound, PLAN-preferred regime.** When
@@ -293,19 +397,30 @@ is correctly kept whole. RICH finds the depth that is really there.
   section-renderer hit it at `num_turns: 7`). Follow-up: higher max-turns / a per-node
   hard-generation retry. Firewall unchanged (`--disallowedTools` kept).
 
-- **Global shape coherence is the gating delivery residual (P11).** Per-module verification +
-  REPLAN rebuilds can leave the `src/` tree mutually inconsistent (a leaf rebuilt against fake
-  inputs whose shape its real upstream doesn't match). Two fixes are the path to GREEN:
-  **(a)** thread the parent's inbound shape down to children (Fix 2 currently covers only
-  sibling edges); **(b)** bound REPLAN's blast radius so one leaf failure does not rebuild
-  verified siblings. The assembler was *masking* this with a stale-copy bug, now fixed
-  (`assemble()` always refreshes top-level copies from `src/`).
+- **Depth delivery needs a fresh live proof.** The located P11 coherence fixes are now in the
+  engine, but the claim should not be upgraded from candidate to proven until
+  a fresh Codex-backed build passes with a fully live manifest.
 
 - **Distribution / deployment topology is deferred.** Genuinely-unavoidable shared-mutable
   state *across processes* (separate services, a shared DB) is a future frontier; in-process
   shared state is verifiable today (P8).
 
-- **The canvas authoring half is not built.** `tree_viewer.py` is read-only / inspect-only.
+- **The canvas is the product surface, and it closes the build loop.** `canvas.py` (JSON API
+  + static server) and the React app in `web/` let you design a module tree, build it, and
+  **see + fix the generated code in one place**: click a verified module to read its source
+  and passing tests; click a failed one to see the failing test and error, then **rebuild
+  just that module** (a scoped `invalidate_node` rebuild — verified siblings memo-hit, 0 extra
+  LLM calls) or **vibe a fix**. Vibe edits and architecture proposals preview as a reviewable
+  diff before they apply. Local-first / single-user; `tree_viewer.py` remains the standalone
+  read-only inspector.
+
+  Run it:
+  ```bash
+  npm --prefix web install      # once
+  npm --prefix web run build    # build the frontend → web/dist
+  python canvas.py              # serve API + app at http://localhost:8765
+  # frontend dev (hot reload): npm --prefix web run dev  (Vite proxies /api → :8765)
+  ```
 
 - **Type vocabulary is closed** (`string|int|float|bool|list|dict`). No opaque
   module-defined types cross contract boundaries → **self-hosting is blocked**.
@@ -317,47 +432,16 @@ is correctly kept whole. RICH finds the depth that is really there.
 
 ## 9. Roadmap
 
-- **The drag-and-drop canvas** (design-then-compile). `tree_viewer.py` is its standalone
-  read-only back-half; **memoization + resumption is the seed of the incremental
-  blast-radius rebuild** the canvas needs (change one node → rebuild only its cone).
-- **Parent→child shape handoff** (P11 next increment) — Fix 2 carries a concrete shape across
-  *sibling* dataflow edges (closed render_report's residual); extend it to thread the parent's
-  inbound shape down to the children that consume it, so a leaf like `latency_analyzer` is not
-  built blind to the real event shape. This is the gating fix for *coherent* depth delivery.
-- **Bound REPLAN's blast radius** — a single leaf failure should retry/replan that node, not
-  re-decompose the parent and rebuild verified siblings. Biggest combined quota + correctness
-  win (see `EFFICIENCY_REPORT.md` / `PHASE11_REPORT.md`).
+- **The vibe architecture canvas** (design-then-compile). The next frontier is richer AI
+  transactions: split/merge modules, refine contracts, explain graph diffs, and rebuild only
+  the affected cone after a project-file change.
+- **Run a fresh Codex-backed depth build** with a fully live manifest before
+  upgrading coherent depth delivery from candidate to proven.
 - **Backend robustness** for large IMPLEMENT calls — Fix 1 removed the `tool_use`/`max_turns`
   wall for ordinary leaves; it still recurs on harder generations (raise max-turns / per-node
   hard-generation retry).
+- **Canvas hardening** — selective rebuild cones, edit validation, richer graph operations,
+  and clearer manifest/provenance UX.
 - **Named forks:** cross-module conditional composition; distribution / deployment topology;
   SMT / formal verification to replace existential tests; multi-language generation;
   self-hosting (needs opaque types).
-
----
-
-## 10. A note on the journey
-
-RICH's boundaries were not designed up front — they were *established by probe*, one
-thesis-critical question per phase, each willing to return a deflating result. The record is
-in the phase reports, and the README's claims are traceable to them:
-
-- `PHASE3_REPORT.md` — live PLAN decomposition is real (GO).
-- `PHASE4_REPORT.md` — dataflow fan-in carries; recursion still dark.
-- `PHASE6_REPORT.md` — state is a leaf shape; stateful composition carries; the dragon sighted.
-- `PHASE7_REPORT.md` — the leaf-injection gap closed; held capabilities carry end-to-end.
-- `PHASE8_REPORT.md` — the dragon reframed as a *verification* wall and slain in-process;
-  the read-only tree viewer.
-- `PHASE9_REPORT.md` — RICH is a **tool**: one real useful build, end-to-end, live, resumable
-  across a real quota cut, for ~$1.
-- `PHASE10_REPORT.md` — **real recursion arises and carries** for compositional depth (and is
-  correctly withheld for algorithmic recursion); the remaining friction is backend + hard-leaf
-  IMPLEMENT quality, not depth.
-- `PHASE11_REPORT.md` — **delivery at depth is YELLOW**: a depth-2 goal builds, assembles, and
-  RUNS with correct aggregates; Fix 1 removes the tool_use wall (with a residual) and Fix 2
-  carries shape across sibling edges — but *coherent* delivery needs parent→child shape
-  threading + bounded REPLAN. Plus `CAPABILITY_LEDGER.md` (wired-vs-specced) and
-  `EFFICIENCY_REPORT.md` (why quota hits; complete per-call logging now wired).
-
-Each report states what was proven, what was only shown by mechanism, and what the failure
-mode said about the next move. This README is the map; those are the survey notes.
