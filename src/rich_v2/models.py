@@ -276,6 +276,90 @@ class ArtifactStatus(_StringEnum):
     DELETED = "deleted"
 
 
+class ValueTypeKind(_StringEnum):
+    BOOLEAN = "boolean"
+    INTEGER = "integer"
+    STRING = "string"
+    ENUM = "enum"
+    LIST = "list"
+    RECORD = "record"
+    OPTIONAL = "optional"
+
+
+class CharSet(_StringEnum):
+    """Named, closed character sets.  Deliberately not regular expressions.
+
+    A regex denotes an unbounded language that a value generator, a JSON Schema
+    validator and a proof assistant would each interpret slightly differently.
+    A named set has exactly one definition -- ``_CHAR_SET_ALPHABETS`` below --
+    that every consumer reads from the same place.
+    """
+
+    ASCII_DIGITS = "ascii_digits"
+    ASCII_LETTERS = "ascii_letters"
+    ASCII_ALPHANUMERIC = "ascii_alphanumeric"
+    ASCII_IDENTIFIER = "ascii_identifier"
+    ASCII_PRINTABLE = "ascii_printable"
+    UNICODE_SAMPLE = "unicode_sample"
+
+    @property
+    def alphabet(self) -> str:
+        return _CHAR_SET_ALPHABETS[self]
+
+
+_ASCII_DIGITS = "0123456789"
+_ASCII_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+_CHAR_SET_ALPHABETS: dict[CharSet, str] = {
+    CharSet.ASCII_DIGITS: _ASCII_DIGITS,
+    CharSet.ASCII_LETTERS: _ASCII_LETTERS,
+    CharSet.ASCII_ALPHANUMERIC: _ASCII_LETTERS + _ASCII_DIGITS,
+    CharSet.ASCII_IDENTIFIER: _ASCII_LETTERS + _ASCII_DIGITS + "_",
+    CharSet.ASCII_PRINTABLE: "".join(chr(code) for code in range(32, 127)),
+    # A deliberately small curated set rather than "all of Unicode": it must be
+    # finite for a generator to draw from, and every member here exercises a
+    # distinct encoding hazard -- combining marks, astral-plane surrogates,
+    # right-to-left embedding, and CJK width.
+    CharSet.UNICODE_SAMPLE: (
+        _ASCII_LETTERS + _ASCII_DIGITS + " " + "éüñçå" + "日本語中文" + "🙂🚀" + "עברית"
+    ),
+}
+
+
+class ObligationRelation(_StringEnum):
+    """The point-free relations a proof obligation may assert.
+
+    Each is chosen because it names a real defect class, compiles to a
+    one-line property test, and compiles to a one-line theorem statement.  The
+    bodies are built only from operation application, composition and equality,
+    so there is no expression language to specify, evaluate or embed.
+
+    Deliberately absent: COMMUTATIVE, INVOLUTIVE, MONOTONE and DETERMINISTIC.
+    The enum extends without schema churn, and shipping relations no compiler
+    consumes would repeat the mistake ``EvidenceKind`` already made.
+    """
+
+    EXAMPLE = "example"
+    TOTAL = "total"
+    ROUND_TRIP = "round_trip"
+    IDEMPOTENT = "idempotent"
+    PRESERVES = "preserves"
+    ESTABLISHES = "establishes"
+
+
+class ObligationTier(_StringEnum):
+    """How strongly an obligation is discharged.
+
+    ``SAMPLE`` checks finitely many inputs; ``PROOF`` covers the whole domain.
+    There is deliberately no third "it typechecks" tier: typechecking is a
+    property of the implementation, not a claim about a relation, and admitting
+    it here would let a run report obligations as satisfied by having written
+    them down.
+    """
+
+    SAMPLE = "sample"
+    PROOF = "proof"
+
+
 EnumT = TypeVar("EnumT", bound=Enum)
 
 
@@ -897,6 +981,410 @@ class ErrorContract:
         )
 
 
+_MAX_VALUE_TYPE_DEPTH = 4
+_MAX_RECORD_FIELDS = 24
+_MAX_ENUM_MEMBERS = 64
+_MAX_VALUE_LENGTH = 4096
+# Above this, "how many values inhabit this type" stops being a useful
+# question: no gate enumerates a domain that large, and computing the exact
+# integer costs more than the answer is worth.
+_MAX_CARDINALITY_BOUND = 1 << 32
+# The intersection of what a JSON object key, a TypeScript property and a Lean
+# structure field all accept without quoting.
+_FIELD_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+
+@dataclass(frozen=True, slots=True)
+class RecordField:
+    name: str
+    value_type: "ValueType"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not _FIELD_NAME_RE.fullmatch(self.name):
+            raise ModelValidationError(
+                "record_field.name must be a 1-64 character identifier starting "
+                "with a letter and containing only letters, digits or '_'"
+            )
+        value_type = self.value_type
+        if isinstance(value_type, Mapping):
+            value_type = ValueType.from_dict(value_type)
+            object.__setattr__(self, "value_type", value_type)
+        if not isinstance(value_type, ValueType):
+            raise ModelValidationError("record_field.value_type must be a ValueType")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialized(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "RecordField":
+        doc = _strict_fields(
+            data, label="RecordField", required={"name", "value_type"}
+        )
+        return cls(name=doc["name"], value_type=doc["value_type"])
+
+
+# Which optional slots each kind may carry.  Every slot outside a kind's set
+# must be left at its empty value, so a malformed type is rejected at
+# construction rather than reinterpreted by whichever compiler reads it first.
+_VALUE_TYPE_SLOTS: dict[ValueTypeKind, frozenset[str]] = {
+    ValueTypeKind.BOOLEAN: frozenset(),
+    ValueTypeKind.INTEGER: frozenset({"minimum", "maximum"}),
+    ValueTypeKind.STRING: frozenset({"min_length", "max_length", "char_set"}),
+    ValueTypeKind.ENUM: frozenset({"members"}),
+    ValueTypeKind.LIST: frozenset({"min_length", "max_length", "element"}),
+    ValueTypeKind.RECORD: frozenset({"record_fields"}),
+    ValueTypeKind.OPTIONAL: frozenset({"element"}),
+}
+_VALUE_TYPE_REQUIRED_SLOTS: dict[ValueTypeKind, frozenset[str]] = {
+    ValueTypeKind.ENUM: frozenset({"members"}),
+    ValueTypeKind.LIST: frozenset({"element"}),
+    ValueTypeKind.RECORD: frozenset({"record_fields"}),
+    ValueTypeKind.OPTIONAL: frozenset({"element"}),
+}
+_VALUE_TYPE_EMPTY: dict[str, Any] = {
+    "minimum": None,
+    "maximum": None,
+    "min_length": None,
+    "max_length": None,
+    "char_set": None,
+    "members": (),
+    "element": None,
+    "record_fields": (),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ValueType:
+    """A closed type language for operation inputs and outputs.
+
+    JSON Schema is expressive enough to describe almost anything and therefore
+    cannot be quantified over: you cannot compile ``forall x`` against a schema
+    without a nameable type, nor sample from it without a generatable domain.
+    This language is small on purpose -- seven kinds, bounded nesting, no
+    regular expressions, no recursion -- because every construct here has to
+    have one meaning in a property test and the same meaning in a theorem.
+
+    Bounded nesting is also what keeps the type describable to a
+    structured-output model later: a recursive schema cannot be expressed, but
+    a depth-4 one can be unrolled.
+    """
+
+    kind: ValueTypeKind
+    minimum: int | None = None
+    maximum: int | None = None
+    min_length: int | None = None
+    max_length: int | None = None
+    char_set: CharSet | None = None
+    members: tuple[str, ...] = ()
+    element: "ValueType | None" = None
+    record_fields: tuple[RecordField, ...] = ()
+
+    def __post_init__(self) -> None:
+        kind = _enum(self.kind, ValueTypeKind, "value_type.kind")
+        object.__setattr__(self, "kind", kind)
+        for name in ("minimum", "maximum"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise ModelValidationError(f"value_type.{name} must be an integer")
+        for name in ("min_length", "max_length"):
+            value = getattr(self, name)
+            if value is not None:
+                bound = _non_negative_int(value, f"value_type.{name}")
+                if bound > _MAX_VALUE_LENGTH:
+                    raise ModelValidationError(
+                        f"value_type.{name} cannot exceed {_MAX_VALUE_LENGTH}"
+                    )
+                object.__setattr__(self, name, bound)
+        if self.char_set is not None:
+            object.__setattr__(
+                self, "char_set", _enum(self.char_set, CharSet, "value_type.char_set")
+            )
+        object.__setattr__(
+            self, "members", _strings(self.members, "value_type.members")
+        )
+        element = self.element
+        if isinstance(element, Mapping):
+            element = ValueType.from_dict(element)
+            object.__setattr__(self, "element", element)
+        if element is not None and not isinstance(element, ValueType):
+            raise ModelValidationError("value_type.element must be a ValueType")
+        object.__setattr__(
+            self,
+            "record_fields",
+            _models(self.record_fields, RecordField, "value_type.record_fields"),
+        )
+
+        allowed = _VALUE_TYPE_SLOTS[kind]
+        for name, empty in _VALUE_TYPE_EMPTY.items():
+            if name not in allowed and getattr(self, name) != empty:
+                raise ModelValidationError(
+                    f"value type {kind.value!r} cannot carry {name!r}"
+                )
+        for name in _VALUE_TYPE_REQUIRED_SLOTS.get(kind, frozenset()):
+            if getattr(self, name) == _VALUE_TYPE_EMPTY[name]:
+                raise ModelValidationError(
+                    f"value type {kind.value!r} requires {name!r}"
+                )
+
+        if (
+            self.minimum is not None
+            and self.maximum is not None
+            and self.minimum > self.maximum
+        ):
+            raise ModelValidationError("value_type.minimum cannot exceed maximum")
+        if (
+            self.min_length is not None
+            and self.max_length is not None
+            and self.min_length > self.max_length
+        ):
+            raise ModelValidationError("value_type.min_length cannot exceed max_length")
+        if kind is ValueTypeKind.ENUM and len(self.members) > _MAX_ENUM_MEMBERS:
+            raise ModelValidationError(
+                f"value_type.members cannot exceed {_MAX_ENUM_MEMBERS} entries"
+            )
+        if kind is ValueTypeKind.RECORD:
+            if len(self.record_fields) > _MAX_RECORD_FIELDS:
+                raise ModelValidationError(
+                    f"value_type.record_fields cannot exceed {_MAX_RECORD_FIELDS}"
+                )
+            names = [record_field.name for record_field in self.record_fields]
+            if len(set(names)) != len(names):
+                raise ModelValidationError(
+                    "value_type.record_fields contains duplicate names"
+                )
+        if (
+            kind is ValueTypeKind.OPTIONAL
+            and element is not None
+            and element.kind is ValueTypeKind.OPTIONAL
+        ):
+            # An optional optional has no distinct inhabitant in JSON, in
+            # TypeScript, or in the sampler.  Reject the ambiguity outright.
+            raise ModelValidationError("value_type 'optional' cannot nest an optional")
+        if self.depth > _MAX_VALUE_TYPE_DEPTH:
+            raise ModelValidationError(
+                f"value type nesting cannot exceed depth {_MAX_VALUE_TYPE_DEPTH}"
+            )
+
+    @property
+    def depth(self) -> int:
+        if self.element is not None:
+            return 1 + self.element.depth
+        if self.record_fields:
+            return 1 + max(
+                record_field.value_type.depth for record_field in self.record_fields
+            )
+        return 1
+
+    @property
+    def is_finitely_sampleable(self) -> bool:
+        """Whether a generator can draw a value from this domain.
+
+        Distinct from ``cardinality_bound``: a bounded string over a 95
+        character alphabet is sampleable but nowhere near enumerable.
+        """
+
+        kind = self.kind
+        if kind in (ValueTypeKind.BOOLEAN, ValueTypeKind.ENUM):
+            return True
+        if kind is ValueTypeKind.INTEGER:
+            return self.minimum is not None and self.maximum is not None
+        if kind is ValueTypeKind.STRING:
+            return self.max_length is not None
+        if kind is ValueTypeKind.LIST:
+            assert self.element is not None
+            return self.max_length is not None and self.element.is_finitely_sampleable
+        if kind is ValueTypeKind.OPTIONAL:
+            assert self.element is not None
+            return self.element.is_finitely_sampleable
+        return all(
+            record_field.value_type.is_finitely_sampleable
+            for record_field in self.record_fields
+        )
+
+    @property
+    def cardinality_bound(self) -> int | None:
+        """Distinct inhabitants, or ``None`` when unbounded or impractically large."""
+
+        kind = self.kind
+        if kind is ValueTypeKind.BOOLEAN:
+            return 2
+        if kind is ValueTypeKind.ENUM:
+            return len(self.members)
+        if kind is ValueTypeKind.INTEGER:
+            if self.minimum is None or self.maximum is None:
+                return None
+            return _bounded(self.maximum - self.minimum + 1)
+        if kind is ValueTypeKind.STRING:
+            if self.max_length is None or self.char_set is None:
+                return None
+            alphabet = len(self.char_set.alphabet)
+            total = 0
+            for length in range(self.min_length or 0, self.max_length + 1):
+                total += alphabet**length
+                if total > _MAX_CARDINALITY_BOUND:
+                    return None
+            return _bounded(total)
+        if kind is ValueTypeKind.OPTIONAL:
+            assert self.element is not None
+            inner = self.element.cardinality_bound
+            return None if inner is None else _bounded(inner + 1)
+        if kind is ValueTypeKind.LIST:
+            assert self.element is not None
+            inner = self.element.cardinality_bound
+            if inner is None or self.max_length is None:
+                return None
+            total = 0
+            for length in range(self.min_length or 0, self.max_length + 1):
+                total += inner**length
+                if total > _MAX_CARDINALITY_BOUND:
+                    return None
+            return _bounded(total)
+        total = 1
+        for record_field in self.record_fields:
+            inner = record_field.value_type.cardinality_bound
+            if inner is None:
+                return None
+            total *= inner
+            if total > _MAX_CARDINALITY_BOUND:
+                return None
+        return _bounded(total)
+
+    def accepts(self, value: Any) -> bool:
+        """Whether a JSON value inhabits this type."""
+
+        kind = self.kind
+        if kind is ValueTypeKind.BOOLEAN:
+            return isinstance(value, bool)
+        if kind is ValueTypeKind.INTEGER:
+            if isinstance(value, bool) or not isinstance(value, int):
+                return False
+            if self.minimum is not None and value < self.minimum:
+                return False
+            return self.maximum is None or value <= self.maximum
+        if kind is ValueTypeKind.STRING:
+            if not isinstance(value, str):
+                return False
+            if self.min_length is not None and len(value) < self.min_length:
+                return False
+            if self.max_length is not None and len(value) > self.max_length:
+                return False
+            if self.char_set is None:
+                return True
+            return set(value) <= set(self.char_set.alphabet)
+        if kind is ValueTypeKind.ENUM:
+            return isinstance(value, str) and value in self.members
+        if kind is ValueTypeKind.OPTIONAL:
+            assert self.element is not None
+            return value is None or self.element.accepts(value)
+        if kind is ValueTypeKind.LIST:
+            assert self.element is not None
+            if not isinstance(value, list):
+                return False
+            if self.min_length is not None and len(value) < self.min_length:
+                return False
+            if self.max_length is not None and len(value) > self.max_length:
+                return False
+            return all(self.element.accepts(item) for item in value)
+        if not isinstance(value, Mapping):
+            return False
+        expected = {record_field.name for record_field in self.record_fields}
+        if set(value.keys()) != expected:
+            return False
+        return all(
+            record_field.value_type.accepts(value[record_field.name])
+            for record_field in self.record_fields
+        )
+
+    def json_schema(self) -> dict[str, Any]:
+        """Project this type onto JSON Schema.
+
+        The projection is deliberately lossy in one place: ``char_set`` has no
+        standard JSON Schema spelling that is not a regular expression, so it
+        is dropped.  This type, not the schema, is the source of truth; the
+        schema exists so contracts stay readable to humans and to a model.
+        """
+
+        kind = self.kind
+        if kind is ValueTypeKind.BOOLEAN:
+            return {"type": "boolean"}
+        if kind is ValueTypeKind.INTEGER:
+            schema: dict[str, Any] = {"type": "integer"}
+            if self.minimum is not None:
+                schema["minimum"] = self.minimum
+            if self.maximum is not None:
+                schema["maximum"] = self.maximum
+            return schema
+        if kind is ValueTypeKind.STRING:
+            schema = {"type": "string"}
+            if self.min_length is not None:
+                schema["minLength"] = self.min_length
+            if self.max_length is not None:
+                schema["maxLength"] = self.max_length
+            return schema
+        if kind is ValueTypeKind.ENUM:
+            return {"type": "string", "enum": list(self.members)}
+        if kind is ValueTypeKind.OPTIONAL:
+            assert self.element is not None
+            return {"anyOf": [self.element.json_schema(), {"type": "null"}]}
+        if kind is ValueTypeKind.LIST:
+            assert self.element is not None
+            schema = {"type": "array", "items": self.element.json_schema()}
+            if self.min_length is not None:
+                schema["minItems"] = self.min_length
+            if self.max_length is not None:
+                schema["maxItems"] = self.max_length
+            return schema
+        return {
+            "type": "object",
+            "properties": {
+                record_field.name: record_field.value_type.json_schema()
+                for record_field in self.record_fields
+            },
+            "required": [
+                record_field.name for record_field in self.record_fields
+            ],
+            "additionalProperties": False,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialized(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ValueType":
+        doc = _strict_fields(
+            data,
+            label="ValueType",
+            required={"kind"},
+            optional={
+                "minimum",
+                "maximum",
+                "min_length",
+                "max_length",
+                "char_set",
+                "members",
+                "element",
+                "record_fields",
+            },
+        )
+        return cls(
+            kind=doc["kind"],
+            minimum=doc.get("minimum"),
+            maximum=doc.get("maximum"),
+            min_length=doc.get("min_length"),
+            max_length=doc.get("max_length"),
+            char_set=doc.get("char_set"),
+            members=doc.get("members", ()),
+            element=doc.get("element"),
+            record_fields=doc.get("record_fields", ()),
+        )
+
+
+def _bounded(total: int) -> int | None:
+    return None if total > _MAX_CARDINALITY_BOUND else total
+
+
 @dataclass(frozen=True, slots=True)
 class OperationContract:
     id: str
@@ -906,6 +1394,8 @@ class OperationContract:
     requirement_ids: tuple[str, ...]
     errors: tuple[ErrorContract, ...] = ()
     description: str = ""
+    input_type: ValueType | None = None
+    output_type: ValueType | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _stable_id(self.id, "operation.id"))
@@ -942,6 +1432,27 @@ class OperationContract:
         codes = [error.code for error in self.errors]
         if len(set(codes)) != len(codes):
             raise ModelValidationError("operation.errors contains duplicate codes")
+        for slot, schema_name in (
+            ("input_type", "input_schema"),
+            ("output_type", "output_schema"),
+        ):
+            declared = getattr(self, slot)
+            if declared is None:
+                continue
+            if isinstance(declared, Mapping):
+                declared = ValueType.from_dict(declared)
+                object.__setattr__(self, slot, declared)
+            if not isinstance(declared, ValueType):
+                raise ModelValidationError(f"operation.{slot} must be a ValueType")
+            # The schema is a projection of the type, never a second source of
+            # truth.  Requiring exact agreement means every existing consumer
+            # of input_schema/output_schema keeps working while the typed view
+            # becomes the thing the obligation compilers quantify over.
+            if declared.json_schema() != getattr(self, schema_name):
+                raise ModelValidationError(
+                    f"operation.{schema_name} must equal the JSON Schema projection "
+                    f"of operation.{slot}"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return _serialized(self)
@@ -958,7 +1469,7 @@ class OperationContract:
                 "output_schema",
                 "requirement_ids",
             },
-            optional={"errors", "description"},
+            optional={"errors", "description", "input_type", "output_type"},
         )
         return cls(
             id=doc["id"],
@@ -968,14 +1479,234 @@ class OperationContract:
             requirement_ids=doc["requirement_ids"],
             errors=doc.get("errors", ()),
             description=doc.get("description", ""),
+            input_type=doc.get("input_type"),
+            output_type=doc.get("output_type"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ObligationExample:
+    """One ground fact: this argument yields this result."""
+
+    argument: Any
+    result: Any
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "argument", _json_value(self.argument, "obligation_example.argument")
+        )
+        object.__setattr__(
+            self, "result", _json_value(self.result, "obligation_example.result")
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialized(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ObligationExample":
+        doc = _strict_fields(
+            data, label="ObligationExample", required={"argument", "result"}
+        )
+        return cls(argument=doc["argument"], result=doc["result"])
+
+
+_MAX_SAMPLE_SIZE = 4096
+# Which operand slots each relation may carry, and which it must.
+_OBLIGATION_SLOTS: dict[ObligationRelation, frozenset[str]] = {
+    ObligationRelation.EXAMPLE: frozenset({"example"}),
+    ObligationRelation.TOTAL: frozenset({"guard_operation_id"}),
+    ObligationRelation.ROUND_TRIP: frozenset({"witness_operation_id"}),
+    ObligationRelation.IDEMPOTENT: frozenset(),
+    ObligationRelation.PRESERVES: frozenset({"predicate_operation_id"}),
+    ObligationRelation.ESTABLISHES: frozenset({"predicate_operation_id"}),
+}
+_OBLIGATION_REQUIRED_SLOTS: dict[ObligationRelation, frozenset[str]] = {
+    ObligationRelation.EXAMPLE: frozenset({"example"}),
+    # TOTAL's guard is optional: an operation total on its whole declared input
+    # type needs no domain restriction.
+    ObligationRelation.TOTAL: frozenset(),
+    ObligationRelation.ROUND_TRIP: frozenset({"witness_operation_id"}),
+    ObligationRelation.IDEMPOTENT: frozenset(),
+    ObligationRelation.PRESERVES: frozenset({"predicate_operation_id"}),
+    ObligationRelation.ESTABLISHES: frozenset({"predicate_operation_id"}),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ProofObligation:
+    """One machine-checkable claim about an operation.
+
+    Obligations hang off the contract rather than off an operation because
+    ``ROUND_TRIP`` names two operations and could not honestly belong to
+    either, and because ``EXAMPLE`` obligations are numerous and mechanical --
+    forcing each to carry an ``Invariant``'s required prose statement would
+    make the anti-vacuity rule expensive enough to skip.
+    """
+
+    id: str
+    relation: ObligationRelation
+    subject_operation_id: str
+    requirement_ids: tuple[str, ...]
+    tier: ObligationTier = ObligationTier.SAMPLE
+    witness_operation_id: str | None = None
+    predicate_operation_id: str | None = None
+    guard_operation_id: str | None = None
+    example: ObligationExample | None = None
+    sample_size: int | None = None
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "id", _stable_id(self.id, "obligation.id"))
+        relation = _enum(self.relation, ObligationRelation, "obligation.relation")
+        object.__setattr__(self, "relation", relation)
+        tier = _enum(self.tier, ObligationTier, "obligation.tier")
+        object.__setattr__(self, "tier", tier)
+        object.__setattr__(
+            self,
+            "subject_operation_id",
+            _stable_id(self.subject_operation_id, "obligation.subject_operation_id"),
+        )
+        object.__setattr__(
+            self,
+            "requirement_ids",
+            _strings(
+                self.requirement_ids,
+                "obligation.requirement_ids",
+                allow_empty=False,
+                stable_ids=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "description",
+            _text(self.description, "obligation.description", allow_empty=True),
+        )
+        for slot in ("witness_operation_id", "predicate_operation_id", "guard_operation_id"):
+            value = getattr(self, slot)
+            if value is not None:
+                object.__setattr__(self, slot, _stable_id(value, f"obligation.{slot}"))
+        example = self.example
+        if isinstance(example, Mapping):
+            example = ObligationExample.from_dict(example)
+            object.__setattr__(self, "example", example)
+        if example is not None and not isinstance(example, ObligationExample):
+            raise ModelValidationError(
+                "obligation.example must be an ObligationExample"
+            )
+
+        allowed = _OBLIGATION_SLOTS[relation]
+        for slot in (
+            "witness_operation_id",
+            "predicate_operation_id",
+            "guard_operation_id",
+            "example",
+        ):
+            if slot not in allowed and getattr(self, slot) is not None:
+                raise ModelValidationError(
+                    f"obligation relation {relation.value!r} cannot carry {slot!r}"
+                )
+        for slot in _OBLIGATION_REQUIRED_SLOTS[relation]:
+            if getattr(self, slot) is None:
+                raise ModelValidationError(
+                    f"obligation relation {relation.value!r} requires {slot!r}"
+                )
+
+        if relation is ObligationRelation.EXAMPLE:
+            # An example is exactly one sample, so it can never be a proof for
+            # all inputs and needs no sample count.
+            if tier is not ObligationTier.SAMPLE:
+                raise ModelValidationError(
+                    "example obligations are a single sample and cannot claim a "
+                    "proof tier"
+                )
+            if self.sample_size is not None:
+                raise ModelValidationError(
+                    "example obligations cannot carry a sample size"
+                )
+        elif tier is ObligationTier.SAMPLE:
+            if self.sample_size is None:
+                raise ModelValidationError(
+                    "sample-tier obligations require a sample size"
+                )
+            size = _non_negative_int(self.sample_size, "obligation.sample_size")
+            if not 1 <= size <= _MAX_SAMPLE_SIZE:
+                raise ModelValidationError(
+                    f"obligation.sample_size must be between 1 and {_MAX_SAMPLE_SIZE}"
+                )
+            object.__setattr__(self, "sample_size", size)
+        elif self.sample_size is not None:
+            raise ModelValidationError(
+                "proof-tier obligations cover the whole domain and cannot carry a "
+                "sample size"
+            )
+
+    @property
+    def operand_operation_ids(self) -> tuple[str, ...]:
+        """Every operation id this obligation names, subject first."""
+
+        return tuple(
+            operation_id
+            for operation_id in (
+                self.subject_operation_id,
+                self.witness_operation_id,
+                self.predicate_operation_id,
+                self.guard_operation_id,
+            )
+            if operation_id is not None
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialized(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ProofObligation":
+        doc = _strict_fields(
+            data,
+            label="ProofObligation",
+            required={
+                "id",
+                "relation",
+                "subject_operation_id",
+                "requirement_ids",
+            },
+            optional={
+                "tier",
+                "witness_operation_id",
+                "predicate_operation_id",
+                "guard_operation_id",
+                "example",
+                "sample_size",
+                "description",
+            },
+        )
+        return cls(
+            id=doc["id"],
+            relation=doc["relation"],
+            subject_operation_id=doc["subject_operation_id"],
+            requirement_ids=doc["requirement_ids"],
+            tier=doc.get("tier", ObligationTier.SAMPLE),
+            witness_operation_id=doc.get("witness_operation_id"),
+            predicate_operation_id=doc.get("predicate_operation_id"),
+            guard_operation_id=doc.get("guard_operation_id"),
+            example=doc.get("example"),
+            sample_size=doc.get("sample_size"),
+            description=doc.get("description", ""),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class Invariant:
+    """A prose statement about the system, optionally cited by formal obligations.
+
+    The prose is kept verbatim and is never derived from the obligations, nor
+    they from it.  A formalisation that *claims* to be the prose is a lie; one
+    that *cites* it is a traceability edge.
+    """
+
     id: str
     statement: str
     requirement_ids: tuple[str, ...]
+    obligation_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _stable_id(self.id, "invariant.id"))
@@ -992,6 +1723,15 @@ class Invariant:
                 stable_ids=True,
             ),
         )
+        object.__setattr__(
+            self,
+            "obligation_ids",
+            _strings(
+                self.obligation_ids,
+                "invariant.obligation_ids",
+                stable_ids=True,
+            ),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return _serialized(self)
@@ -1002,11 +1742,13 @@ class Invariant:
             data,
             label="Invariant",
             required={"id", "statement", "requirement_ids"},
+            optional={"obligation_ids"},
         )
         return cls(
             id=doc["id"],
             statement=doc["statement"],
             requirement_ids=doc["requirement_ids"],
+            obligation_ids=doc.get("obligation_ids", ()),
         )
 
 
@@ -1016,6 +1758,7 @@ class ContractV2:
     node_id: str
     operations: tuple[OperationContract, ...]
     invariants: tuple[Invariant, ...] = ()
+    obligations: tuple[ProofObligation, ...] = ()
     revision: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
     schema_version: str = field(default=SCHEMA_VERSION, init=False)
@@ -1034,6 +1777,11 @@ class ContractV2:
             _models(self.invariants, Invariant, "contract.invariants"),
         )
         object.__setattr__(
+            self,
+            "obligations",
+            _models(self.obligations, ProofObligation, "contract.obligations"),
+        )
+        object.__setattr__(
             self, "revision", _positive_revision(self.revision, "contract.revision")
         )
         object.__setattr__(
@@ -1046,16 +1794,25 @@ class ContractV2:
         return {operation.id: operation for operation in self.operations}
 
     @property
+    def obligation_index(self) -> dict[str, ProofObligation]:
+        return {obligation.id: obligation for obligation in self.obligations}
+
+    @property
     def traced_requirement_ids(self) -> frozenset[str]:
         requirement_ids: set[str] = set()
-        for behavior in (*self.operations, *self.invariants):
+        for behavior in (*self.operations, *self.invariants, *self.obligations):
             requirement_ids.update(behavior.requirement_ids)
         return frozenset(requirement_ids)
 
     def validate(self) -> None:
         operations = _unique_by_id(self.operations, "contract.operations")
         invariants = _unique_by_id(self.invariants, "contract.invariants")
-        duplicate_behavior_ids = operations.keys() & invariants.keys()
+        obligations = _unique_by_id(self.obligations, "contract.obligations")
+        duplicate_behavior_ids = (
+            (operations.keys() & invariants.keys())
+            | (operations.keys() & obligations.keys())
+            | (invariants.keys() & obligations.keys())
+        )
         if duplicate_behavior_ids:
             raise ModelValidationError(
                 "contract behavior ids must be globally unique within the contract: "
@@ -1065,6 +1822,170 @@ class ContractV2:
             raise ModelValidationError(
                 "contract must define at least one operation or invariant"
             )
+        self._validate_obligations(operations)
+        for invariant in self.invariants:
+            unknown = set(invariant.obligation_ids) - obligations.keys()
+            if unknown:
+                raise ModelValidationError(
+                    f"invariant {invariant.id!r} cites unknown obligations: "
+                    f"{sorted(unknown)}"
+                )
+
+    def _validate_obligations(
+        self, operations: dict[str, OperationContract]
+    ) -> None:
+        anchored: set[str] = set()
+        constrained: set[str] = set()
+        for obligation in self.obligations:
+            operands = {}
+            for slot in (
+                "subject_operation_id",
+                "witness_operation_id",
+                "predicate_operation_id",
+                "guard_operation_id",
+            ):
+                operation_id = getattr(obligation, slot)
+                if operation_id is None:
+                    operands[slot] = None
+                    continue
+                operation = operations.get(operation_id)
+                if operation is None:
+                    raise ModelValidationError(
+                        f"obligation {obligation.id!r} references unknown operation "
+                        f"{operation_id!r}"
+                    )
+                operands[slot] = operation
+            subject = operands["subject_operation_id"]
+            assert subject is not None
+            stray = set(obligation.requirement_ids) - set(subject.requirement_ids)
+            if stray:
+                # An obligation cannot claim to serve a requirement the
+                # operation it constrains does not itself serve.
+                raise ModelValidationError(
+                    f"obligation {obligation.id!r} traces requirements its subject "
+                    f"does not: {sorted(stray)}"
+                )
+            self._validate_obligation_shape(obligation, subject, operands)
+            if obligation.relation is ObligationRelation.EXAMPLE:
+                anchored.add(subject.id)
+            else:
+                constrained.add(subject.id)
+        unanchored = constrained - anchored
+        if unanchored:
+            # Identity satisfies IDEMPOTENT, PRESERVES and ROUND_TRIP, and a
+            # function that never fails satisfies TOTAL.  Without at least one
+            # ground example pinning what the operation actually computes, a
+            # passing property gate -- or a machine-checked proof -- says
+            # nothing at all.
+            raise ModelValidationError(
+                "every operation constrained by a non-example obligation needs at "
+                "least one example obligation to rule out a trivial "
+                f"implementation; unanchored operations: {sorted(unanchored)}"
+            )
+
+    @staticmethod
+    def _validate_obligation_shape(
+        obligation: "ProofObligation",
+        subject: OperationContract,
+        operands: dict[str, OperationContract | None],
+    ) -> None:
+        relation = obligation.relation
+        label = f"obligation {obligation.id!r}"
+
+        def require_same(
+            left: ValueType | None, right: ValueType | None, message: str
+        ) -> None:
+            # Types are optional, so a contract that declares none is checked
+            # structurally only.  Two declared types that disagree are a bug.
+            if left is not None and right is not None and left != right:
+                raise ModelValidationError(f"{label} {message}")
+
+        def require_predicate(
+            operation: OperationContract, domain: ValueType | None
+        ) -> None:
+            if (
+                operation.output_type is not None
+                and operation.output_type.kind is not ValueTypeKind.BOOLEAN
+            ):
+                raise ModelValidationError(
+                    f"{label} requires predicate {operation.id!r} to return a boolean"
+                )
+            require_same(
+                operation.input_type,
+                domain,
+                f"requires predicate {operation.id!r} to accept the same type it judges",
+            )
+
+        if relation is ObligationRelation.EXAMPLE:
+            example = obligation.example
+            assert example is not None
+            if subject.input_type is not None and not subject.input_type.accepts(
+                example.argument
+            ):
+                raise ModelValidationError(
+                    f"{label} example argument does not inhabit the subject input type"
+                )
+            if subject.output_type is not None and not subject.output_type.accepts(
+                example.result
+            ):
+                raise ModelValidationError(
+                    f"{label} example result does not inhabit the subject output type"
+                )
+            return
+
+        if relation is ObligationRelation.TOTAL:
+            if not subject.errors:
+                # Totality is the claim that a declared failure never happens.
+                # An operation that declares none makes it trivially true.
+                raise ModelValidationError(
+                    f"{label} asserts totality of an operation that declares no "
+                    "errors, which is vacuously true"
+                )
+            guard = operands["guard_operation_id"]
+            if guard is not None:
+                require_predicate(guard, subject.input_type)
+        elif relation is ObligationRelation.ROUND_TRIP:
+            witness = operands["witness_operation_id"]
+            assert witness is not None
+            require_same(
+                witness.input_type,
+                subject.output_type,
+                f"requires witness {witness.id!r} to accept the subject's output",
+            )
+            require_same(
+                witness.output_type,
+                subject.input_type,
+                f"requires witness {witness.id!r} to return the subject's input",
+            )
+        elif relation is ObligationRelation.IDEMPOTENT:
+            require_same(
+                subject.output_type,
+                subject.input_type,
+                "requires an endomorphism: the subject's output type must equal "
+                "its input type",
+            )
+        elif relation is ObligationRelation.PRESERVES:
+            predicate = operands["predicate_operation_id"]
+            assert predicate is not None
+            require_same(
+                subject.output_type,
+                subject.input_type,
+                "requires an endomorphism: the subject's output type must equal "
+                "its input type",
+            )
+            require_predicate(predicate, subject.input_type)
+        else:
+            predicate = operands["predicate_operation_id"]
+            assert predicate is not None
+            require_predicate(predicate, subject.output_type)
+
+        if obligation.tier is ObligationTier.SAMPLE:
+            domain = subject.input_type
+            if domain is None or not domain.is_finitely_sampleable:
+                raise ModelValidationError(
+                    f"{label} claims a sample tier over a domain no generator can "
+                    "draw from; declare a bounded input type or claim a proof tier"
+                )
 
     def validate_requirement_ids(self, known_requirement_ids: Iterable[str]) -> None:
         known = set(known_requirement_ids)
@@ -1083,7 +2004,7 @@ class ContractV2:
             data,
             label="ContractV2",
             required={"schema_version", "id", "node_id", "operations"},
-            optional={"invariants", "revision", "metadata"},
+            optional={"invariants", "obligations", "revision", "metadata"},
         )
         _check_schema_version(doc, "ContractV2")
         return cls(
@@ -1091,6 +2012,7 @@ class ContractV2:
             node_id=doc["node_id"],
             operations=doc["operations"],
             invariants=doc.get("invariants", ()),
+            obligations=doc.get("obligations", ()),
             revision=doc.get("revision", 1),
             metadata=doc.get("metadata", {}),
         )

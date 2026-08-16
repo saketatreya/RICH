@@ -27,7 +27,7 @@ from rich_v2.scheduler import (
     TaskPolicy,
     TaskResult,
 )
-from rich_v2.store import RevisionConflict, RichStore
+from rich_v2.store import RevisionConflict, RichStore, StoreError
 
 
 def _task(
@@ -754,6 +754,24 @@ def test_cancellation_marks_running_and_unstarted_tasks_durably(tmp_path):
     }
 
 
+def _claim_once_expired(store, run_id, timeout=10.0):
+    """Take ownership as soon as the incumbent lease lapses.
+
+    Sleeping for a fixed interval and hoping guesses at wall-clock timing the
+    test does not control. Polling states the actual precondition: the takeover
+    happens the moment expiry makes it legal.
+    """
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return store.claim_run_execution(run_id)
+        except StoreError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 def test_successor_owner_is_the_only_scheduler_that_can_complete(tmp_path):
     tasks = (_task("owned", 0),)
     store, run, plan = _prepared(tmp_path, tasks)
@@ -763,12 +781,19 @@ def test_successor_owner_is_the_only_scheduler_that_can_complete(tmp_path):
 
     def first_handler(context):
         first_started.set()
-        release_first.wait(2)
+        # Generous: the test releases this explicitly, so the timeout is only a
+        # safety net against a hung run, never a claim about how fast the
+        # successor finishes.
+        release_first.wait(30)
         return _verified_result(context, summary="stale owner output")
 
+    # Claim a comfortable lease and collapse it below, once the handler has
+    # definitely started. Racing a 30ms lease against thread startup made this
+    # test flake on a loaded machine: _launch performs a fenced write before it
+    # dispatches, so an expiry that lands first stops the handler ever running.
     first_lease = store.claim_run_execution(
         run["id"],
-        lease_seconds=0.03,
+        lease_seconds=30,
     )
     first_scheduler = DagScheduler(
         store,
@@ -787,9 +812,13 @@ def test_successor_owner_is_the_only_scheduler_that_can_complete(tmp_path):
 
     first_thread = threading.Thread(target=execute_first)
     first_thread.start()
-    assert first_started.wait(1)
-    time.sleep(0.05)
-    successor = store.claim_run_execution(run["id"])
+    assert first_started.wait(10), "the first scheduler never reached its handler"
+    store.renew_run_execution(
+        run["id"],
+        owner_token=first_lease.owner_token,
+        lease_seconds=0.01,
+    )
+    successor = _claim_once_expired(store, run["id"])
 
     # Scheduler-level cancellation, evidence publication, and finalization all
     # pass through the same fenced store boundary.
@@ -820,7 +849,7 @@ def test_successor_owner_is_the_only_scheduler_that_can_complete(tmp_path):
     assert successor_report.succeeded
     assert dict(successor_report.task_attempts) == {"owned": 2}
     release_first.set()
-    first_thread.join(1)
+    first_thread.join(30)
     assert not first_thread.is_alive()
     assert len(first_errors) == 1
     assert isinstance(first_errors[0], RevisionConflict)
