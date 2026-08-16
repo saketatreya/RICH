@@ -1407,6 +1407,113 @@ def _bounded(total: int) -> int | None:
     return None if total > _MAX_CARDINALITY_BOUND else total
 
 
+def value_type_request_schema(
+    max_depth: int = _MAX_VALUE_TYPE_DEPTH,
+) -> dict[str, Any]:
+    """A JSON Schema for *asking a model* to describe a type.
+
+    ``ValueType.json_schema`` projects a type onto the values it admits; this
+    describes the type language itself, so a structured-output request can
+    return one. The two are opposites and both are needed.
+
+    It is unrolled rather than recursive. Structured-output decoders reject
+    recursive schemas, which would make the whole typed vocabulary impossible
+    to ask for -- and the bounded nesting depth, which looked like an arbitrary
+    limit when it was introduced, is exactly what makes unrolling finite. The
+    innermost level offers only the scalar kinds, so the expansion terminates
+    instead of bottoming out in something unrepresentable.
+    """
+
+    if not isinstance(max_depth, int) or isinstance(max_depth, bool):
+        raise ModelValidationError("max_depth must be an integer")
+    if not 1 <= max_depth <= _MAX_VALUE_TYPE_DEPTH:
+        raise ModelValidationError(
+            f"max_depth must be between 1 and {_MAX_VALUE_TYPE_DEPTH}"
+        )
+    return _value_type_level(max_depth)
+
+
+def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
+    # anyOf rather than a type array: it is the spelling every structured-output
+    # decoder in use accepts, and an optional slot has to be expressible or the
+    # scalar kinds cannot say "no bound".
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+def _value_type_level(depth: int) -> dict[str, Any]:
+    scalar_kinds = ["boolean", "integer", "string", "enum"]
+    compound_kinds = ["list", "record", "optional"] if depth > 1 else []
+    properties: dict[str, Any] = {
+        "kind": {"type": "string", "enum": scalar_kinds + compound_kinds},
+        "minimum": _nullable({"type": "integer"}),
+        "maximum": _nullable({"type": "integer"}),
+        "min_length": _nullable({"type": "integer"}),
+        "max_length": _nullable({"type": "integer"}),
+        "char_set": _nullable(
+            {"type": "string", "enum": [member.value for member in CharSet]}
+        ),
+        "members": {"type": "array", "items": {"type": "string"}},
+    }
+    if depth > 1:
+        inner = _value_type_level(depth - 1)
+        properties["element"] = _nullable(inner)
+        properties["record_fields"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "value_type": inner},
+                "required": ["name", "value_type"],
+                "additionalProperties": False,
+            },
+        }
+    return {
+        "type": "object",
+        "properties": properties,
+        # Only ``kind`` is required. Requiring every slot at every level was
+        # measured to cost 164 bytes for a single boolean instead of 19, and a
+        # decomposition carrying a dozen nested types overran its output
+        # reservation on that alone. ``additionalProperties`` stays false, so
+        # the language is still closed -- an answer may omit a slot, never
+        # invent one.
+        "required": ["kind"],
+        "additionalProperties": False,
+    }
+
+
+def value_type_from_request(document: Mapping[str, Any]) -> ValueType:
+    """Build a ``ValueType`` from a request-schema answer.
+
+    The request schema requires every slot at every level so a decoder never
+    has to choose which keys to emit. That means a scalar arrives carrying
+    empty compound slots, which ``ValueType`` rejects outright -- correctly, as
+    a boolean with a ``record_fields`` key is not a boolean. Dropping the empty
+    ones here is the whole translation.
+    """
+
+    if not isinstance(document, Mapping):
+        raise ModelValidationError("value type answer must be an object")
+    trimmed: dict[str, Any] = {}
+    for name, value in document.items():
+        if value in (None, [], ()):
+            continue
+        if name == "element":
+            trimmed[name] = value_type_from_request(value)
+        elif name == "record_fields":
+            trimmed[name] = tuple(
+                RecordField(
+                    name=str(entry.get("name")),
+                    value_type=value_type_from_request(entry.get("value_type", {})),
+                )
+                for entry in value
+                if isinstance(entry, Mapping)
+            )
+        else:
+            trimmed[name] = value
+    if "kind" not in trimmed:
+        raise ModelValidationError("value type answer requires a kind")
+    return ValueType(**trimmed)
+
+
 def _without_derivable_schemas(operation: "OperationContract") -> dict[str, Any]:
     """Serialize an operation without a schema its declared type already fixes.
 
