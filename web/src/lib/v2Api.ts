@@ -162,6 +162,68 @@ export interface DurableTask {
   cache_key: string | null
 }
 
+export interface RunArtifact {
+  run_id: string
+  task_id: string | null
+  digest: string
+  role: string
+  created_at: string
+  size: number
+  media_type: string
+  metadata: Record<string, JsonValue>
+}
+
+/** One file inside a `generated-source` artifact, as the worker wrote it. */
+export interface GeneratedFile {
+  operation: string
+  path: string
+  size: number
+  sha256: string
+  content: string
+}
+
+export interface GeneratedSource {
+  schema_version: string
+  source_digest?: string
+  summary: string
+  files: GeneratedFile[]
+}
+
+export interface ArtifactContent<T = JsonValue> {
+  artifact: {
+    digest: string
+    size: number
+    media_type: string
+    metadata: Record<string, JsonValue>
+    attachments: { role: string; task_id: string | null }[]
+  }
+  content?: T
+  content_base64?: string
+}
+
+/**
+ * The write-ahead journal for one task's source change. `original` is what was
+ * on disk before, which is what makes a real before/after diff possible rather
+ * than only showing the new file.
+ */
+export interface SourceTransaction {
+  id: string
+  run_id: string
+  task_id: string | null
+  status: 'prepared' | 'committed' | 'rolled_back'
+  source_digest: string
+  files: {
+    path: string
+    sha256: string
+    original: {
+      existed: boolean
+      sha256?: string
+      content_base64?: string
+    }
+  }[]
+  created_at: string
+}
+
 export interface RunEvent {
   sequence: number
   run_id: string
@@ -470,6 +532,29 @@ export const v2Api = {
     (await request<{ execution: ExecutionStatus }>(
       `/v2/runs/${encodeURIComponent(runId)}/execution`,
     )).execution,
+
+  artifacts: async (runId: string): Promise<RunArtifact[]> =>
+    (await request<{ artifacts: RunArtifact[] }>(
+      `/v2/runs/${encodeURIComponent(runId)}/artifacts`,
+    )).artifacts,
+
+  artifact: async <T = JsonValue>(
+    runId: string,
+    digest: string,
+  ): Promise<ArtifactContent<T>> =>
+    request<ArtifactContent<T>>(
+      `/v2/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(digest)}`,
+    ),
+
+  tasks: async (runId: string): Promise<DurableTask[]> =>
+    (await request<{ tasks: DurableTask[] }>(
+      `/v2/runs/${encodeURIComponent(runId)}/tasks`,
+    )).tasks,
+
+  sourceTransactions: async (runId: string): Promise<SourceTransaction[]> =>
+    (await request<{ source_transactions: SourceTransaction[] }>(
+      `/v2/runs/${encodeURIComponent(runId)}/source-transactions`,
+    )).source_transactions,
 
   events: async (runId: string, after = 0): Promise<RunEvent[]> =>
     (await request<{ events: RunEvent[] }>(

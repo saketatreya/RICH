@@ -1,4 +1,6 @@
+import base64
 from datetime import datetime, timedelta, timezone
+import json
 import threading
 import time
 
@@ -335,3 +337,158 @@ def test_preview_api_rejects_client_selected_secret_handles(tmp_path):
 
     assert response.status == 400
     assert response.body["error"] == "ValueError"
+
+
+# --------------------------------------------------------------------------
+# Reading what the machine made. Without these the human can approve or veto
+# a build without ever seeing a line of what it produced.
+# --------------------------------------------------------------------------
+
+
+def _run_with_artifact(tmp_path, payload, *, role="generated-source", media_type=None):
+    store = RichStore(tmp_path)
+    store.create_project("Inspect", project_id="project.inspect")
+    run = store.create_run(
+        "project.inspect",
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        run_id="run.inspect",
+        status="ready",
+        budget={
+            "max_model_attempts": 1,
+            "max_input_tokens": 1,
+            "max_output_tokens": 1,
+            "max_cost_usd": "1",
+            "max_execution_seconds": 1,
+        },
+    )
+    task = store.create_task(
+        run["id"],
+        node_id="domain",
+        kind="implement",
+        task_id="run.inspect:implement:domain",
+        status="ready",
+    )
+    artifact = store.put_artifact(
+        payload,
+        media_type=media_type or "application/json",
+        metadata={"node_id": "domain"},
+    )
+    store.attach_artifact(
+        run["id"], artifact.digest, role=role, task_id=task["id"]
+    )
+    return V2Application(store), run["id"], artifact.digest
+
+
+def test_a_generated_source_artifact_can_be_read_back_by_digest(tmp_path):
+    bundle = {
+        "schema_version": "rich.generated-source/v1",
+        "summary": "Implemented the domain operations",
+        "files": [
+            {
+                "operation": "create",
+                "path": "packages/domain/src/operations.ts",
+                "size": 31,
+                "sha256": "a" * 64,
+                "content": "export const operations = {};\n",
+            }
+        ],
+    }
+    application, run_id, digest = _run_with_artifact(
+        tmp_path, json.dumps(bundle).encode()
+    )
+
+    response = application.handle(
+        "GET", f"/v2/runs/{run_id}/artifacts/{digest}"
+    )
+
+    assert response.status == 200
+    assert response.body["content"] == bundle
+    assert response.body["artifact"]["digest"] == digest
+    assert response.body["artifact"]["metadata"]["node_id"] == "domain"
+    assert response.body["artifact"]["attachments"] == [
+        {"role": "generated-source", "task_id": "run.inspect:implement:domain"}
+    ]
+
+
+def test_a_non_json_artifact_comes_back_as_bytes_not_a_decode_error(tmp_path):
+    application, run_id, digest = _run_with_artifact(
+        tmp_path, b"\xff\xfe not utf-8 at all", media_type="text/plain"
+    )
+
+    response = application.handle(
+        "GET", f"/v2/runs/{run_id}/artifacts/{digest}"
+    )
+
+    assert response.status == 200
+    assert "content" not in response.body
+    assert base64.b64decode(response.body["content_base64"]) == b"\xff\xfe not utf-8 at all"
+
+
+def test_an_artifact_is_readable_only_through_a_run_that_produced_it(tmp_path):
+    application, run_id, digest = _run_with_artifact(tmp_path, b'{"ok": true}')
+    other = application.store.create_run(
+        "project.inspect",
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        run_id="run.other",
+        status="ready",
+        budget={
+            "max_model_attempts": 1,
+            "max_input_tokens": 1,
+            "max_output_tokens": 1,
+            "max_cost_usd": "1",
+            "max_execution_seconds": 1,
+        },
+    )
+
+    response = application.handle(
+        "GET", f"/v2/runs/{other['id']}/artifacts/{digest}"
+    )
+
+    # The digest alone would be capability enough, but scoping to a run keeps
+    # this from becoming an open read oracle over the whole content store.
+    assert response.status == 404
+    assert application.handle(
+        "GET", f"/v2/runs/{run_id}/artifacts/{digest}"
+    ).status == 200
+
+
+def test_an_unknown_digest_is_not_found(tmp_path):
+    application, run_id, _ = _run_with_artifact(tmp_path, b'{"ok": true}')
+
+    response = application.handle(
+        "GET", f"/v2/runs/{run_id}/artifacts/{'b' * 64}"
+    )
+
+    assert response.status == 404
+
+
+def test_source_transactions_are_listable_so_a_diff_can_be_reconstructed(tmp_path):
+    store = RichStore(tmp_path)
+    store.create_project("Inspect", project_id="project.inspect")
+    run = store.create_run(
+        "project.inspect",
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        run_id="run.inspect",
+        status="ready",
+        budget={
+            "max_model_attempts": 1,
+            "max_input_tokens": 1,
+            "max_output_tokens": 1,
+            "max_cost_usd": "1",
+            "max_execution_seconds": 1,
+        },
+    )
+    application = V2Application(store)
+
+    response = application.handle(
+        "GET", f"/v2/runs/{run['id']}/source-transactions"
+    )
+
+    # The journal records each file's *original* bytes alongside the intended
+    # new digest, which is the only thing that makes a real before/after view
+    # possible rather than a "here is the new file" view.
+    assert response.status == 200
+    assert response.body["source_transactions"] == []

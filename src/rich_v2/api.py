@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +37,10 @@ from .target_packs.nextjs import DestinationNotEmptyError
 
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
+# A generated-source bundle is capped at 1 MiB by CodingLimits; verification
+# logs are capped at 256 KiB. This leaves room for both and still refuses to
+# stream something unbounded into a browser.
+MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +410,27 @@ class V2Application:
                 {"artifacts": self.store.list_run_artifacts(parts[2])},
             )
         if (
+            len(parts) == 5
+            and parts[:2] == ["v2", "runs"]
+            and parts[3] == "artifacts"
+            and method == "GET"
+        ):
+            return self._artifact_content(run_id=parts[2], digest=parts[4])
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v2", "runs"]
+            and parts[3] == "source-transactions"
+            and method == "GET"
+        ):
+            return ApiResponse(
+                200,
+                {
+                    "source_transactions": self.store.list_source_transactions(
+                        parts[2], status=_query_string(query, "status")
+                    )
+                },
+            )
+        if (
             len(parts) == 4
             and parts[:2] == ["v2", "runs"]
             and parts[3] == "scaffold"
@@ -510,6 +536,52 @@ class V2Application:
                 },
             )
         return ApiResponse(404, {"error": "NotFound", "message": "route not found"})
+
+    def _artifact_content(self, *, run_id: str, digest: str) -> ApiResponse:
+        """Serve one artifact's bytes, scoped to a run that produced it.
+
+        The digest alone would be a sufficient capability, but routing through
+        the run keeps this from becoming an open read oracle over the whole
+        content-addressed store: a caller can read what a run they named
+        produced, and nothing else.
+        """
+
+        attachments = [
+            attachment
+            for attachment in self.store.list_run_artifacts(run_id)
+            if attachment["digest"] == digest
+        ]
+        if not attachments:
+            raise NotFoundError(
+                f"artifact {digest!r} is not attached to run {run_id!r}"
+            )
+        stored = self.store.get_artifact(digest)
+        if stored.size > MAX_ARTIFACT_BYTES:
+            raise ValueError(
+                f"artifact {digest!r} is larger than the maximum served size"
+            )
+        raw = stored.path.read_bytes()
+        body: dict[str, Any] = {
+            "artifact": {
+                "digest": stored.digest,
+                "size": stored.size,
+                "media_type": stored.media_type,
+                "metadata": dict(stored.metadata),
+                "attachments": [
+                    {"role": item["role"], "task_id": item["task_id"]}
+                    for item in attachments
+                ],
+            }
+        }
+        # Most artifacts RICH stores are JSON documents -- generated source
+        # bundles, evidence, manifests -- so hand them back parsed rather than
+        # making every reader re-decode. Anything else is base64, because a
+        # verification log is bytes and may not be valid UTF-8.
+        try:
+            body["content"] = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            body["content_base64"] = base64.b64encode(raw).decode("ascii")
+        return ApiResponse(200, body)
 
     def _workspace_destination(self, value: str) -> Path:
         supplied = Path(value)
