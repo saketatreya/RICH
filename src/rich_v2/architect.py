@@ -34,6 +34,10 @@ from typing import Any, Mapping, Sequence
 
 from .budget import Usage
 from .models import (
+    MAX_ENUM_MEMBERS,
+    MAX_RECORD_FIELDS,
+    MAX_SAMPLE_SIZE,
+    MAX_VALUE_LENGTH,
     ArchitectureEdge,
     ArchitectureNode,
     ArchitectureSpecV2,
@@ -749,7 +753,12 @@ def architect_prompt(
         "- Operation names are lowerCamelCase and unique within a component.\n"
         "- Types are concrete. Bound every integer and every string and list "
         "length, because a domain with no bounds cannot be sampled and any "
-        "claim about it cannot be checked.\n"
+        "claim about it cannot be checked. The bounds themselves are bounded: "
+        f"a string or list length is at most {MAX_VALUE_LENGTH}, a record has "
+        f"at most {MAX_RECORD_FIELDS} fields, an enum at most "
+        f"{MAX_ENUM_MEMBERS} members, types nest at most "
+        f"{_VALUE_TYPE_DEPTH} deep, and a sample size is between 1 and "
+        f"{MAX_SAMPLE_SIZE}.\n"
         "- Every operation you constrain with a non-example obligation needs "
         "an 'example' obligation as well, and so does any operation you name "
         "as a predicate or guard. This is not a formality: the identity "

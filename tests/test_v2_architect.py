@@ -574,6 +574,27 @@ def test_the_prompt_states_the_rules_that_are_checked_mechanically():
     assert project.goal in user_prompt
 
 
+def test_the_prompt_states_the_limits_the_validator_will_enforce():
+    from rich_v2.models import (
+        MAX_ENUM_MEMBERS,
+        MAX_RECORD_FIELDS,
+        MAX_SAMPLE_SIZE,
+        MAX_VALUE_LENGTH,
+    )
+
+    system_prompt, _ = architect_prompt(_project(), target_pack=TARGET_PACK)
+
+    # Asking for bounded types without saying which bounds are legal cost a
+    # live run three attempts, every one rejected on a limit it was never told.
+    for limit in (
+        MAX_VALUE_LENGTH,
+        MAX_RECORD_FIELDS,
+        MAX_ENUM_MEMBERS,
+        MAX_SAMPLE_SIZE,
+    ):
+        assert str(limit) in system_prompt
+
+
 def test_a_repair_instruction_carries_the_rejection_verbatim():
     project = _project()
 

@@ -989,10 +989,13 @@ class ErrorContract:
         )
 
 
-_MAX_VALUE_TYPE_DEPTH = 4
-_MAX_RECORD_FIELDS = 24
-_MAX_ENUM_MEMBERS = 64
-_MAX_VALUE_LENGTH = 4096
+MAX_VALUE_TYPE_DEPTH = 4
+MAX_RECORD_FIELDS = 24
+MAX_ENUM_MEMBERS = 64
+# Bounds sampling, not expressiveness. 4 KiB refused to describe rendered
+# markup, which a UI operation genuinely returns; 64 KiB still keeps a sampled
+# draw cheap and keeps every domain finite.
+MAX_VALUE_LENGTH = 65_536
 # Above this, "how many values inhabit this type" stops being a useful
 # question: no gate enumerates a domain that large, and computing the exact
 # integer costs more than the answer is worth.
@@ -1100,9 +1103,9 @@ class ValueType:
             value = getattr(self, name)
             if value is not None:
                 bound = _non_negative_int(value, f"value_type.{name}")
-                if bound > _MAX_VALUE_LENGTH:
+                if bound > MAX_VALUE_LENGTH:
                     raise ModelValidationError(
-                        f"value_type.{name} cannot exceed {_MAX_VALUE_LENGTH}"
+                        f"value_type.{name} cannot exceed {MAX_VALUE_LENGTH}"
                     )
                 object.__setattr__(self, name, bound)
         if self.char_set is not None:
@@ -1148,14 +1151,14 @@ class ValueType:
             and self.min_length > self.max_length
         ):
             raise ModelValidationError("value_type.min_length cannot exceed max_length")
-        if kind is ValueTypeKind.ENUM and len(self.members) > _MAX_ENUM_MEMBERS:
+        if kind is ValueTypeKind.ENUM and len(self.members) > MAX_ENUM_MEMBERS:
             raise ModelValidationError(
-                f"value_type.members cannot exceed {_MAX_ENUM_MEMBERS} entries"
+                f"value_type.members cannot exceed {MAX_ENUM_MEMBERS} entries"
             )
         if kind is ValueTypeKind.RECORD:
-            if len(self.record_fields) > _MAX_RECORD_FIELDS:
+            if len(self.record_fields) > MAX_RECORD_FIELDS:
                 raise ModelValidationError(
-                    f"value_type.record_fields cannot exceed {_MAX_RECORD_FIELDS}"
+                    f"value_type.record_fields cannot exceed {MAX_RECORD_FIELDS}"
                 )
             names = [record_field.name for record_field in self.record_fields]
             if len(set(names)) != len(names):
@@ -1170,9 +1173,9 @@ class ValueType:
             # An optional optional has no distinct inhabitant in JSON, in
             # TypeScript, or in the sampler.  Reject the ambiguity outright.
             raise ModelValidationError("value_type 'optional' cannot nest an optional")
-        if self.depth > _MAX_VALUE_TYPE_DEPTH:
+        if self.depth > MAX_VALUE_TYPE_DEPTH:
             raise ModelValidationError(
-                f"value type nesting cannot exceed depth {_MAX_VALUE_TYPE_DEPTH}"
+                f"value type nesting cannot exceed depth {MAX_VALUE_TYPE_DEPTH}"
             )
 
     @property
@@ -1262,48 +1265,104 @@ class ValueType:
     def accepts(self, value: Any) -> bool:
         """Whether a JSON value inhabits this type."""
 
+        return self.explain(value) is None
+
+    def explain(self, value: Any, path: str = "value") -> str | None:
+        """Say precisely why a value does not inhabit this type, or ``None``.
+
+        ``accepts`` answers yes or no, which is enough to reject and useless
+        for repair. A rejection is read by a person correcting a contract and
+        by a model retrying against the validator's own message, and neither
+        can fix "does not inhabit the subject input type". Both can fix
+        "value.dueDate is 11 characters, over the maximum of 8".
+        """
+
         kind = self.kind
         if kind is ValueTypeKind.BOOLEAN:
-            return isinstance(value, bool)
+            if not isinstance(value, bool):
+                return f"{path} must be a boolean, got {_type_name(value)}"
+            return None
         if kind is ValueTypeKind.INTEGER:
             if isinstance(value, bool) or not isinstance(value, int):
-                return False
+                return f"{path} must be an integer, got {_type_name(value)}"
             if self.minimum is not None and value < self.minimum:
-                return False
-            return self.maximum is None or value <= self.maximum
+                return f"{path} is {value}, below the minimum of {self.minimum}"
+            if self.maximum is not None and value > self.maximum:
+                return f"{path} is {value}, above the maximum of {self.maximum}"
+            return None
         if kind is ValueTypeKind.STRING:
             if not isinstance(value, str):
-                return False
+                return f"{path} must be a string, got {_type_name(value)}"
             if self.min_length is not None and len(value) < self.min_length:
-                return False
+                return (
+                    f"{path} is {len(value)} characters, under the minimum of "
+                    f"{self.min_length}"
+                )
             if self.max_length is not None and len(value) > self.max_length:
-                return False
-            if self.char_set is None:
-                return True
-            return set(value) <= set(self.char_set.alphabet)
+                return (
+                    f"{path} is {len(value)} characters, over the maximum of "
+                    f"{self.max_length}"
+                )
+            if self.char_set is not None:
+                stray = sorted(set(value) - set(self.char_set.alphabet))
+                if stray:
+                    return (
+                        f"{path} contains characters outside the "
+                        f"{self.char_set.value!r} character set: "
+                        f"{''.join(stray)!r}"
+                    )
+            return None
         if kind is ValueTypeKind.ENUM:
-            return isinstance(value, str) and value in self.members
+            if not isinstance(value, str) or value not in self.members:
+                return (
+                    f"{path} must be one of {list(self.members)}, got "
+                    f"{value!r}"
+                )
+            return None
         if kind is ValueTypeKind.OPTIONAL:
             assert self.element is not None
-            return value is None or self.element.accepts(value)
+            if value is None:
+                return None
+            return self.element.explain(value, path)
         if kind is ValueTypeKind.LIST:
             assert self.element is not None
             if not isinstance(value, list):
-                return False
+                return f"{path} must be a list, got {_type_name(value)}"
             if self.min_length is not None and len(value) < self.min_length:
-                return False
+                return (
+                    f"{path} has {len(value)} items, under the minimum of "
+                    f"{self.min_length}"
+                )
             if self.max_length is not None and len(value) > self.max_length:
-                return False
-            return all(self.element.accepts(item) for item in value)
+                return (
+                    f"{path} has {len(value)} items, over the maximum of "
+                    f"{self.max_length}"
+                )
+            for index, item in enumerate(value):
+                reason = self.element.explain(item, f"{path}[{index}]")
+                if reason is not None:
+                    return reason
+            return None
         if not isinstance(value, Mapping):
-            return False
+            return f"{path} must be an object, got {_type_name(value)}"
         expected = {record_field.name for record_field in self.record_fields}
-        if set(value.keys()) != expected:
-            return False
-        return all(
-            record_field.value_type.accepts(value[record_field.name])
-            for record_field in self.record_fields
-        )
+        present = set(value.keys())
+        missing = sorted(expected - present)
+        if missing:
+            return f"{path} is missing required fields: {missing}"
+        unexpected = sorted(present - expected)
+        if unexpected:
+            return (
+                f"{path} has fields the type does not declare: {unexpected}; "
+                f"declared fields are {sorted(expected)}"
+            )
+        for record_field in self.record_fields:
+            reason = record_field.value_type.explain(
+                value[record_field.name], f"{path}.{record_field.name}"
+            )
+            if reason is not None:
+                return reason
+        return None
 
     def json_schema(self) -> dict[str, Any]:
         """Project this type onto JSON Schema.
@@ -1403,12 +1462,25 @@ class ValueType:
         )
 
 
+def _type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    return {
+        bool: "a boolean",
+        int: "an integer",
+        float: "a number",
+        str: "a string",
+        list: "a list",
+        dict: "an object",
+    }.get(type(value), type(value).__name__)
+
+
 def _bounded(total: int) -> int | None:
     return None if total > _MAX_CARDINALITY_BOUND else total
 
 
 def value_type_request_schema(
-    max_depth: int = _MAX_VALUE_TYPE_DEPTH,
+    max_depth: int = MAX_VALUE_TYPE_DEPTH,
 ) -> dict[str, Any]:
     """A JSON Schema for *asking a model* to describe a type.
 
@@ -1426,9 +1498,9 @@ def value_type_request_schema(
 
     if not isinstance(max_depth, int) or isinstance(max_depth, bool):
         raise ModelValidationError("max_depth must be an integer")
-    if not 1 <= max_depth <= _MAX_VALUE_TYPE_DEPTH:
+    if not 1 <= max_depth <= MAX_VALUE_TYPE_DEPTH:
         raise ModelValidationError(
-            f"max_depth must be between 1 and {_MAX_VALUE_TYPE_DEPTH}"
+            f"max_depth must be between 1 and {MAX_VALUE_TYPE_DEPTH}"
         )
     return _value_type_level(max_depth)
 
@@ -1655,7 +1727,7 @@ class ObligationExample:
         return cls(argument=doc["argument"], result=doc["result"])
 
 
-_MAX_SAMPLE_SIZE = 4096
+MAX_SAMPLE_SIZE = 4096
 # Which operand slots each relation may carry, and which it must.
 _OBLIGATION_SLOTS: dict[ObligationRelation, frozenset[str]] = {
     ObligationRelation.EXAMPLE: frozenset({"example"}),
@@ -1774,9 +1846,9 @@ class ProofObligation:
                     "sample-tier obligations require a sample size"
                 )
             size = _non_negative_int(self.sample_size, "obligation.sample_size")
-            if not 1 <= size <= _MAX_SAMPLE_SIZE:
+            if not 1 <= size <= MAX_SAMPLE_SIZE:
                 raise ModelValidationError(
-                    f"obligation.sample_size must be between 1 and {_MAX_SAMPLE_SIZE}"
+                    f"obligation.sample_size must be between 1 and {MAX_SAMPLE_SIZE}"
                 )
             object.__setattr__(self, "sample_size", size)
         elif self.sample_size is not None:
@@ -2090,18 +2162,22 @@ class ContractV2:
         if relation is ObligationRelation.EXAMPLE:
             example = obligation.example
             assert example is not None
-            if subject.input_type is not None and not subject.input_type.accepts(
-                example.argument
+            for declared, value, side in (
+                (subject.input_type, example.argument, "argument"),
+                (subject.output_type, example.result, "result"),
             ):
-                raise ModelValidationError(
-                    f"{label} example argument does not inhabit the subject input type"
-                )
-            if subject.output_type is not None and not subject.output_type.accepts(
-                example.result
-            ):
-                raise ModelValidationError(
-                    f"{label} example result does not inhabit the subject output type"
-                )
+                if declared is None:
+                    continue
+                # Say why, not just that. This message is read by a person
+                # correcting a contract and by a model retrying against it,
+                # and neither can act on "does not inhabit".
+                reason = declared.explain(value, side)
+                if reason is not None:
+                    raise ModelValidationError(
+                        f"{label} example {side} does not inhabit the subject "
+                        f"{'input' if side == 'argument' else 'output'} type: "
+                        f"{reason}"
+                    )
             return
 
         if relation is ObligationRelation.TOTAL:

@@ -683,6 +683,75 @@ def test_idempotence_and_preservation_require_an_endomorphism():
         _contract((render,), (obligation, _example("op.render", 1, "b")))
 
 
+@pytest.mark.parametrize(
+    ("value_type", "value", "fragment"),
+    [
+        (BOOLEAN, 1, "must be a boolean, got an integer"),
+        (SMALL_INT, "3", "must be an integer, got a string"),
+        (SMALL_INT, 42, "is 42, above the maximum of 9"),
+        (SMALL_INT, -1, "is -1, below the minimum of 0"),
+        (SHORT_TEXT, "waaaaaaaaay too long", "characters, over the maximum of 8"),
+        (SHORT_TEXT, "he llo!", "outside the 'ascii_letters' character set"),
+        (INT_LIST, [1, 2, 3, 4, 5], "has 5 items, over the maximum of 4"),
+        (INT_LIST, [1, 42], "[1] is 42, above the maximum"),
+        (INT_LIST, "nope", "must be a list, got a string"),
+        (
+            ValueType(kind=ValueTypeKind.ENUM, members=("a", "b")),
+            "z",
+            "must be one of ['a', 'b'], got 'z'",
+        ),
+        (
+            ValueType(
+                kind=ValueTypeKind.RECORD,
+                record_fields=(
+                    RecordField("ok", BOOLEAN),
+                    RecordField("n", SMALL_INT),
+                ),
+            ),
+            {"ok": True},
+            "missing required fields: ['n']",
+        ),
+        (
+            ValueType(
+                kind=ValueTypeKind.RECORD, record_fields=(RecordField("ok", BOOLEAN),)
+            ),
+            {"ok": True, "extra": 1},
+            "fields the type does not declare: ['extra']",
+        ),
+        (
+            ValueType(
+                kind=ValueTypeKind.RECORD, record_fields=(RecordField("ok", BOOLEAN),)
+            ),
+            {"ok": "yes"},
+            "value.ok must be a boolean",
+        ),
+    ],
+)
+def test_a_rejection_says_why_and_where_not_merely_that(value_type, value, fragment):
+    # accepts() answers yes or no, which is enough to reject and useless for
+    # repair. This message is read by a person correcting a contract and by a
+    # model retrying against the validator, and neither can act on "does not
+    # inhabit the declared type".
+    reason = value_type.explain(value)
+
+    assert reason is not None
+    assert fragment in reason
+    assert value_type.accepts(value) is False
+
+
+def test_an_accepted_value_explains_nothing():
+    assert INT_LIST.explain([1, 2]) is None
+    assert SHORT_TEXT.explain("abc") is None
+    assert ValueType(kind=ValueTypeKind.OPTIONAL, element=SMALL_INT).explain(None) is None
+
+
+def test_the_obligation_rejection_carries_that_reason_through():
+    operation = _operation("op.clamp", input_type=SMALL_INT, output_type=SMALL_INT)
+
+    with pytest.raises(ModelValidationError, match="above the maximum of 9"):
+        _contract((operation,), (_example("op.clamp", 42, 9),))
+
+
 def test_example_values_must_inhabit_the_declared_types():
     operation = _operation("op.clamp", input_type=SMALL_INT, output_type=SMALL_INT)
 
