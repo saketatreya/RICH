@@ -551,7 +551,7 @@ class V2Application:
             for attachment in self.store.list_run_artifacts(run_id)
             if attachment["digest"] == digest
         ]
-        if not attachments:
+        if not attachments and not self._run_journals(run_id, digest):
             raise NotFoundError(
                 f"artifact {digest!r} is not attached to run {run_id!r}"
             )
@@ -582,6 +582,22 @@ class V2Application:
         except (UnicodeDecodeError, json.JSONDecodeError):
             body["content_base64"] = base64.b64encode(raw).decode("ascii")
         return ApiResponse(200, body)
+
+    def _run_journals(self, run_id: str, digest: str) -> bool:
+        """Whether a run's source transactions reference this digest.
+
+        A write-ahead journal holds each file's bytes as they were *before* the
+        write, which is the only thing that turns "here is the new file" into a
+        real diff. It is recorded on the transaction rather than attached to
+        the run, so run-scoping alone would hide it. Authorizing what a run
+        journaled keeps the scope honest without hiding the interesting half.
+        """
+
+        return any(
+            transaction.get(field) == digest
+            for transaction in self.store.list_source_transactions(run_id)
+            for field in ("journal_digest", "generated_digest")
+        )
 
     def _workspace_destination(self, value: str) -> Path:
         supplied = Path(value)

@@ -202,26 +202,47 @@ export interface ArtifactContent<T = JsonValue> {
 }
 
 /**
- * The write-ahead journal for one task's source change. `original` is what was
- * on disk before, which is what makes a real before/after diff possible rather
- * than only showing the new file.
+ * One task's source change, as the write-ahead record describes it. The record
+ * itself carries digests, not bytes: `journal_digest` addresses the journal
+ * artifact, which is where each file's *original* content lives.
  */
 export interface SourceTransaction {
   id: string
   run_id: string
   task_id: string | null
+  attempt: number
   status: 'prepared' | 'committed' | 'rolled_back'
+  resolution: string | null
+  journal_digest: string
+  generated_digest: string
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * The journal artifact. `original` is what was on disk before the write, which
+ * is what makes a real before/after diff possible rather than only showing the
+ * new file.
+ */
+export interface SourceJournal {
+  schema_version: string
+  run_id: string
+  task_id: string
+  attempt: number
   source_digest: string
+  generated_artifact_digest: string
   files: {
     path: string
-    sha256: string
+    operation: string
+    intended: { sha256: string; size: number }
     original: {
       existed: boolean
+      mode?: number
+      size?: number
       sha256?: string
       content_base64?: string
     }
   }[]
-  created_at: string
 }
 
 export interface RunEvent {

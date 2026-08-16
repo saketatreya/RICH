@@ -492,3 +492,89 @@ def test_source_transactions_are_listable_so_a_diff_can_be_reconstructed(tmp_pat
     # possible rather than a "here is the new file" view.
     assert response.status == 200
     assert response.body["source_transactions"] == []
+
+
+def test_a_journal_is_readable_through_the_run_that_wrote_it(tmp_path):
+    """The before-bytes live on the transaction, not on the run.
+
+    A write-ahead journal records each file's content as it was *before* the
+    write, and it is referenced by digest on the source transaction rather than
+    attached to the run. Scoping reads to attachments alone would authorize the
+    new file and hide the old one, which is the half that makes a diff a diff.
+    """
+
+    store = RichStore(tmp_path)
+    store.create_project("Journal", project_id="project.journal")
+    run = store.create_run(
+        "project.journal",
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        run_id="run.journal",
+        status="ready",
+        budget={
+            "max_model_attempts": 1,
+            "max_input_tokens": 1,
+            "max_output_tokens": 1,
+            "max_cost_usd": "1",
+            "max_execution_seconds": 1,
+        },
+    )
+    task = store.create_task(
+        run["id"],
+        node_id="domain",
+        kind="implement",
+        task_id="run.journal:implement:domain",
+        status="ready",
+    )
+    lease = store.claim_run_execution(run["id"])
+    store.set_task_status(
+        task["id"], "running", expected_status="ready", increment_attempt=True
+    )
+    journal = {
+        "schema_version": "rich.source-transaction/v1",
+        "files": [
+            {
+                "path": "packages/domain/src/index.ts",
+                "operation": "replace",
+                "original": {
+                    "existed": True,
+                    "content_base64": base64.b64encode(b"export const a = 1;\n").decode(),
+                },
+            }
+        ],
+    }
+    journal_artifact = store.put_artifact(
+        json.dumps(journal).encode(), media_type="application/json"
+    )
+    generated_artifact = store.put_artifact(
+        json.dumps({"files": []}).encode(), media_type="application/json"
+    )
+    store.prepare_source_transaction(
+        run["id"],
+        task_id=task["id"],
+        attempt=1,
+        owner_token=lease.owner_token,
+        journal_digest=journal_artifact.digest,
+        generated_digest=generated_artifact.digest,
+    )
+    application = V2Application(store)
+
+    listed = application.handle(
+        "GET", f"/v2/runs/{run['id']}/source-transactions"
+    )
+    fetched = application.handle(
+        "GET", f"/v2/runs/{run['id']}/artifacts/{journal_artifact.digest}"
+    )
+
+    assert listed.status == 200
+    assert listed.body["source_transactions"][0]["journal_digest"] == (
+        journal_artifact.digest
+    )
+    # Never attached to the run, and still readable through it.
+    assert journal_artifact.digest not in {
+        attachment["digest"]
+        for attachment in store.list_run_artifacts(run["id"])
+    }
+    assert fetched.status == 200
+    original = fetched.body["content"]["files"][0]["original"]
+    assert base64.b64decode(original["content_base64"]) == b"export const a = 1;\n"

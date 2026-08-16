@@ -14,6 +14,7 @@ import {
   V2ApiError,
   v2Api,
 } from '../lib/v2Api'
+import V2Inspector from './V2Inspector'
 
 type RequirementDraft = {
   id: string
@@ -1158,6 +1159,10 @@ export default function V2ControlPlane() {
               ))}
             </div>
           </section>
+        )}
+
+        {prepared && (
+          <V2Inspector runId={prepared.run.id} events={events} />
         )}
 
         <section className="v2-authority">
