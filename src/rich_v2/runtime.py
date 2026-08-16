@@ -1,6 +1,6 @@
 """Trusted production construction for one approved RICH v2 build run.
 
-This module is intentionally configuration-light: one exact OpenAI model, one
+This module is intentionally configuration-light: one exact Anthropic model, one
 explicit price table, one pinned local Node/pnpm toolchain, and no fallback to
 ambient package managers. Credentials remain lazy and are resolved only when
 the provider is about to cross the network boundary.
@@ -14,18 +14,18 @@ from decimal import Decimal
 import os
 from typing import Any
 
+from .anthropic_provider import (
+    AnthropicMessagesProvider,
+    AnthropicTokenRates,
+    AnthropicTransport,
+    ApiKeySource,
+)
 from .budget import BudgetLedger, RunBudget, Usage
 from .executor import (
     BubblewrapExecutor,
     TrustedNodePnpmRuntime,
     WorkspaceBootstrapper,
     trusted_node_pnpm_runtime,
-)
-from .openai_provider import (
-    ApiKeySource,
-    OpenAIResponsesProvider,
-    OpenAITokenRates,
-    OpenAITransport,
 )
 from .providers import (
     EventSink,
@@ -38,23 +38,23 @@ from .providers import (
 )
 
 
-DEFAULT_PROVIDER = "openai"
-DEFAULT_MODEL = "gpt-5.6-terra"
-DEFAULT_MODEL_RATES = OpenAITokenRates(
-    input=Decimal("2.50"),
-    cached_input=Decimal("0.25"),
-    output=Decimal("15.00"),
+DEFAULT_PROVIDER = "anthropic"
+DEFAULT_MODEL = "claude-sonnet-5"
+# The published Claude Sonnet 5 price table. Every input classification is
+# listed separately because the Messages API reports the four counts
+# separately, so the adapter charges the exact reported mix rather than
+# assuming one classification for the whole prompt.
+DEFAULT_MODEL_RATES = AnthropicTokenRates(
+    input=Decimal("2.00"),
+    cache_write_5m=Decimal("2.50"),
+    cache_write_1h=Decimal("4.00"),
+    cache_read=Decimal("0.20"),
+    output=Decimal("10.00"),
 )
-DEFAULT_CACHE_WRITE_INPUT_RATE = Decimal("3.125")
-DEFAULT_BILLING_RATES = OpenAITokenRates(
-    # GPT-5.6 cache writes cost 1.25x ordinary input. The current provider
-    # exposes cached reads but does not retain a separate cache-write counter,
-    # so charge every non-cached input token at the costlier classification.
-    input=DEFAULT_CACHE_WRITE_INPUT_RATE,
-    cached_input=DEFAULT_MODEL_RATES.cached_input,
-    output=DEFAULT_MODEL_RATES.output,
-)
-MAX_BASE_RATE_INPUT_TOKENS = 272_000
+# Claude Sonnet 5 prices its full context window at one flat rate, so this is a
+# capacity bound rather than a pricing tier: a reservation larger than the
+# window can never be satisfied, and refusing it costs nothing.
+MAX_INPUT_TOKEN_RESERVATION = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +89,7 @@ class DefaultRunRuntime:
     budget: RunBudget
     initial_usage: Usage
     ledger: BudgetLedger
-    openai_provider: OpenAIResponsesProvider
+    anthropic_provider: AnthropicMessagesProvider
     gateway: ModelGateway
     toolchain: TrustedNodePnpmRuntime
     bootstrapper: WorkspaceBootstrapper
@@ -111,7 +111,7 @@ class DefaultRunRuntimeFactory:
 
     event_sink: EventSink
     api_key_source: ApiKeySource | None = None
-    transport: OpenAITransport | None = None
+    transport: AnthropicTransport | None = None
     toolchain_factory: Callable[[], TrustedNodePnpmRuntime] = (
         trusted_node_pnpm_runtime
     )
@@ -143,13 +143,13 @@ class DefaultRunRuntimeFactory:
             approved_budget,
             initial_usage=initial_usage,
         )
-        provider = OpenAIResponsesProvider(
+        provider = AnthropicMessagesProvider(
             (
-                _environment_openai_api_key
+                _environment_anthropic_api_key
                 if self.api_key_source is None
                 else self.api_key_source
             ),
-            rates={DEFAULT_MODEL: DEFAULT_BILLING_RATES},
+            rates={DEFAULT_MODEL: DEFAULT_MODEL_RATES},
             transport=self.transport,
         )
         exact_provider = _ExactModelProvider(provider)
@@ -167,7 +167,7 @@ class DefaultRunRuntimeFactory:
             budget=approved_budget,
             initial_usage=initial_usage,
             ledger=ledger,
-            openai_provider=provider,
+            anthropic_provider=provider,
             gateway=gateway,
             toolchain=toolchain,
             bootstrapper=WorkspaceBootstrapper(toolchain),
@@ -181,7 +181,7 @@ def default_run_runtime(
     event_history: Iterable[Mapping[str, Any]] = (),
     event_sink: EventSink,
     api_key_source: ApiKeySource | None = None,
-    transport: OpenAITransport | None = None,
+    transport: AnthropicTransport | None = None,
     toolchain_factory: Callable[[], TrustedNodePnpmRuntime] = (
         trusted_node_pnpm_runtime
     ),
@@ -196,10 +196,11 @@ def default_run_runtime(
     )(budget, event_history=event_history)
 
 
-def _environment_openai_api_key() -> str:
-    # OpenAIResponsesProvider performs validation and redacts all resolver errors.
-    # Returning an empty string keeps construction lazy and fails before HTTP.
-    return os.environ.get("OPENAI_API_KEY", "")
+def _environment_anthropic_api_key() -> str:
+    # AnthropicMessagesProvider performs validation and redacts all resolver
+    # errors. Returning an empty string keeps construction lazy and fails
+    # before HTTP.
+    return os.environ.get("ANTHROPIC_API_KEY", "")
 
 
 class _ExactModelProvider(ModelProvider):
@@ -207,7 +208,7 @@ class _ExactModelProvider(ModelProvider):
 
     name = DEFAULT_PROVIDER
 
-    def __init__(self, delegate: OpenAIResponsesProvider):
+    def __init__(self, delegate: AnthropicMessagesProvider):
         self._delegate = delegate
 
     def generate(self, request: ModelRequest) -> ModelResponse:
@@ -217,11 +218,11 @@ class _ExactModelProvider(ModelProvider):
                 retryable=False,
                 request_was_sent=False,
             )
-        if request.max_input_tokens > MAX_BASE_RATE_INPUT_TOKENS:
-            # The published model contract applies a higher price tier above this
-            # boundary. Refuse instead of using a base-rate reservation.
+        if request.max_input_tokens > MAX_INPUT_TOKEN_RESERVATION:
+            # The reservation exceeds the model's context window, so no attempt
+            # against it can succeed. Refuse before reserving budget for it.
             raise ProviderFailure(
-                "default runtime input reservation exceeds its priced tier",
+                "default runtime input reservation exceeds the model context window",
                 retryable=False,
                 request_was_sent=False,
             )

@@ -25,11 +25,10 @@ from rich_v2.providers import (
     recover_model_usage,
 )
 from rich_v2.runtime import (
-    DEFAULT_BILLING_RATES,
-    DEFAULT_CACHE_WRITE_INPUT_RATE,
     DEFAULT_MODEL,
     DEFAULT_MODEL_RATES,
     DEFAULT_PROVIDER,
+    MAX_INPUT_TOKEN_RESERVATION,
     default_run_runtime,
 )
 
@@ -484,7 +483,7 @@ class _NoNetworkTransport:
 
 
 def test_default_runtime_is_lazy_exact_priced_and_restart_aware(monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     transport = _NoNetworkTransport()
     outstanding = {
         "event_type": "model.attempt.started",
@@ -508,27 +507,25 @@ def test_default_runtime_is_lazy_exact_priced_and_restart_aware(monkeypatch):
         },
     }
     runtime = default_run_runtime(
-        _budget_mapping(max_input_tokens=400_000),
+        _budget_mapping(max_input_tokens=MAX_INPUT_TOKEN_RESERVATION + 100_000),
         event_history=(outstanding,),
         event_sink=lambda _event, _payload: None,
         transport=transport,
         toolchain_factory=_toolchain,
     )
 
-    assert runtime.model == "gpt-5.6-terra"
-    assert DEFAULT_MODEL_RATES.input == Decimal("2.50")
-    assert DEFAULT_MODEL_RATES.cached_input == Decimal("0.25")
-    assert DEFAULT_MODEL_RATES.output == Decimal("15.00")
-    assert DEFAULT_CACHE_WRITE_INPUT_RATE == Decimal("3.125")
-    assert DEFAULT_BILLING_RATES.input == Decimal("3.125")
+    assert runtime.model == "claude-sonnet-5"
+    assert DEFAULT_MODEL_RATES.input == Decimal("2.00")
+    assert DEFAULT_MODEL_RATES.cache_write_5m == Decimal("2.50")
+    assert DEFAULT_MODEL_RATES.cache_write_1h == Decimal("4.00")
+    assert DEFAULT_MODEL_RATES.cache_read == Decimal("0.20")
+    assert DEFAULT_MODEL_RATES.output == Decimal("10.00")
+    assert DEFAULT_MODEL_RATES.costliest_input == Decimal("4.00")
     assert DEFAULT_LIMITS.max_cost_usd == (
         Decimal(DEFAULT_LIMITS.max_input_tokens)
-        * max(
-            DEFAULT_BILLING_RATES.input,
-            DEFAULT_BILLING_RATES.cached_input,
-        )
+        * DEFAULT_MODEL_RATES.costliest_input
         + Decimal(DEFAULT_LIMITS.max_output_tokens)
-        * DEFAULT_BILLING_RATES.output
+        * DEFAULT_MODEL_RATES.output
     ) / Decimal(1_000_000)
     assert runtime.ledger.usage == Usage(
         model_attempts=1,
@@ -576,19 +573,19 @@ def test_default_runtime_is_lazy_exact_priced_and_restart_aware(monkeypatch):
             _request(
                 correlation_id="wrong-model",
                 provider=DEFAULT_PROVIDER,
-                model="gpt-5.6-sol",
+                model="claude-opus-5",
             )
         )
     assert wrong_model.value.request_was_sent is False
     assert transport.calls == []
 
-    with pytest.raises(ProviderFailure, match="priced tier") as oversized:
+    with pytest.raises(ProviderFailure, match="context window") as oversized:
         runtime.gateway.generate(
             _request(
                 correlation_id="oversized-input",
                 provider=DEFAULT_PROVIDER,
                 model=DEFAULT_MODEL,
-                max_input_tokens=272_001,
+                max_input_tokens=MAX_INPUT_TOKEN_RESERVATION + 1,
             )
         )
     assert oversized.value.request_was_sent is False

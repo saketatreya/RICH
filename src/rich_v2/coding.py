@@ -73,8 +73,8 @@ class CodingLimits:
     max_input_tokens: int = 32_000
     max_output_tokens: int = 8_000
     # Exact worst-case reservation for the default 32k/8k token request at the
-    # pinned runtime's conservative cache-write and output rates.
-    max_cost_usd: Decimal = Decimal("0.22")
+    # pinned runtime's costliest input classification and its output rate.
+    max_cost_usd: Decimal = Decimal("0.208")
     timeout_seconds: float = 120
 
     def __post_init__(self) -> None:

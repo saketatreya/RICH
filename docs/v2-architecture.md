@@ -137,8 +137,8 @@ The budget must contain exactly:
 ```
 
 Money is a decimal string, never a binary float. The default coding attempt reserves
-32,000 input tokens, 8,000 output tokens, $0.22, and 120 seconds. Prompt content is
-limited to 24,000 bytes; the OpenAI adapter then counts the complete canonical request
+32,000 input tokens, 8,000 output tokens, $0.208, and 120 seconds. Prompt content is
+limited to 24,000 bytes; the Anthropic adapter then counts the complete canonical request
 envelope, response schema, and framing allowance before any HTTP request. Before a
 provider call, the gateway durably records and reserves the maximum attempt usage. It
 then settles actual usage. A provider-reported overage is recorded exactly and blocks
@@ -146,10 +146,23 @@ further work rather than being clipped to the reservation. On restart, a started
 without a settlement is conservatively charged at its reservation, so a crash cannot
 create free retries.
 
-The trusted default accepts only `openai/gpt-5.6-terra`. Pricing is explicit in code,
-inputs above the priced base tier are refused, credentials are resolved only at the
-network boundary, and there is no provider/model fallback. The model choice follows the
-current official [OpenAI model contract](https://developers.openai.com/api/docs/models/gpt-5.6-terra).
+The trusted default accepts only `anthropic/claude-sonnet-5`. Pricing is explicit in
+code and lists all four input classifications separately — base input, 5-minute cache
+write, 1-hour cache write, and cache read — so an attempt is charged the exact mix the
+provider reports; when the cache-write breakdown is absent or does not reconcile, every
+cache-write token is charged at the costlier 1-hour rate. Reservations above the model's
+context window are refused, credentials are resolved only at the network boundary, and
+there is no provider/model fallback. The model choice follows the current official
+[Claude model pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+
+`max_tokens` on the Messages API bounds thinking and response text together, so an output
+reservation that is tight for the response alone truncates. That surfaces as a
+non-retryable "response was incomplete (max_tokens)" failure, never as a silently short
+file. `output_config.effort` is always sent explicitly so the request envelope is fully
+determined by RICH rather than by a server-side default.
+
+`openai_provider.py` remains in the tree but is wired to nothing. It is the second
+implementation that keeps the `ModelProvider` seam honest, not a fallback path.
 
 ### 5. One fenced owner mutates a run
 
@@ -304,7 +317,7 @@ artifact bytes.
 - Python 3.10+;
 - exact Node 22.22.3;
 - exact pnpm 10.34.5 present in the local Corepack cache;
-- an `OPENAI_API_KEY` for model-backed execution.
+- an `ANTHROPIC_API_KEY` for model-backed execution.
 
 `rich-v2 doctor` checks coarse host availability. Runtime construction performs the exact
 Node/pnpm identity checks and fails closed on drift.

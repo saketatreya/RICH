@@ -216,7 +216,7 @@ def test_default_prompt_and_cost_reservations_are_internally_coherent():
     assert limits.max_prompt_bytes == 24_000
     assert limits.max_input_tokens == 32_000
     assert limits.max_output_tokens == 8_000
-    assert limits.max_cost_usd == Decimal("0.22")
+    assert limits.max_cost_usd == Decimal("0.208")
     with pytest.raises(ValueError, match="cannot exceed max_input_tokens"):
         CodingLimits(max_prompt_bytes=16_001, max_input_tokens=16_000)
 
