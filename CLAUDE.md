@@ -7,7 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 python -m pip install -e '.[test]'   # install (editable) with test deps
 
-# Offline suite — this is what CI runs; it never calls a model or provider
+# Offline suite — this is what CI runs; it never calls a model or provider.
+# Needs the `bwrap` binary on PATH: the sandbox-argv tests resolve it while
+# building a command (they never execute it), so a host without Bubblewrap
+# installed fails 12 tests in tests/test_v2_executor.py.
 ruff check .
 python -m pytest
 python -m pytest tests/test_v2_store.py                    # one file
