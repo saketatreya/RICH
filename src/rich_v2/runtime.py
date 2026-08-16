@@ -14,6 +14,7 @@ from decimal import Decimal
 import os
 from typing import Any
 
+from .architect import ModelArchitect
 from .anthropic_provider import (
     AnthropicMessagesProvider,
     AnthropicTokenRates,
@@ -285,3 +286,68 @@ class _ExactModelProvider(ModelProvider):
                 request_was_sent=False,
             )
         return self._delegate.generate(request)
+
+
+# An architecture proposal happens before any run exists, so it cannot draw on
+# a run budget. This is its own ceiling, per proposal.
+ARCHITECT_MAX_COST_USD = Decimal("2.00")
+
+
+def default_architect(
+    *,
+    route: str = CLAUDE_CODE_ROUTE,
+    event_sink: EventSink | None = None,
+    max_cost_usd: Decimal = ARCHITECT_MAX_COST_USD,
+    provider_factory: Callable[[], Any] | None = None,
+) -> ModelArchitect | None:
+    """Build the architect a surface should offer, or ``None`` if it cannot.
+
+    Returning ``None`` rather than raising is deliberate: a Canvas with no
+    Claude Code login should still start and still plan, deterministically,
+    and say which one answered. An architect that fails at import time would
+    take the whole control plane down with it.
+    """
+
+    if route not in MODEL_ROUTES:
+        raise ValueError(f"route must be one of {sorted(MODEL_ROUTES)}")
+    try:
+        provider = (
+            provider_factory()
+            if provider_factory is not None
+            else (
+                ClaudeCodeCliProvider()
+                if route == CLAUDE_CODE_ROUTE
+                else AnthropicMessagesProvider(
+                    _environment_anthropic_api_key,
+                    rates={DEFAULT_MODEL: DEFAULT_MODEL_RATES},
+                )
+            )
+        )
+    except Exception:
+        return None
+    sink = event_sink or (lambda _kind, _payload: None)
+
+    def gateway_factory() -> ModelGateway:
+        # A fresh ledger per proposal: the ceiling bounds one design attempt,
+        # and a human clicking Draft again should not be refused because an
+        # earlier proposal already spent the process's whole allowance.
+        return ModelGateway(
+            [_ExactModelProvider(provider, MODEL_ROUTES[route])],
+            BudgetLedger(
+                RunBudget(
+                    max_model_attempts=4,
+                    max_input_tokens=400_000,
+                    max_output_tokens=200_000,
+                    max_cost_usd=max_cost_usd,
+                    max_execution_seconds=3_600,
+                )
+            ),
+            event_sink=sink,
+        )
+
+    return ModelArchitect(
+        gateway_factory=gateway_factory,
+        provider=MODEL_ROUTES[route],
+        model=DEFAULT_MODEL,
+        max_cost_usd=max_cost_usd,
+    )

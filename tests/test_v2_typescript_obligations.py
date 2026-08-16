@@ -440,6 +440,15 @@ def _draw(node, tmp_path, cases):
         ("optional", ValueType(kind=ValueTypeKind.OPTIONAL, element=WORD)),
         ("record", RECORD),
         (
+            "slug",
+            ValueType(
+                kind=ValueTypeKind.STRING,
+                min_length=1,
+                max_length=12,
+                char_set=CharSet.ASCII_SLUG,
+            ),
+        ),
+        (
             "unicode",
             ValueType(
                 kind=ValueTypeKind.STRING,

@@ -12,6 +12,7 @@ import threading
 from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
+from .budget import BudgetExceeded
 from .control_plane import (
     ApprovalRequired,
     ArchitectProposer,
@@ -677,6 +678,12 @@ def _optional_strings(body: Mapping[str, Any], key: str) -> tuple[str, ...]:
 
 
 def _error_response(exc: Exception) -> ApiResponse:
+    if isinstance(exc, BudgetExceeded):
+        # A refusal, not a fault: the request was well-formed and the ceiling
+        # said no. 500 would suggest RICH broke.
+        return ApiResponse(
+            429, {"error": "BudgetExceeded", "message": str(exc)}
+        )
     if isinstance(exc, NotFoundError):
         status = 404
     elif isinstance(exc, ApprovalRequired):

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   type AcceptanceScenario,
   type Approval,
+  type ArchitectureDraft,
   type ArchitectureSubmission,
   type ExecutionStatus,
   type Health,
@@ -14,6 +15,7 @@ import {
   V2ApiError,
   v2Api,
 } from '../lib/v2Api'
+import ArchitectureDraftReview from './ArchitectureDraftReview'
 import V2Inspector from './V2Inspector'
 
 type RequirementDraft = {
@@ -443,6 +445,8 @@ export default function V2ControlPlane() {
   const [architecture, setArchitecture] = useState<ArchitectureSubmission | null>(
     restored.architecture,
   )
+  const [architectureDraft, setArchitectureDraft] =
+    useState<ArchitectureDraft | null>(null)
   const [prepared, setPrepared] = useState<PreparedRun | null>(restored.prepared)
   const [scaffold, setScaffold] = useState<ScaffoldResult | null>(restored.scaffold)
   const [events, setEvents] = useState<RunEvent[]>([])
@@ -630,6 +634,47 @@ export default function V2ControlPlane() {
       setSpec(next)
       persist({ spec: next })
       setNotice(approved ? 'Product specification approved.' : 'Product specification rejected.')
+    })
+  }
+
+  const draftArchitecture = (repair?: string) => {
+    if (!project || !spec) return
+    runAction('draft-architecture', async () => {
+      const result = await v2Api.draftArchitecture(
+        project,
+        spec.revision.id,
+        spec.approval.id,
+        repair,
+      )
+      setArchitectureDraft(result)
+      setNotice(
+        result.source === 'model'
+          ? 'Architect proposed a decomposition. Nothing is recorded yet — review the change.'
+          : 'No architect configured; the deterministic planner proposed this. Nothing is recorded yet.',
+      )
+    })
+  }
+
+  const applyDraft = () => {
+    if (!project || !spec || !architectureDraft) return
+    runAction('apply-draft', async () => {
+      const result = await v2Api.reviseArchitecture(
+        project,
+        spec.revision.id,
+        spec.approval.id,
+        architectureDraft.architecture,
+        architectureDraft.decisions,
+        architectureDraft.risks,
+      )
+      const refreshed = await v2Api.getProject(project.id)
+      setProject(refreshed)
+      setArchitecture(result)
+      setArchitectureDraft(null)
+      setPrepared(null)
+      setScaffold(null)
+      setExecution(null)
+      persist({ project: refreshed, architecture: result, prepared: null, scaffold: null })
+      setNotice('Architecture recorded as a new revision. It needs its own approval.')
     })
   }
 
@@ -995,10 +1040,25 @@ export default function V2ControlPlane() {
                   <h2>Plan owned architecture boundaries</h2>
                   <p>The Next.js target pack will derive nodes, typed ports, dependencies, and requirement traces.</p>
                 </div>
-                <button className="primary" disabled={!!busy} onClick={proposeArchitecture}>
-                  {busy === 'propose-architecture' ? 'Planning…' : 'Propose architecture →'}
-                </button>
+                <div className="v2-draft-actions">
+                  <button className="primary" disabled={!!busy} onClick={() => draftArchitecture()}>
+                    {busy === 'draft-architecture' ? 'Designing…' : 'Draft with the architect →'}
+                  </button>
+                  <button disabled={!!busy} onClick={proposeArchitecture}>
+                    {busy === 'propose-architecture' ? 'Planning…' : 'Use the deterministic plan'}
+                  </button>
+                </div>
               </section>
+            )}
+            {architectureDraft && !architecture && (
+              <ArchitectureDraftReview
+                draft={architectureDraft}
+                current={null}
+                busy={!!busy}
+                onApply={applyDraft}
+                onRedraft={draftArchitecture}
+                onDiscard={() => setArchitectureDraft(null)}
+              />
             )}
           </>
         )}
@@ -1033,6 +1093,28 @@ export default function V2ControlPlane() {
                 </div>
               </div>
             </section>
+            {architectureDraft && (
+              <ArchitectureDraftReview
+                draft={architectureDraft}
+                current={architecture.architecture}
+                busy={!!busy}
+                onApply={applyDraft}
+                onRedraft={draftArchitecture}
+                onDiscard={() => setArchitectureDraft(null)}
+              />
+            )}
+            {!architectureDraft && architecture.approval.status !== 'approved' && (
+              <section className="v2-panel v2-next-step">
+                <div>
+                  <span className="v2-eyebrow">Not what you wanted?</span>
+                  <h2>Ask for a different decomposition</h2>
+                  <p>Rejecting alone leaves nothing to build. A new draft can be reviewed and applied as the next revision.</p>
+                </div>
+                <button disabled={!!busy} onClick={() => draftArchitecture()}>
+                  {busy === 'draft-architecture' ? 'Designing…' : 'Draft an alternative →'}
+                </button>
+              </section>
+            )}
             <ApprovalGate
               title="Approve the architecture"
               description="Approval authorizes compilation into durable tasks. It does not authorize deployment or other external side effects."

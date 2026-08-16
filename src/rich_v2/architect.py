@@ -30,7 +30,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .budget import Usage
 from .models import (
@@ -759,7 +759,8 @@ def architect_prompt(
         f"at most {MAX_RECORD_FIELDS} fields, an enum at most "
         f"{MAX_ENUM_MEMBERS} members, types nest at most "
         f"{_VALUE_TYPE_DEPTH} deep, and a sample size is between 1 and "
-        f"{MAX_SAMPLE_SIZE}.\n"
+        f"{MAX_SAMPLE_SIZE}. A record must declare at least one field, a "
+        "list its element type, and an enum its members.\n"
         "- Every operation you constrain with a non-example obligation needs "
         "an 'example' obligation as well, and so does any operation you name "
         "as a predicate or guard. This is not a formality: the identity "
@@ -965,20 +966,34 @@ def propose_architecture(
 class ModelArchitect:
     """An ``ArchitectProposer`` backed by one bounded model attempt.
 
-    ``max_attempts`` defaults to one, which is the opposite of the loop
-    ``propose_architecture`` runs on its own. With a human reviewing, silently
-    burning three attempts to repair something they could have corrected in a
-    sentence is the wrong default -- the rejection is more useful shown to them
-    than spent on another guess. The repair channel is still there; it is now
-    theirs to drive.
+    ``max_attempts`` is two, not the three ``propose_architecture`` allows on
+    its own and not the one a first pass here used. The distinction that
+    matters is what kind of failure it is. A mechanical slip -- a record
+    declared with no fields, an example off by a character -- is precisely
+    what an automatic retry is good at, and a human cannot correct it because
+    a rejected draft never reaches them at all. A design disagreement is the
+    opposite: no number of retries finds an answer the model was never asked
+    for. So one repair for mechanics, and the review loop for everything else.
     """
 
-    gateway: ModelGateway
+    # A factory, not a gateway. An architecture proposal is not part of a run,
+    # so the meaningful ceiling is "one proposal cannot cost more than this",
+    # not "this process may only ever produce two proposals". A shared ledger
+    # made the second draft fail on budget, which is not a limit anyone chose.
+    gateway_factory: Callable[[], ModelGateway]
     provider: str
     model: str
-    max_cost_usd: Decimal = Decimal("1.00")
-    max_attempts: int = 1
+    # The ceiling for the whole proposal, repairs included -- not for one
+    # attempt. Reserving the entire allowance per attempt meant a single
+    # mechanical repair exhausted the budget and the caller saw a refusal
+    # instead of a design.
+    max_cost_usd: Decimal = Decimal("2.00")
+    max_attempts: int = 2
     project_prefix: str = "architect"
+
+    @property
+    def attempt_cost_usd(self) -> Decimal:
+        return self.max_cost_usd / self.max_attempts
 
     def propose(
         self,
@@ -989,14 +1004,14 @@ class ModelArchitect:
     ) -> ArchitectureProposal:
         outcome = propose_architecture(
             spec,
-            gateway=self.gateway,
+            gateway=self.gateway_factory(),
             provider=self.provider,
             model=self.model,
             target_pack=target_pack,
             run_id=f"{self.project_prefix}:{spec.id}",
             task_id=f"{self.project_prefix}:{spec.id}:propose",
             correlation_id=f"{self.project_prefix}:{spec.id}:{spec.revision}",
-            max_cost_usd=self.max_cost_usd,
+            max_cost_usd=self.attempt_cost_usd,
             max_attempts=self.max_attempts,
             initial_repair=repair,
         )

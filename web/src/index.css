@@ -672,3 +672,28 @@ button.v2-node-card b { font-size: 13px; }
 .codeblock.diff .d-add { display: block; color: #6ee7c0; background: rgba(47, 211, 160, .07); }
 .codeblock.diff .d-del { display: block; color: #ff8a95; background: rgba(255, 93, 108, .07); }
 .codeblock.diff .d-same { display: block; color: var(--ink-dim); }
+
+/* --- v2 architecture drafts: review before anything is recorded ------- */
+.v2-draft { border-color: rgba(124, 108, 255, .3); background: rgba(33, 29, 64, .2); }
+.v2-draft-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+.v2-draft-diff { display: flex; flex-direction: column; gap: 5px; margin-top: 14px; }
+.v2-draft-diff > div {
+  display: flex; gap: 12px; align-items: baseline;
+  padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px;
+  background: rgba(7, 8, 12, .5);
+}
+.v2-draft-diff b { font: 11.5px var(--mono); min-width: 130px; }
+.v2-draft-diff small { color: var(--ink-faint); font-size: 11px; overflow-wrap: anywhere; }
+.v2-draft-diff .d-added { border-color: rgba(47, 211, 160, .3); }
+.v2-draft-diff .d-added b { color: #6ee7c0; }
+.v2-draft-diff .d-removed { border-color: rgba(255, 93, 108, .3); }
+.v2-draft-diff .d-removed b { color: #ff8a95; }
+.v2-draft-diff .d-changed { border-color: rgba(240, 180, 41, .3); }
+.v2-draft-diff .d-changed b { color: #ffd27a; }
+.v2-repair { display: block; margin-top: 18px; }
+.v2-repair span {
+  display: block; margin-bottom: 6px; font-size: 11px; color: var(--ink-dim);
+  text-transform: uppercase; letter-spacing: .08em;
+}
+.v2-repair textarea { width: 100%; }
+.v2-draft-note { margin-top: 12px; font-size: 11px; }

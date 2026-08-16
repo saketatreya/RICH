@@ -72,6 +72,7 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from rich_v2.api import MAX_BODY_BYTES, V2Application  # noqa: E402
+from rich_v2.runtime import default_architect  # noqa: E402
 from rich_v2.store import RichStore  # noqa: E402
 
 _v2_application: V2Application | None = None
@@ -83,7 +84,14 @@ def _get_v2_application() -> V2Application:
     if _v2_application is None:
         with _v2_application_lock:
             if _v2_application is None:
-                _v2_application = V2Application(RichStore(V2_STATE_DIR))
+                # A model-backed architect when one can be built, and a
+                # deterministic planner when it cannot. default_architect
+                # returns None rather than raising precisely so a Canvas with
+                # no Claude Code login still starts and still plans; the draft
+                # response says which one answered.
+                _v2_application = V2Application(
+                    RichStore(V2_STATE_DIR), architect=default_architect()
+                )
     return _v2_application
 
 

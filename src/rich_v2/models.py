@@ -299,6 +299,7 @@ class CharSet(_StringEnum):
     ASCII_LETTERS = "ascii_letters"
     ASCII_ALPHANUMERIC = "ascii_alphanumeric"
     ASCII_IDENTIFIER = "ascii_identifier"
+    ASCII_SLUG = "ascii_slug"
     ASCII_PRINTABLE = "ascii_printable"
     UNICODE_SAMPLE = "unicode_sample"
 
@@ -314,6 +315,11 @@ _CHAR_SET_ALPHABETS: dict[CharSet, str] = {
     CharSet.ASCII_LETTERS: _ASCII_LETTERS,
     CharSet.ASCII_ALPHANUMERIC: _ASCII_LETTERS + _ASCII_DIGITS,
     CharSet.ASCII_IDENTIFIER: _ASCII_LETTERS + _ASCII_DIGITS + "_",
+    # Identifiers in running software are hyphenated far more often than not --
+    # slugs, uuids, "task-1". Without this the only way to type such a field
+    # was to widen it to all printable ASCII, which throws away the constraint
+    # that made it worth typing.
+    CharSet.ASCII_SLUG: _ASCII_LETTERS + _ASCII_DIGITS + "-_",
     CharSet.ASCII_PRINTABLE: "".join(chr(code) for code in range(32, 127)),
     # A deliberately small curated set rather than "all of Unicode": it must be
     # finite for a generator to draw from, and every member here exercises a

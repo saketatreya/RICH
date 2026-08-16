@@ -72,6 +72,7 @@ export type CharSet =
   | "ascii_letters"
   | "ascii_alphanumeric"
   | "ascii_identifier"
+  | "ascii_slug"
   | "ascii_printable"
   | "unicode_sample";
 
@@ -87,6 +88,7 @@ const ALPHABETS: Record<CharSet, string[]> = {
   ascii_letters: Array.from(ASCII_LETTERS),
   ascii_alphanumeric: Array.from(ASCII_LETTERS + ASCII_DIGITS),
   ascii_identifier: Array.from(ASCII_LETTERS + ASCII_DIGITS + "_"),
+  ascii_slug: Array.from(ASCII_LETTERS + ASCII_DIGITS + "-_"),
   ascii_printable: Array.from({ length: 95 }, (_, i) =>
     String.fromCharCode(32 + i),
   ),

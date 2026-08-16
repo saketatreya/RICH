@@ -206,6 +206,24 @@ def test_finite_sampleability_is_derived_from_the_bounds(value_type, sampleable)
     assert value_type.is_finitely_sampleable is sampleable
 
 
+def test_a_hyphenated_identifier_is_expressible():
+    # Ids in running software are hyphenated far more often than not. Without a
+    # set that admits one, the only way to type such a field was to widen it to
+    # all printable ASCII, discarding the constraint that made it worth typing.
+    slug = ValueType(
+        kind=ValueTypeKind.STRING,
+        min_length=1,
+        max_length=16,
+        char_set=CharSet.ASCII_SLUG,
+    )
+
+    assert slug.accepts("task-1")
+    assert slug.accepts("task_1")
+    assert slug.explain("task 1") is not None
+    assert "-" in CharSet.ASCII_SLUG.alphabet
+    assert "-" not in CharSet.ASCII_IDENTIFIER.alphabet
+
+
 def test_cardinality_is_separate_from_sampleability():
     # A bounded string is drawable but nowhere near enumerable, which is why
     # the sample gate and an exhaustive proof tier ask different questions.
