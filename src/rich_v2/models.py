@@ -467,7 +467,15 @@ def _serialized(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value) and not isinstance(value, type):
-        return {item.name: _serialized(getattr(value, item.name)) for item in fields(value)}
+        # A model may declare which of its fields carry information. Types in
+        # particular have many mutually exclusive slots, and emitting the empty
+        # ones quadruples a contract for no reader's benefit. from_dict treats
+        # every omitted slot as its default, so this stays lossless.
+        selected = getattr(value, "_serialized_field_names", None)
+        names = (
+            selected() if selected is not None else [item.name for item in fields(value)]
+        )
+        return {name: _serialized(getattr(value, name)) for name in names}
     if isinstance(value, tuple):
         return [_serialized(item) for item in value]
     if isinstance(value, list):
@@ -1348,6 +1356,20 @@ class ValueType:
             "additionalProperties": False,
         }
 
+    def _serialized_field_names(self) -> list[str]:
+        # Declaration order, not set order: the architecture document is
+        # content-hashed, so this has to be byte-stable across processes.
+        allowed = _VALUE_TYPE_SLOTS[self.kind]
+        return [
+            item.name
+            for item in fields(self)
+            if item.name == "kind"
+            or (
+                item.name in allowed
+                and getattr(self, item.name) != _VALUE_TYPE_EMPTY[item.name]
+            )
+        ]
+
     def to_dict(self) -> dict[str, Any]:
         return _serialized(self)
 
@@ -1383,6 +1405,22 @@ class ValueType:
 
 def _bounded(total: int) -> int | None:
     return None if total > _MAX_CARDINALITY_BOUND else total
+
+
+def _without_derivable_schemas(operation: "OperationContract") -> dict[str, Any]:
+    """Serialize an operation without a schema its declared type already fixes.
+
+    ``__post_init__`` requires the two to agree exactly, so shipping both to a
+    reader spends bytes on a value it could compute. The durable document keeps
+    both; only this view drops one.
+    """
+
+    document = operation.to_dict()
+    if operation.input_type is not None:
+        document.pop("input_schema", None)
+    if operation.output_type is not None:
+        document.pop("output_schema", None)
+    return document
 
 
 @dataclass(frozen=True, slots=True)
@@ -1654,6 +1692,26 @@ class ProofObligation:
             )
             if operation_id is not None
         )
+
+    def _serialized_field_names(self) -> list[str]:
+        # Most relations leave most operand slots empty; omitting them keeps a
+        # contract readable and keeps it inside a bounded prompt. Every omitted
+        # name is optional in from_dict with exactly the default dropped here.
+        defaults: dict[str, Any] = {
+            "tier": ObligationTier.SAMPLE,
+            "witness_operation_id": None,
+            "predicate_operation_id": None,
+            "guard_operation_id": None,
+            "example": None,
+            "sample_size": None,
+            "description": "",
+        }
+        return [
+            item.name
+            for item in fields(self)
+            if item.name not in defaults
+            or getattr(self, item.name) != defaults[item.name]
+        ]
 
     def to_dict(self) -> dict[str, Any]:
         return _serialized(self)
@@ -1994,6 +2052,61 @@ class ContractV2:
             raise ModelValidationError(
                 f"contract {self.id!r} traces unknown requirements: {sorted(unknown)}"
             )
+
+    def projection(self, requirement_ids: Iterable[str]) -> dict[str, Any]:
+        """Serialize only the behaviors that serve these requirements.
+
+        A worker allocated part of a contract should see that part, not the
+        whole thing -- both because a bounded prompt cannot hold the whole
+        thing once operations carry types and obligations, and because the
+        scope it is shown is the scope it will try to implement.
+
+        Operations named as an obligation's operand are kept even when they
+        serve other requirements, so a retained obligation never dangles.  The
+        result is a view, not a document: a slice can hold an operation with no
+        example of its own and so need not satisfy ``validate``.  It is
+        deliberately metadata-free, since metadata is planner-defined and a
+        consumer that wants part of it must project it itself.
+        """
+
+        wanted = set(requirement_ids)
+        obligations = [
+            obligation
+            for obligation in self.obligations
+            if wanted & set(obligation.requirement_ids)
+        ]
+        operation_ids = {
+            operation.id
+            for operation in self.operations
+            if wanted & set(operation.requirement_ids)
+        }
+        for obligation in obligations:
+            operation_ids.update(obligation.operand_operation_ids)
+        retained = {obligation.id for obligation in obligations}
+        return {
+            "schema_version": self.schema_version,
+            "id": self.id,
+            "node_id": self.node_id,
+            "revision": self.revision,
+            "operations": [
+                _without_derivable_schemas(operation)
+                for operation in self.operations
+                if operation.id in operation_ids
+            ],
+            "invariants": [
+                {
+                    **invariant.to_dict(),
+                    "obligation_ids": [
+                        obligation_id
+                        for obligation_id in invariant.obligation_ids
+                        if obligation_id in retained
+                    ],
+                }
+                for invariant in self.invariants
+                if wanted & set(invariant.requirement_ids)
+            ],
+            "obligations": [obligation.to_dict() for obligation in obligations],
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return _serialized(self)

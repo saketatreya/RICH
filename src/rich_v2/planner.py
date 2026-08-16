@@ -16,15 +16,23 @@ from .models import (
     ArchitectureEdge,
     ArchitectureNode,
     ArchitectureSpecV2,
+    CharSet,
     ContractV2,
     EdgeKind,
+    Invariant,
     NodeKind,
+    ObligationExample,
+    ObligationRelation,
     OperationContract,
     PortDirection,
     PortSpec,
     ProjectSpecV2,
+    ProofObligation,
+    RecordField,
     Requirement,
     RequirementKind,
+    ValueType,
+    ValueTypeKind,
 )
 from .target_packs.nextjs import NextJsTargetPack
 
@@ -37,22 +45,45 @@ _EXTERNAL = re.compile(
     r"\b(api|payment|email|webhook|integration|external|provider|stripe|github|search)\w*\b",
     re.I,
 )
-_REQUEST_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["request"],
-    "properties": {
-        "request": {"type": "string", "minLength": 1},
-    },
-}
-_RESPONSE_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["result"],
-    "properties": {
-        "result": {"type": "string"},
-    },
-}
+_MAX_TEXT = 1024
+_TEXT = ValueType(
+    kind=ValueTypeKind.STRING,
+    max_length=_MAX_TEXT,
+    char_set=CharSet.ASCII_PRINTABLE,
+)
+# A deterministic planner cannot know a requirement's real domain, so it
+# declares the smallest honest one: a bounded, identified request and a bounded
+# outcome.  These are placeholders in content but not in kind -- unlike the
+# untyped `{request: string}` they replace, they are finitely sampleable, so an
+# obligation over them is something a gate can actually run.  An architect model
+# is what replaces the content (see docs/v2-architecture.md).
+_REQUEST_TYPE = ValueType(
+    kind=ValueTypeKind.RECORD,
+    record_fields=(
+        RecordField(
+            "requestId",
+            ValueType(
+                kind=ValueTypeKind.STRING,
+                min_length=1,
+                max_length=64,
+                char_set=CharSet.ASCII_IDENTIFIER,
+            ),
+        ),
+        RecordField("payload", _TEXT),
+    ),
+)
+_RESPONSE_TYPE = ValueType(
+    kind=ValueTypeKind.RECORD,
+    record_fields=(
+        RecordField(
+            "status",
+            ValueType(kind=ValueTypeKind.ENUM, members=("accepted", "rejected")),
+        ),
+        RecordField("detail", _TEXT),
+    ),
+)
+_REQUEST_SCHEMA = _REQUEST_TYPE.json_schema()
+_RESPONSE_SCHEMA = _RESPONSE_TYPE.json_schema()
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,17 +381,64 @@ def _contract(
     ]
     if not requirements:
         raise ValueError(f"cannot create empty contract for {node_id!r}")
-    operations = tuple(
-        OperationContract(
-            id=f"operation:{node_id}:{_safe_fragment(requirement.id)}",
-            name=f"{operation_prefix}_{_safe_fragment(requirement.id)}",
-            description=requirement.statement,
-            input_schema=_REQUEST_SCHEMA,
-            output_schema=_RESPONSE_SCHEMA,
-            requirement_ids=(requirement.id,),
+    operations: list[OperationContract] = []
+    obligations: list[ProofObligation] = []
+    invariants: list[Invariant] = []
+    for requirement in requirements:
+        fragment = _safe_fragment(requirement.id) or "requirement"
+        operation_id = f"operation:{node_id}:{fragment}"
+        obligation_id = f"obligation:{node_id}:{fragment}:example"
+        operations.append(
+            OperationContract(
+                id=operation_id,
+                name=f"{operation_prefix}_{fragment}",
+                description=requirement.statement,
+                input_schema=_REQUEST_SCHEMA,
+                output_schema=_RESPONSE_SCHEMA,
+                requirement_ids=(requirement.id,),
+                input_type=_REQUEST_TYPE,
+                output_type=_RESPONSE_TYPE,
+            )
         )
-        for requirement in requirements
-    )
+        # One ground example per operation, always.  It is the only relation a
+        # deterministic planner can assert without inventing semantics, and it
+        # is what makes every stronger obligation an architect adds later
+        # non-vacuous: the anti-vacuity rule is satisfied by construction.
+        obligations.append(
+            ProofObligation(
+                id=obligation_id,
+                relation=ObligationRelation.EXAMPLE,
+                subject_operation_id=operation_id,
+                requirement_ids=(requirement.id,),
+                example=ObligationExample(
+                    argument={
+                        "requestId": fragment[:64],
+                        "payload": _printable(requirement.title),
+                    },
+                    result={
+                        "status": "accepted",
+                        "detail": _printable(requirement.statement),
+                    },
+                ),
+                description=(
+                    f"{operation_prefix} accepts a well-formed request for "
+                    f"{requirement.id}."
+                ),
+            )
+        )
+        if requirement.kind is not RequirementKind.FUNCTIONAL:
+            # A quality constraint is already phrased as a property of the
+            # whole system rather than a step through it, so it is an invariant
+            # verbatim.  Until now these reached the build only as acceptance
+            # scenarios; this is the first place they survive as invariants.
+            invariants.append(
+                Invariant(
+                    id=f"invariant:{node_id}:{fragment}",
+                    statement=requirement.statement,
+                    requirement_ids=(requirement.id,),
+                    obligation_ids=(obligation_id,),
+                )
+            )
     relevant_scenarios = [
         scenario.to_dict()
         for scenario in project.acceptance_scenarios
@@ -369,7 +447,9 @@ def _contract(
     return ContractV2(
         id=contract_id,
         node_id=node_id,
-        operations=operations,
+        operations=tuple(operations),
+        invariants=tuple(invariants),
+        obligations=tuple(obligations),
         metadata={
             "requirements": [requirement.to_dict() for requirement in requirements],
             "acceptance_scenarios": relevant_scenarios,
@@ -390,6 +470,21 @@ def _matching_requirements(
 
 def _safe_fragment(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", value).strip("_").lower()
+
+
+def _printable(text: str) -> str:
+    """Coerce approved prose into the declared character set, losslessly enough.
+
+    An example value has to inhabit the type it illustrates, and product prose
+    routinely carries curly quotes and dashes that ``ASCII_PRINTABLE`` does not.
+    Substituting is honest here because the example demonstrates shape, not
+    wording; the requirement's own text is carried verbatim elsewhere in the
+    contract.
+    """
+
+    alphabet = set(CharSet.ASCII_PRINTABLE.alphabet)
+    coerced = "".join(character if character in alphabet else "?" for character in text)
+    return coerced[:_MAX_TEXT] or "?"
 
 
 def _contains(parent: str, child: str) -> ArchitectureEdge:

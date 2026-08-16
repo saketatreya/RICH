@@ -1336,8 +1336,13 @@ def build_task_prompt(
                 if edge.source_node_id in relevant_node_ids
                 or edge.target_node_id in relevant_node_ids
             ],
+            # Projected, not whole: a contract that carries typed operations and
+            # proof obligations for every requirement in its node exceeds the
+            # prompt budget on its own, and the worker is allocated only part of
+            # it. The slice is also what the information firewall says it should
+            # see -- a dependency is known by its contract, not its scope.
             "contracts": [
-                contract.to_dict()
+                contract.projection(requirement_ids)
                 for contract in architecture.contracts
                 if contract.id in relevant_contract_ids
             ],

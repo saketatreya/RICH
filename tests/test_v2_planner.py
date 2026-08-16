@@ -1,7 +1,18 @@
+from rich_v2.coding import ApprovalWitness, DEFAULT_LIMITS, build_task_prompt
 from rich_v2.compiler import compile_architecture
 from rich_v2.interview import AdaptiveInterview, InterviewState
-from rich_v2.models import EdgeKind
-from rich_v2.planner import plan_nextjs_architecture
+from rich_v2.models import (
+    ContractV2,
+    EdgeKind,
+    ObligationExample,
+    ObligationRelation,
+    ObligationTier,
+    OperationContract,
+    ProofObligation,
+    ValueType,
+    ValueTypeKind,
+)
+from rich_v2.planner import _printable, plan_nextjs_architecture
 
 
 def _project(*, external=False):
@@ -125,3 +136,173 @@ def test_same_project_produces_identical_architecture_document():
         plan_nextjs_architecture(project).architecture.to_dict()
         == plan_nextjs_architecture(project).architecture.to_dict()
     )
+
+
+def test_every_operation_carries_a_sampleable_type_and_a_ground_example():
+    architecture = plan_nextjs_architecture(_project()).architecture
+
+    for contract in architecture.contracts:
+        anchored = {
+            obligation.subject_operation_id
+            for obligation in contract.obligations
+            if obligation.relation is ObligationRelation.EXAMPLE
+        }
+        assert anchored == {operation.id for operation in contract.operations}, (
+            f"{contract.id} leaves an operation with no ground example"
+        )
+        for operation in contract.operations:
+            assert operation.input_type is not None
+            assert operation.output_type is not None
+            # A domain a generator cannot draw from admits no sample-tier
+            # obligation at all, so this is the precondition for the whole
+            # property rung.
+            assert operation.input_type.is_finitely_sampleable
+            assert operation.output_type.is_finitely_sampleable
+            # The schema is a derived view; disagreement is rejected at
+            # construction, so this is the invariant that keeps it that way.
+            assert operation.input_type.json_schema() == operation.input_schema
+
+
+def test_examples_inhabit_the_types_they_illustrate_even_for_awkward_prose():
+    project = _project()
+
+    architecture = plan_nextjs_architecture(project).architecture
+
+    for contract in architecture.contracts:
+        operations = contract.operation_index
+        for obligation in contract.obligations:
+            subject = operations[obligation.subject_operation_id]
+            assert subject.input_type.accepts(obligation.example.argument)
+            assert subject.output_type.accepts(obligation.example.result)
+
+
+def test_prose_outside_the_declared_character_set_is_coerced_not_dropped():
+    # Product prose routinely carries curly quotes and dashes; an example that
+    # did not inhabit its own type would fail contract validation outright.
+    assert _printable("It’s ready — now") == "It?s ready ? now"
+    assert _printable("") == "?"
+
+
+def test_quality_constraints_become_invariants_that_cite_their_obligation():
+    project = _project()
+
+    architecture = plan_nextjs_architecture(project).architecture
+
+    contract = architecture.contract_index["contract:domain"]
+    statements = {invariant.statement for invariant in contract.invariants}
+    assert "Task actions satisfy keyboard accessibility." in statements
+    # Functional requirements describe a path through the system, not a
+    # property of it, so they stay operations only.
+    assert "A member can add a task and it remains after refresh." not in statements
+
+    obligations = contract.obligation_index
+    for invariant in contract.invariants:
+        assert invariant.obligation_ids
+        for obligation_id in invariant.obligation_ids:
+            assert obligation_id in obligations
+
+
+def test_obligations_do_not_widen_requirement_tracing():
+    project = _project()
+
+    architecture = plan_nextjs_architecture(project).architecture
+
+    architecture.validate_against_project(project)
+    for contract in architecture.contracts:
+        assert contract.traced_requirement_ids <= set(project.requirement_index)
+
+
+def test_a_contract_slice_carries_the_typed_view_without_the_derived_schema():
+    architecture = plan_nextjs_architecture(_project()).architecture
+    contract = architecture.contract_index["contract:domain"]
+
+    projection = contract.projection({"req.a11y"})
+
+    assert [operation["id"] for operation in projection["operations"]] == [
+        "operation:domain:req_a11y"
+    ]
+    assert [obligation["id"] for obligation in projection["obligations"]] == [
+        "obligation:domain:req_a11y:example"
+    ]
+    assert [invariant["id"] for invariant in projection["invariants"]] == [
+        "invariant:domain:req_a11y"
+    ]
+    operation = projection["operations"][0]
+    assert "input_type" in operation and "input_schema" not in operation
+    assert "output_type" in operation and "output_schema" not in operation
+    assert "metadata" not in projection
+    # The full document stays lossless; only the view drops what it can derive.
+    assert "input_schema" in contract.to_dict()["operations"][0]
+
+
+def test_the_slice_keeps_operations_a_retained_obligation_names():
+    subject = OperationContract(
+        id="op.encode",
+        name="encode",
+        input_schema={"type": "boolean"},
+        output_schema={"type": "boolean"},
+        requirement_ids=("req.one",),
+        input_type=ValueType(kind=ValueTypeKind.BOOLEAN),
+        output_type=ValueType(kind=ValueTypeKind.BOOLEAN),
+    )
+    witness = OperationContract(
+        id="op.decode",
+        name="decode",
+        input_schema={"type": "boolean"},
+        output_schema={"type": "boolean"},
+        requirement_ids=("req.two",),
+        input_type=ValueType(kind=ValueTypeKind.BOOLEAN),
+        output_type=ValueType(kind=ValueTypeKind.BOOLEAN),
+    )
+    contract = ContractV2(
+        id="contract.codec",
+        node_id="node.codec",
+        operations=(subject, witness),
+        obligations=(
+            ProofObligation(
+                id="obl.codec",
+                relation=ObligationRelation.ROUND_TRIP,
+                subject_operation_id="op.encode",
+                witness_operation_id="op.decode",
+                requirement_ids=("req.one",),
+                tier=ObligationTier.PROOF,
+            ),
+            ProofObligation(
+                id="obl.encode.example",
+                relation=ObligationRelation.EXAMPLE,
+                subject_operation_id="op.encode",
+                requirement_ids=("req.one",),
+                example=ObligationExample(argument=True, result=False),
+            ),
+        ),
+    )
+
+    projection = contract.projection({"req.one"})
+
+    # op.decode serves a requirement outside the slice but is named by a
+    # retained obligation, so dropping it would leave that obligation dangling.
+    assert {operation["id"] for operation in projection["operations"]} == {
+        "op.encode",
+        "op.decode",
+    }
+
+
+def test_types_and_obligations_stay_inside_the_bounded_task_prompt(tmp_path):
+    project = _project()
+    architecture = plan_nextjs_architecture(project).architecture
+    compiled = compile_architecture(architecture, project)
+    approval = ApprovalWitness(
+        project.id, project.revision, architecture.id, architecture.revision
+    )
+
+    for task in compiled.task_index.values():
+        bundle = build_task_prompt(
+            workspace=tmp_path,
+            project=project,
+            architecture=architecture,
+            task=task,
+            approval=approval,
+        )
+        assert bundle.prompt_bytes <= DEFAULT_LIMITS.max_prompt_bytes
+        assert "input_type" in bundle.user_prompt
+        assert "obligations" in bundle.user_prompt
