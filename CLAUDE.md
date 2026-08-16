@@ -19,6 +19,8 @@ python -m pytest tests/test_v2_store.py::test_name         # one test
 # Live tests (marker `live`, skipped unless --run-live is passed)
 python -m pytest --run-live tests/test_v2_executor.py
 python -m pytest --run-live tests/test_v2_typescript_obligations.py
+python -m pytest --run-live tests/test_v2_claude_code_provider.py
+# ^ makes one small real `claude -p` call; needs a Claude Code login, no API key.
 # ^ runs the generated obligation sampler under the pinned Node and checks every
 #   drawn value against ValueType.accepts. Needs `node` 22.x on PATH; no model.
 python -m pytest --run-live --basetemp=.rich/live-tests tests/test_v2_public_runtime_live.py
@@ -72,7 +74,7 @@ Read `docs/v2-architecture.md` before changing v2 — it is the operating contra
 - **Generated source is confined to approved owned paths.** Package manifests, lockfiles, tests, configs, and RICH metadata are protected generation inputs the model cannot touch.
 - **One fenced owner mutates a run**: SQLite leases with fencing tokens checked in the same transaction as every authoritative write; source writes go through CAS-backed write-ahead transactions. Coding is single-worker by design — parallelism requires worktrees + reverification, not racing one directory.
 - **Money is a decimal string, never a float.** Budgets must be complete; reservations are recorded before provider calls and settled after; crashes charge the reservation.
-- Toolchain identity is exact (Node 22.22.3, pnpm 10.34.5) and the sole trusted model policy is `anthropic/claude-sonnet-5` via `anthropic_provider.py` — no silent fallback. `openai_provider.py` is retained but wired to nothing; it exists to keep the `ModelProvider` seam vendor-neutral, and must not become a fallback.
+- Toolchain identity is exact (Node 22.22.3, pnpm 10.34.5) and the sole trusted model policy is `anthropic/claude-sonnet-5` — no silent fallback. Two **routes** reach it, chosen explicitly via `route=` on `default_run_runtime` and never substituted for one another: `"api"` (`anthropic_provider.py`, needs `ANTHROPIC_API_KEY`) and `"claude-code"` (`claude_code_provider.py`, spends an existing `claude` login). The CLI route runs `claude -p --tools ""` in an empty cwd under a throwaway `HOME` holding only a symlink to the credential — without that isolation the worker receives the operator's own `CLAUDE.md` memory, which the information firewall exists to prevent. It cannot bound output tokens before the fact, and the harness's auxiliary small-model calls are charged too. `openai_provider.py` is retained but wired to nothing; it exists to keep the `ModelProvider` seam vendor-neutral, and must not become a fallback.
 - API rules: `/v2`, loopback bind, mutations require `Idempotency-Key`, bounded bodies, host/origin checks.
 
 Rough module map: `interview.py`/`compiler.py`/`planner.py` (intent → spec → architecture → tasks), `models.py` (typed objects), `store.py` (SQLite + CAS), `budget.py`, `scheduler.py`/`run_engine.py`/`execution.py`/`executor.py` (fenced execution + Bubblewrap gates), `coding.py` + `anthropic_provider.py`/`providers.py` (bounded generation), `target_packs/` (Next.js pack), `preview.py`/`migration.py` (Neon/Vercel), `control_plane.py`/`api.py`/`cli.py` (surfaces).
@@ -85,4 +87,4 @@ Rough module map: `interview.py`/`compiler.py`/`planner.py` (intent → spec →
 
 ## Credentials
 
-Resolved lazily from env, never persisted in run documents or model events: `ANTHROPIC_API_KEY` (v2 model runs), `NEON_API_TOKEN` + `VERCEL_TOKEN` (previews), `OPENROUTER_API_KEY` (v1 openrouter backend). No generated Node process ever receives the preview database credential — migrations run through trusted Python/psycopg only.
+Resolved lazily from env, never persisted in run documents or model events: `ANTHROPIC_API_KEY` (v2 model runs on the `api` route; the `claude-code` route needs no key and deliberately does not inherit one, so an expired login fails closed instead of silently changing payer), `NEON_API_TOKEN` + `VERCEL_TOKEN` (previews), `OPENROUTER_API_KEY` (v1 openrouter backend). No generated Node process ever receives the preview database credential — migrations run through trusted Python/psycopg only.

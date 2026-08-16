@@ -164,6 +164,22 @@ determined by RICH rather than by a server-side default.
 `openai_provider.py` remains in the tree but is wired to nothing. It is the second
 implementation that keeps the `ModelProvider` seam honest, not a fallback path.
 
+Two routes reach that one model policy, selected explicitly and never substituted
+for one another. The `api` route is a bounded HTTPS request and needs an
+`ANTHROPIC_API_KEY`. The `claude-code` route runs `claude -p` against an existing
+Claude Code login, so a subscription can pay for a run; a run record names which
+answered, because the trust properties differ. That route pays three stated
+prices. The worker is stripped to a text generator with `--tools ""` in an empty
+working directory under a throwaway `HOME` containing only a symlink to the
+credential — measured, not assumed: with the real `HOME` the worker reports back
+the operator's own `CLAUDE.md` memory, which is exactly the unapproved context the
+information firewall exists to exclude. A residue of two items, the account email
+and the current date, remains and is recorded rather than denied. And the CLI
+exposes no maximum-output control, so on that route the output reservation is
+advisory: an overage is detected and charged after the fact rather than prevented.
+The harness's own auxiliary small-model calls are charged too, and the pinned model
+is verified to have out-generated them.
+
 ### 5. One fenced owner mutates a run
 
 Execution claims an expiring SQLite lease containing an opaque fencing token. The owner

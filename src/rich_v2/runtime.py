@@ -21,6 +21,7 @@ from .anthropic_provider import (
     ApiKeySource,
 )
 from .budget import BudgetLedger, RunBudget, Usage
+from .claude_code_provider import CLAUDE_CODE_PROVIDER, ClaudeCodeCliProvider
 from .executor import (
     BubblewrapExecutor,
     TrustedNodePnpmRuntime,
@@ -55,6 +56,16 @@ DEFAULT_MODEL_RATES = AnthropicTokenRates(
 # capacity bound rather than a pricing tier: a reservation larger than the
 # window can never be satisfied, and refusing it costs nothing.
 MAX_INPUT_TOKEN_RESERVATION = 1_000_000
+# Two ways to reach one model policy, chosen explicitly. "api" needs an
+# ANTHROPIC_API_KEY; "claude-code" spends an existing Claude Code login instead.
+# Neither is ever a fallback for the other -- a route that cannot run fails the
+# attempt rather than quietly changing who is paying or what is answering.
+API_ROUTE = "api"
+CLAUDE_CODE_ROUTE = "claude-code"
+MODEL_ROUTES: dict[str, str] = {
+    API_ROUTE: DEFAULT_PROVIDER,
+    CLAUDE_CODE_ROUTE: CLAUDE_CODE_PROVIDER,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,13 +100,14 @@ class DefaultRunRuntime:
     budget: RunBudget
     initial_usage: Usage
     ledger: BudgetLedger
-    anthropic_provider: AnthropicMessagesProvider
+    model_provider: AnthropicMessagesProvider | ClaudeCodeCliProvider
     gateway: ModelGateway
     toolchain: TrustedNodePnpmRuntime
     bootstrapper: WorkspaceBootstrapper
     commands: PinnedRunCommands
     provider_name: str = DEFAULT_PROVIDER
     model: str = DEFAULT_MODEL
+    route: str = API_ROUTE
 
     @property
     def executor(self) -> BubblewrapExecutor:
@@ -115,10 +127,20 @@ class DefaultRunRuntimeFactory:
     toolchain_factory: Callable[[], TrustedNodePnpmRuntime] = (
         trusted_node_pnpm_runtime
     )
+    route: str = API_ROUTE
+    claude_code_provider_factory: Callable[[], ClaudeCodeCliProvider] = (
+        ClaudeCodeCliProvider
+    )
 
     def __post_init__(self) -> None:
         if not callable(self.event_sink):
             raise TypeError("event_sink must be callable")
+        if self.route not in MODEL_ROUTES:
+            raise ValueError(
+                f"route must be one of {sorted(MODEL_ROUTES)}"
+            )
+        if not callable(self.claude_code_provider_factory):
+            raise TypeError("claude_code_provider_factory must be callable")
         if self.api_key_source is not None and not (
             isinstance(self.api_key_source, str)
             or callable(self.api_key_source)
@@ -143,16 +165,21 @@ class DefaultRunRuntimeFactory:
             approved_budget,
             initial_usage=initial_usage,
         )
-        provider = AnthropicMessagesProvider(
-            (
-                _environment_anthropic_api_key
-                if self.api_key_source is None
-                else self.api_key_source
-            ),
-            rates={DEFAULT_MODEL: DEFAULT_MODEL_RATES},
-            transport=self.transport,
-        )
-        exact_provider = _ExactModelProvider(provider)
+        if self.route == CLAUDE_CODE_ROUTE:
+            provider: AnthropicMessagesProvider | ClaudeCodeCliProvider = (
+                self.claude_code_provider_factory()
+            )
+        else:
+            provider = AnthropicMessagesProvider(
+                (
+                    _environment_anthropic_api_key
+                    if self.api_key_source is None
+                    else self.api_key_source
+                ),
+                rates={DEFAULT_MODEL: DEFAULT_MODEL_RATES},
+                transport=self.transport,
+            )
+        exact_provider = _ExactModelProvider(provider, MODEL_ROUTES[self.route])
         gateway = ModelGateway(
             [exact_provider],
             ledger,
@@ -167,11 +194,13 @@ class DefaultRunRuntimeFactory:
             budget=approved_budget,
             initial_usage=initial_usage,
             ledger=ledger,
-            anthropic_provider=provider,
+            model_provider=provider,
             gateway=gateway,
             toolchain=toolchain,
             bootstrapper=WorkspaceBootstrapper(toolchain),
             commands=PinnedRunCommands.for_toolchain(toolchain),
+            provider_name=MODEL_ROUTES[self.route],
+            route=self.route,
         )
 
 
@@ -185,6 +214,7 @@ def default_run_runtime(
     toolchain_factory: Callable[[], TrustedNodePnpmRuntime] = (
         trusted_node_pnpm_runtime
     ),
+    route: str = API_ROUTE,
 ) -> DefaultRunRuntime:
     """Construct the default runtime through a convenient callable interface."""
 
@@ -193,6 +223,7 @@ def default_run_runtime(
         api_key_source=api_key_source,
         transport=transport,
         toolchain_factory=toolchain_factory,
+        route=route,
     )(budget, event_history=event_history)
 
 
@@ -206,15 +237,20 @@ def _environment_anthropic_api_key() -> str:
 class _ExactModelProvider(ModelProvider):
     """Prevent unpriced or user-selected models from crossing this boundary."""
 
-    name = DEFAULT_PROVIDER
-
-    def __init__(self, delegate: AnthropicMessagesProvider):
+    def __init__(
+        self,
+        delegate: AnthropicMessagesProvider | ClaudeCodeCliProvider,
+        provider_name: str = DEFAULT_PROVIDER,
+    ):
+        if delegate.name != provider_name:
+            raise ValueError("delegate does not serve the pinned provider name")
         self._delegate = delegate
+        self.name = provider_name
 
     def generate(self, request: ModelRequest) -> ModelResponse:
-        if request.provider != DEFAULT_PROVIDER or request.model != DEFAULT_MODEL:
+        if request.provider != self.name or request.model != DEFAULT_MODEL:
             raise ProviderFailure(
-                f"default runtime only permits {DEFAULT_PROVIDER}/{DEFAULT_MODEL}",
+                f"default runtime only permits {self.name}/{DEFAULT_MODEL}",
                 retryable=False,
                 request_was_sent=False,
             )
