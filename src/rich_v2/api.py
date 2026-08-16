@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .control_plane import (
     ApprovalRequired,
+    ArchitectProposer,
     ControlPlane,
     RunExecutionUnavailable,
     RunExecutor,
@@ -132,6 +133,7 @@ class V2Application:
         preview_orchestrator: PreviewOrchestrator | None = None,
         workspace_root: str | Path | None = None,
         run_executor: RunExecutor | None = None,
+        architect: ArchitectProposer | None = None,
     ):
         self.store = store
         self.workspace_root = Path(
@@ -145,6 +147,7 @@ class V2Application:
                 preview_orchestrator or default_preview_orchestrator()
             ),
             run_executor=trusted_run_executor,
+            architect=architect,
         )
         self.execution_manager = _ExecutionManager(
             store, self.control_plane
@@ -348,6 +351,30 @@ class V2Application:
                 expected_revision=_required_int(body, "expected_revision"),
             )
             return _architecture_response(submission)
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v2", "projects"]
+            and parts[3] == "architecture-drafts"
+            and method == "POST"
+        ):
+            draft = self.control_plane.draft_architecture(
+                project_id=parts[2],
+                spec_revision_id=_required(body, "spec_revision_id"),
+                spec_approval_id=_required(body, "spec_approval_id"),
+                repair=_optional_string(body, "repair"),
+            )
+            # 200, not 201: nothing was created. The draft is a suggestion
+            # until a human applies it through architecture-revisions.
+            return ApiResponse(
+                200,
+                {
+                    "architecture": draft.architecture.to_dict(),
+                    "decisions": list(draft.decisions),
+                    "risks": list(draft.risks),
+                    "source": draft.source,
+                    "rationale": draft.rationale,
+                },
+            )
         if (
             len(parts) == 4
             and parts[:2] == ["v2", "projects"]

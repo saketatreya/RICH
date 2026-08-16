@@ -56,6 +56,34 @@ class RunExecutor(Protocol):
         """Execute or resume one approval-bound durable run."""
 
 
+class ArchitectProposer(Protocol):
+    def propose(
+        self,
+        spec: ProjectSpecV2,
+        *,
+        target_pack: str,
+        repair: str | None = None,
+    ) -> ArchitectureProposal:
+        """Propose one decomposition. May raise; the caller decides what next."""
+
+
+@dataclass(frozen=True, slots=True)
+class ArchitectureDraft:
+    """A proposal that has not been recorded, and may never be.
+
+    Drafting and revising are deliberately separate operations. A proposal the
+    control plane stored on the model's say-so would be a decision; a proposal
+    a human can read, diff and discard is a suggestion. v1's canvas settled
+    this the same way: compute the change, show the diff, commit only on Apply.
+    """
+
+    architecture: ArchitectureSpecV2
+    decisions: tuple[str, ...]
+    risks: tuple[str, ...]
+    source: str
+    rationale: str = ""
+
+
 @dataclass(frozen=True, slots=True)
 class SpecSubmission:
     spec: ProjectSpecV2
@@ -106,10 +134,12 @@ class ControlPlane:
         *,
         preview_orchestrator: PreviewOrchestrator | None = None,
         run_executor: RunExecutor | None = None,
+        architect: ArchitectProposer | None = None,
     ):
         self.store = store
         self.preview_orchestrator = preview_orchestrator
         self.run_executor = run_executor
+        self.architect = architect
 
     def create_project(self, *, project_id: str, name: str) -> dict[str, Any]:
         return self.store.create_project(name, project_id=project_id)
@@ -175,16 +205,11 @@ class ControlPlane:
         spec_approval_id: str,
         expected_revision: int,
     ) -> ArchitectureSubmission:
-        self._require_approval(
-            spec_approval_id,
-            gate="product_spec",
+        spec = self._approved_spec(
             project_id=project_id,
-            revision_id=spec_revision_id,
+            spec_revision_id=spec_revision_id,
+            spec_approval_id=spec_approval_id,
         )
-        spec_revision = self.store.get_revision(spec_revision_id)
-        if spec_revision.project_id != project_id or spec_revision.kind != "product_spec":
-            raise ValueError("spec revision does not belong to the requested project")
-        spec = ProjectSpecV2.from_dict(spec_revision.document)
         proposal = plan_nextjs_architecture(spec)
         return self._save_architecture(
             project_id=project_id,
@@ -192,6 +217,70 @@ class ControlPlane:
             expected_revision=expected_revision,
             proposal=proposal,
         )
+
+    def draft_architecture(
+        self,
+        *,
+        project_id: str,
+        spec_revision_id: str,
+        spec_approval_id: str,
+        repair: str | None = None,
+    ) -> ArchitectureDraft:
+        """Propose an architecture without recording anything.
+
+        Nothing durable changes here: no revision, no approval, no bump to the
+        project's revision counter. That is the point. A human reads the draft
+        against whatever is current, edits it or asks again, and only a call to
+        ``revise_architecture`` makes it real.
+
+        Falls back to the deterministic planner when no architect is
+        configured, and says which one answered, because a template and a model
+        are not interchangeable and a reviewer should not have to guess.
+        """
+
+        spec = self._approved_spec(
+            project_id=project_id,
+            spec_revision_id=spec_revision_id,
+            spec_approval_id=spec_approval_id,
+        )
+        if self.architect is None:
+            proposal = plan_nextjs_architecture(spec)
+            return ArchitectureDraft(
+                architecture=proposal.architecture,
+                decisions=tuple(proposal.decisions),
+                risks=tuple(proposal.risks),
+                source="planner",
+            )
+        proposal = self.architect.propose(
+            spec, target_pack=NextJsTargetPack.target_pack_id, repair=repair
+        )
+        architecture = proposal.architecture
+        architecture.validate_against_project(spec)
+        compile_architecture(architecture, spec)
+        return ArchitectureDraft(
+            architecture=architecture,
+            decisions=tuple(proposal.decisions),
+            risks=tuple(proposal.risks),
+            source="model",
+            rationale=str(architecture.metadata.get("rationale", "")),
+        )
+
+    def _approved_spec(
+        self, *, project_id: str, spec_revision_id: str, spec_approval_id: str
+    ) -> ProjectSpecV2:
+        self._require_approval(
+            spec_approval_id,
+            gate="product_spec",
+            project_id=project_id,
+            revision_id=spec_revision_id,
+        )
+        spec_revision = self.store.get_revision(spec_revision_id)
+        if (
+            spec_revision.project_id != project_id
+            or spec_revision.kind != "product_spec"
+        ):
+            raise ValueError("spec revision does not belong to the requested project")
+        return ProjectSpecV2.from_dict(spec_revision.document)
 
     def revise_architecture(
         self,
@@ -218,19 +307,11 @@ class ControlPlane:
         own approval. What changes is only who may author the proposal.
         """
 
-        self._require_approval(
-            spec_approval_id,
-            gate="product_spec",
+        spec = self._approved_spec(
             project_id=project_id,
-            revision_id=spec_revision_id,
+            spec_revision_id=spec_revision_id,
+            spec_approval_id=spec_approval_id,
         )
-        spec_revision = self.store.get_revision(spec_revision_id)
-        if (
-            spec_revision.project_id != project_id
-            or spec_revision.kind != "product_spec"
-        ):
-            raise ValueError("spec revision does not belong to the requested project")
-        spec = ProjectSpecV2.from_dict(spec_revision.document)
         architecture = ArchitectureSpecV2.from_dict(document)
         if architecture.project_id != project_id:
             raise ValueError("architecture belongs to a different project")

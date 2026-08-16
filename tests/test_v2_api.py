@@ -781,3 +781,133 @@ def test_editing_an_architecture_still_needs_the_spec_approval(tmp_path):
     )
 
     assert response.status == 403
+
+
+class RecordingArchitect:
+    """Stand in for a model, so the draft/apply loop is testable offline."""
+
+    def __init__(self, transform=None):
+        self.calls = []
+        self.transform = transform
+
+    def propose(self, spec, *, target_pack, repair=None):
+        from rich_v2.planner import plan_nextjs_architecture
+
+        self.calls.append({"spec": spec.id, "target_pack": target_pack, "repair": repair})
+        proposal = plan_nextjs_architecture(spec)
+        if self.transform is None:
+            return proposal
+        return self.transform(proposal)
+
+
+def test_a_draft_records_nothing_until_a_human_applies_it(tmp_path):
+    store = RichStore(tmp_path)
+    architect = RecordingArchitect()
+    application = V2Application(store, architect=architect)
+    spec = _approved_spec(application)
+    before = store.get_project("project.edit")["current_revision"]
+
+    drafted = application.handle(
+        "POST",
+        "/v2/projects/project.edit/architecture-drafts",
+        body={
+            "spec_revision_id": spec["revision"]["id"],
+            "spec_approval_id": spec["approval"]["id"],
+        },
+        headers=_headers("k-draft"),
+    )
+
+    # 200, not 201, and the durable store is untouched: no revision, no
+    # approval, no bump to the counter. A proposal the control plane stored on
+    # the model's say-so would be a decision, not a suggestion.
+    assert drafted.status == 200
+    assert drafted.body["source"] == "model"
+    assert store.get_project("project.edit")["current_revision"] == before
+    assert store.list_revisions("project.edit", kind="architecture") == []
+    assert store.list_approvals("project.edit", status="requested") == []
+
+
+def test_a_correction_reaches_the_architect_verbatim(tmp_path):
+    architect = RecordingArchitect()
+    application = V2Application(RichStore(tmp_path), architect=architect)
+    spec = _approved_spec(application)
+
+    application.handle(
+        "POST",
+        "/v2/projects/project.edit/architecture-drafts",
+        body={
+            "spec_revision_id": spec["revision"]["id"],
+            "spec_approval_id": spec["approval"]["id"],
+            "repair": "the checklist logic belongs in its own component",
+        },
+        headers=_headers("k-repair"),
+    )
+
+    # A human's correction and the validator's rejection travel one channel.
+    assert architect.calls[0]["repair"] == (
+        "the checklist logic belongs in its own component"
+    )
+    assert architect.calls[0]["target_pack"] == "nextjs-app-router"
+
+
+def test_without_an_architect_a_draft_falls_back_and_says_so(tmp_path):
+    application = V2Application(RichStore(tmp_path))
+    spec = _approved_spec(application)
+
+    drafted = application.handle(
+        "POST",
+        "/v2/projects/project.edit/architecture-drafts",
+        body={
+            "spec_revision_id": spec["revision"]["id"],
+            "spec_approval_id": spec["approval"]["id"],
+        },
+        headers=_headers("k-fallback"),
+    )
+
+    # A template and a model are not interchangeable, and a reviewer should not
+    # have to guess which one answered.
+    assert drafted.status == 200
+    assert drafted.body["source"] == "planner"
+
+
+def test_a_draft_that_does_not_validate_is_refused_before_a_human_sees_it(tmp_path):
+    def strip_a_requirement(proposal):
+        document = json.loads(json.dumps(proposal.architecture.to_dict()))
+        for node in document["nodes"]:
+            node["requirement_ids"] = [
+                value for value in node["requirement_ids"] if value != "req.a11y"
+            ]
+        for contract in document["contracts"]:
+            for collection in ("operations", "invariants", "obligations"):
+                contract[collection] = [
+                    behavior
+                    for behavior in contract.get(collection, [])
+                    if behavior["requirement_ids"] != ["req.a11y"]
+                ]
+        from dataclasses import replace
+
+        from rich_v2.models import ArchitectureSpecV2
+
+        return replace(
+            proposal, architecture=ArchitectureSpecV2.from_dict(document)
+        )
+
+    application = V2Application(
+        RichStore(tmp_path), architect=RecordingArchitect(strip_a_requirement)
+    )
+    spec = _approved_spec(application)
+
+    drafted = application.handle(
+        "POST",
+        "/v2/projects/project.edit/architecture-drafts",
+        body={
+            "spec_revision_id": spec["revision"]["id"],
+            "spec_approval_id": spec["approval"]["id"],
+        },
+        headers=_headers("k-invalid-draft"),
+    )
+
+    # Drafting skips the revision, never the validators. Showing a human a
+    # proposal that could not be applied would waste their review.
+    assert drafted.status == 400
+    assert "req.a11y" in drafted.body["message"]

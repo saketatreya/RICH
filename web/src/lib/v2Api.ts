@@ -260,6 +260,15 @@ export interface SpecSubmission {
   approval: Approval
 }
 
+/** A proposal nothing has recorded yet: review it, then apply or discard. */
+export interface ArchitectureDraft {
+  architecture: Architecture
+  decisions: string[]
+  risks: string[]
+  source: 'model' | 'planner'
+  rationale: string
+}
+
 export interface ArchitectureSubmission {
   architecture: Architecture
   decisions: string[]
@@ -493,6 +502,21 @@ export const v2Api = {
         spec_revision_id: specRevisionId,
         spec_approval_id: specApprovalId,
         expected_revision: project.current_revision,
+      },
+    ),
+
+  draftArchitecture: async (
+    project: Project,
+    specRevisionId: string,
+    specApprovalId: string,
+    repair?: string,
+  ): Promise<ArchitectureDraft> =>
+    post<ArchitectureDraft>(
+      `/v2/projects/${encodeURIComponent(project.id)}/architecture-drafts`,
+      {
+        spec_revision_id: specRevisionId,
+        spec_approval_id: specApprovalId,
+        ...(repair ? { repair } : {}),
       },
     ),
 

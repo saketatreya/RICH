@@ -60,6 +60,7 @@ from .models import (
     value_type_from_request,
     value_type_request_schema,
 )
+from .planner import ArchitectureProposal
 from .providers import GenerationRole, ModelGateway, ModelRequest
 
 
@@ -890,6 +891,7 @@ def propose_architecture(
     max_output_tokens: int = ARCHITECT_MAX_OUTPUT_TOKENS,
     timeout_seconds: float = ARCHITECT_TIMEOUT_SECONDS,
     architecture_id: str | None = None,
+    initial_repair: str | None = None,
 ) -> ArchitectOutcome:
     """Ask a model for a decomposition, and keep asking only while it is learning.
 
@@ -904,7 +906,10 @@ def propose_architecture(
     if not isinstance(max_attempts, int) or max_attempts < 1:
         raise ValueError("max_attempts must be a positive integer")
     rejections: list[str] = []
-    repair: str | None = None
+    # A caller's correction and the validator's rejection travel the same
+    # channel: both are "here is what is wrong with the last answer", and
+    # giving a human a separate mechanism would mean two prompts to keep honest.
+    repair: str | None = initial_repair
     for attempt in range(1, max_attempts + 1):
         system_prompt, user_prompt = architect_prompt(
             project, target_pack=target_pack, repair=repair
@@ -954,3 +959,51 @@ def propose_architecture(
         f"architect produced no valid architecture in {max_attempts} attempts; "
         f"last rejection: {rejections[-1] if rejections else 'none recorded'}"
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ModelArchitect:
+    """An ``ArchitectProposer`` backed by one bounded model attempt.
+
+    ``max_attempts`` defaults to one, which is the opposite of the loop
+    ``propose_architecture`` runs on its own. With a human reviewing, silently
+    burning three attempts to repair something they could have corrected in a
+    sentence is the wrong default -- the rejection is more useful shown to them
+    than spent on another guess. The repair channel is still there; it is now
+    theirs to drive.
+    """
+
+    gateway: ModelGateway
+    provider: str
+    model: str
+    max_cost_usd: Decimal = Decimal("1.00")
+    max_attempts: int = 1
+    project_prefix: str = "architect"
+
+    def propose(
+        self,
+        spec: ProjectSpecV2,
+        *,
+        target_pack: str,
+        repair: str | None = None,
+    ) -> ArchitectureProposal:
+        outcome = propose_architecture(
+            spec,
+            gateway=self.gateway,
+            provider=self.provider,
+            model=self.model,
+            target_pack=target_pack,
+            run_id=f"{self.project_prefix}:{spec.id}",
+            task_id=f"{self.project_prefix}:{spec.id}:propose",
+            correlation_id=f"{self.project_prefix}:{spec.id}:{spec.revision}",
+            max_cost_usd=self.max_cost_usd,
+            max_attempts=self.max_attempts,
+            initial_repair=repair,
+        )
+        return ArchitectureProposal(
+            architecture=outcome.architecture,
+            decisions=(
+                (outcome.rationale,) if outcome.rationale else ()
+            ),
+            risks=outcome.rejections,
+        )
