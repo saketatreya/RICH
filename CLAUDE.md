@@ -18,6 +18,9 @@ python -m pytest tests/test_v2_store.py::test_name         # one test
 
 # Live tests (marker `live`, skipped unless --run-live is passed)
 python -m pytest --run-live tests/test_v2_executor.py
+python -m pytest --run-live tests/test_v2_typescript_obligations.py
+# ^ runs the generated obligation sampler under the pinned Node and checks every
+#   drawn value against ValueType.accepts. Needs `node` 22.x on PATH; no model.
 python -m pytest --run-live --basetemp=.rich/live-tests tests/test_v2_public_runtime_live.py
 # ^ downloads locked pnpm deps + Chromium (>2 GiB); needs a non-tmpfs basetemp and
 #   Linux with Bubblewrap + user namespaces. It does NOT call a model.
