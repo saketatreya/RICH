@@ -1648,6 +1648,24 @@ def test_local_apply_rollback_is_resolved_before_same_process_retry(
     assert not reopened_provider.requests
 
 
+def _claim_once_expired(store, run_id, timeout=30.0):
+    """Take ownership as soon as the incumbent lease lapses.
+
+    Sleeping a fixed interval guesses at wall-clock timing the test does not
+    control. Polling states the actual precondition: the takeover happens the
+    moment expiry makes it legal.
+    """
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return store.claim_run_execution(run_id)
+        except StoreError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 def test_successor_recovery_waits_for_stale_writer_workspace_lock(
     tmp_path, monkeypatch
 ):
@@ -1662,7 +1680,10 @@ def test_successor_recovery_waits_for_stale_writer_workspace_lock(
         expected_status="ready",
         increment_attempt=True,
     )
-    old_lease = store.claim_run_execution(run_id, lease_seconds=0.05)
+    # Comfortable, then collapsed below once the old writer is definitely
+    # stalled. A 50ms lease raced how long it takes to build a prompt and
+    # prepare a transaction, which is not a duration this test controls.
+    old_lease = store.claim_run_execution(run_id, lease_seconds=30)
     approval = ApprovalWitness(
         project_id=state["project"].id,
         project_revision=state["project"].revision,
@@ -1699,7 +1720,7 @@ def test_successor_recovery_waits_for_stale_writer_workspace_lock(
         if not stalled and Path(destination) == generated_path:
             stalled = True
             old_applied.set()
-            assert release_old.wait(3)
+            assert release_old.wait(30)
         return result
 
     monkeypatch.setattr(
@@ -1720,10 +1741,12 @@ def test_successor_recovery_waits_for_stale_writer_workspace_lock(
 
     old_thread = threading.Thread(target=run_old)
     old_thread.start()
-    assert old_applied.wait(2)
+    assert old_applied.wait(30), "the stalled writer never reached its replace"
     assert generated_path.is_file()
-    time.sleep(0.07)
-    successor = store.claim_run_execution(run_id)
+    store.renew_run_execution(
+        run_id, owner_token=old_lease.owner_token, lease_seconds=0.01
+    )
+    successor = _claim_once_expired(store, run_id)
     recovery_outcome = {}
     recovery_started = threading.Event()
 
@@ -1742,14 +1765,17 @@ def test_successor_recovery_waits_for_stale_writer_workspace_lock(
 
     recovery_thread = threading.Thread(target=recover_as_successor)
     recovery_thread.start()
-    assert recovery_started.wait(1)
-    time.sleep(0.05)
+    assert recovery_started.wait(30)
+    # The successor must block on the stale writer's workspace lock rather than
+    # tearing the file out from under it; a moment of observation is enough to
+    # show it is waiting, and the join below proves it eventually finishes.
+    time.sleep(0.2)
     assert recovery_thread.is_alive()
     assert generated_path.is_file()
 
     release_old.set()
-    old_thread.join(3)
-    recovery_thread.join(3)
+    old_thread.join(30)
+    recovery_thread.join(30)
 
     assert not old_thread.is_alive()
     assert not recovery_thread.is_alive()
