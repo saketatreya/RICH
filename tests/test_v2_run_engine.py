@@ -1759,3 +1759,35 @@ def test_successor_recovery_waits_for_stale_writer_workspace_lock(
     transaction = store.list_source_transactions(run_id)[0]
     assert transaction["status"] == "rolled_back"
     assert transaction["resolved_owner_token"] == successor.owner_token
+
+
+def test_source_symlinks_are_rejected_but_the_pnpm_link_farm_is_not(tmp_path):
+    state = _prepared_state(tmp_path)
+    engine = _engine(state, FakeModelProvider(), PassingCommandRunner())
+    workspace = state["workspace"]
+
+    # A pnpm workspace install is a link farm: every workspace:* dependency
+    # becomes a symlink under node_modules pointing back at a sibling package.
+    # Rejecting those made every genuinely bootstrapped run unvalidatable,
+    # which is why this went unnoticed -- no test had ever bootstrapped one.
+    link_root = workspace / "apps/web/node_modules/@scope"
+    link_root.mkdir(parents=True)
+    (link_root / "contracts").symlink_to(
+        workspace / "packages/contracts", target_is_directory=True
+    )
+    (workspace / "node_modules").mkdir(exist_ok=True)
+    (workspace / "node_modules" / "self").symlink_to(
+        workspace, target_is_directory=True
+    )
+
+    assert engine.execute(
+        run_id=state["run"]["id"], workspace=workspace
+    ).succeeded
+
+    # Source is held to the original rule: a symlink there can disguise what a
+    # gate reads, so it is still refused.
+    (workspace / "packages/domain/src/escape.ts").symlink_to(
+        workspace / "package.json"
+    )
+    with pytest.raises(WorkspaceValidationError, match="unsafe symbolic link"):
+        engine.execute(run_id=state["run"]["id"], workspace=workspace)
