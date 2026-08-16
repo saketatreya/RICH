@@ -1015,6 +1015,31 @@ def default_preview_orchestrator(
     )
 
 
+def _database_coordinates(connection_uri: str) -> tuple[str, str]:
+    """Return the (database, role) a Postgres connection URI encodes.
+
+    These are the durable non-secret coordinates ``get_connection_uri`` later
+    replays to re-resolve a credential, so they must round-trip exactly. The
+    URI itself never reaches the exception message.
+    """
+
+    try:
+        split = urlsplit(connection_uri)
+    except ValueError as exc:
+        raise ProviderApiError("Neon returned an unparsable connection URI") from exc
+    database = unquote(split.path).lstrip("/")
+    role = unquote(split.username or "")
+    if not database or not role:
+        raise ProviderApiError(
+            "Neon connection URI does not encode a database and role"
+        )
+    if "/" in database or "\x00" in database or "\x00" in role:
+        raise ProviderApiError(
+            "Neon connection URI encodes an unusable database or role"
+        )
+    return database, role
+
+
 def _deployment(document: Mapping[str, Any]) -> VercelDeployment:
     try:
         deployment_id = str(document["id"])

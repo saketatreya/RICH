@@ -13,10 +13,12 @@ from rich_v2.preview import (
     PreviewOrchestrator,
     PreviewRequest,
     PreviewResult,
+    ProviderApiError,
     SourceChangedSinceApproval,
     SqlMigrationRunner,
     UnsafeSourceTree,
     VercelPreviewDeploymentAdapter,
+    _database_coordinates,
     collect_deployment_files,
     create_deployment_snapshot,
     extract_deployment_snapshot,
@@ -434,3 +436,45 @@ def test_sql_migration_errors_drop_credential_bearing_exception_causes(tmp_path)
 
     assert "highly-secret" not in str(captured.value)
     assert captured.value.__cause__ is None
+
+
+def test_database_coordinates_decode_percent_encoded_role_and_database():
+    database, role = _database_coordinates(
+        "postgresql://owner%40team:secret@ep-test.neon.tech/app%20db"
+    )
+
+    assert database == "app db"
+    assert role == "owner@team"
+
+
+def test_database_coordinates_ignore_query_parameters():
+    database, role = _database_coordinates(
+        "postgresql://owner:secret@ep-test.neon.tech/app"
+        "?sslmode=require&options=project%3Dep-test"
+    )
+
+    assert database == "app"
+    assert role == "owner"
+
+
+@pytest.mark.parametrize(
+    "connection_uri",
+    [
+        "postgresql://owner:secret@ep-test.neon.tech/",
+        "postgresql://owner:secret@ep-test.neon.tech",
+        "postgresql://ep-test.neon.tech/app",
+        "postgresql://:secret@ep-test.neon.tech/app",
+    ],
+    ids=["empty-path", "no-path", "no-role", "blank-role"],
+)
+def test_database_coordinates_reject_incomplete_uris(connection_uri):
+    with pytest.raises(ProviderApiError):
+        _database_coordinates(connection_uri)
+
+
+def test_database_coordinates_never_echo_the_connection_uri():
+    with pytest.raises(ProviderApiError) as captured:
+        _database_coordinates("postgresql://ep-test.neon.tech/app?token=highly-secret")
+
+    assert "highly-secret" not in str(captured.value)
+    assert "ep-test.neon.tech" not in str(captured.value)

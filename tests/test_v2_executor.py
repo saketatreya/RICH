@@ -64,6 +64,33 @@ def _term_ignoring_tree_script(
     )
 
 
+def _assert_process_tree_is_dead(child_pid: Path) -> None:
+    """Assert the reaped grandchild is no longer running.
+
+    The executor's contract is that no *live* member of the process group
+    survives; a SIGKILLed grandchild is reparented, so its ``/proc`` entry can
+    linger briefly as a zombie before init collects it. Poll for the entry to
+    disappear, and accept the zombie state as dead — asserting on the raw
+    ``/proc`` entry alone makes this test fail under load.
+    """
+
+    entry = Path("/proc", child_pid.read_text())
+    deadline = time.monotonic() + 2
+    while entry.exists() and time.monotonic() < deadline:
+        if _process_state(entry) == "Z":
+            return
+        time.sleep(0.01)
+    assert not entry.exists() or _process_state(entry) == "Z"
+
+
+def _process_state(entry: Path) -> str | None:
+    try:
+        stat_line = (entry / "stat").read_text(errors="replace")
+    except OSError:
+        return None
+    return stat_line[stat_line.rfind(")") + 2 :].split()[0]
+
+
 def test_command_denies_network_and_mounts_only_approved_writes(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "out").mkdir()
@@ -264,7 +291,7 @@ def test_deadline_kills_term_ignoring_process_tree_and_reaps_it(tmp_path):
     assert result.duration_seconds < 1
     assert started.is_file()
     assert executor.wait_for_idle(0.1)
-    assert not Path("/proc", child_pid.read_text()).exists()
+    _assert_process_tree_is_dead(child_pid)
     time.sleep(0.65)
     assert not late_marker.exists()
 
@@ -338,7 +365,7 @@ def test_workspace_bootstrap_cancellation_reaps_process_tree(tmp_path):
     assert isinstance(outcome.get("error"), WorkspaceBootstrapError)
     assert "canceled" in str(outcome["error"])
     assert bootstrapper.wait_for_idle(0.1)
-    assert not Path("/proc", child_pid.read_text()).exists()
+    _assert_process_tree_is_dead(child_pid)
     time.sleep(0.65)
     assert not late_marker.exists()
 
