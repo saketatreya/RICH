@@ -898,9 +898,35 @@ def test_verification_cancellation_reaps_descendants_before_run_returns(
     assert "error" not in outcome
     assert outcome["report"].status == "canceled"
     assert runner.wait_for_idle(0.1)
-    assert not Path("/proc", child_pid.read_text()).exists()
+    _assert_process_tree_is_dead(child_pid)
     time.sleep(0.65)
     assert not late_marker.exists()
+
+
+def _assert_process_tree_is_dead(child_pid: Path) -> None:
+    """Assert the reaped grandchild is no longer running.
+
+    The runner's contract is that no *live* process-group member survives; a
+    SIGKILLed grandchild is reparented, so its ``/proc`` entry can linger
+    briefly as a zombie before init collects it. Poll for the entry, and accept
+    the zombie state -- asserting on the raw entry fails under load.
+    """
+
+    entry = Path("/proc", child_pid.read_text())
+    deadline = time.monotonic() + 2
+    while entry.exists() and time.monotonic() < deadline:
+        if _process_state(entry) == "Z":
+            return
+        time.sleep(0.01)
+    assert not entry.exists() or _process_state(entry) == "Z"
+
+
+def _process_state(entry: Path) -> str | None:
+    try:
+        stat_line = (entry / "stat").read_text(errors="replace")
+    except OSError:
+        return None
+    return stat_line[stat_line.rfind(")") + 2 :].split()[0]
 
 
 def test_lease_loss_reaps_verification_descendants_before_return(
@@ -913,8 +939,11 @@ def test_lease_loss_reaps_verification_descendants_before_return(
     runner = _direct_process_command_runner(monkeypatch)
     config = RunEngineConfig(
         task_timeout_seconds=5,
-        execution_lease_seconds=0.3,
-        execution_heartbeat_seconds=0.1,
+        # The injected renewal failure below is what ends this lease. A lease
+        # short enough to lapse on its own would race it, and a slow machine
+        # would see a RevisionConflict escape instead of a clean cancellation.
+        execution_lease_seconds=30,
+        execution_heartbeat_seconds=0.05,
         lint_argv=argv,
         static_argv=argv,
         unit_argv=argv,
@@ -956,14 +985,14 @@ def test_lease_loss_reaps_verification_descendants_before_return(
 
     thread = threading.Thread(target=execute)
     thread.start()
-    assert renewal_failed.wait(2)
-    thread.join(3)
+    assert renewal_failed.wait(10)
+    thread.join(10)
 
     assert not thread.is_alive()
     assert "error" not in outcome
     assert outcome["report"].status == "canceled"
     assert runner.wait_for_idle(0.1)
-    assert not Path("/proc", child_pid.read_text()).exists()
+    _assert_process_tree_is_dead(child_pid)
     time.sleep(0.65)
     assert not late_marker.exists()
 
@@ -998,15 +1027,17 @@ def test_stale_model_terminal_event_is_rejected_after_lease_takeover(
         provider=provider.name,
         model="fake-code-model",
         config=RunEngineConfig(
-            execution_lease_seconds=0.3,
-            execution_heartbeat_seconds=0.1,
+            execution_lease_seconds=30,
+            execution_heartbeat_seconds=0.05,
         ),
         execution_owner_binding=model_events.bind,
     )
     real_renew = state["store"].renew_run_execution
     renewal_failed = threading.Event()
+    owner_tokens: list[str] = []
 
     def fail_renewal_while_provider_is_blocked(*args, **kwargs):
+        owner_tokens.append(kwargs["owner_token"])
         if not provider.started.is_set():
             return real_renew(*args, **kwargs)
         renewal_failed.set()
@@ -1030,10 +1061,24 @@ def test_stale_model_terminal_event_is_rejected_after_lease_takeover(
 
     thread = threading.Thread(target=execute)
     thread.start()
-    assert provider.started.wait(2)
-    assert renewal_failed.wait(2)
+    assert provider.started.wait(10)
+    assert renewal_failed.wait(10)
+    thread.join(10)
+    assert not thread.is_alive()
+    assert "error" not in outcome
+    assert outcome["report"].status == "canceled"
 
-    takeover_deadline = time.monotonic() + 2
+    # A cancelled owner deliberately does not release, so the successor waits
+    # for expiry. Collapse the lease explicitly rather than sizing it to lapse
+    # mid-shutdown: a lease that short races the engine's own cancellation
+    # bookkeeping, and a conflict there escapes as an error instead of the
+    # clean cancellation this test is about.
+    real_renew(
+        state["run"]["id"],
+        owner_token=owner_tokens[-1],
+        lease_seconds=0.01,
+    )
+    takeover_deadline = time.monotonic() + 10
     successor = None
     while successor is None and time.monotonic() < takeover_deadline:
         try:
@@ -1043,10 +1088,6 @@ def test_stale_model_terminal_event_is_rejected_after_lease_takeover(
         except StoreError:
             time.sleep(0.02)
     assert successor is not None
-    thread.join(2)
-    assert not thread.is_alive()
-    assert "error" not in outcome
-    assert outcome["report"].status == "canceled"
 
     provider.release.set()
     assert terminal_attempted.wait(2)

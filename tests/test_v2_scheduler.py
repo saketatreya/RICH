@@ -851,14 +851,22 @@ def test_successor_owner_is_the_only_scheduler_that_can_complete(tmp_path):
     release_first.set()
     first_thread.join(30)
     assert not first_thread.is_alive()
-    assert len(first_errors) == 1
-    assert isinstance(first_errors[0], RevisionConflict)
+    # Two orderings are legal and which one happens is a race: the stale owner
+    # either loses its lease on a fenced write, or reaches _finish after the
+    # successor has already marked the run terminal and correctly finds nothing
+    # left to write. Asserting one of them was asserting the race. What must
+    # hold either way is that it never fails in some other manner, and never
+    # changes anything -- which is what the durable checks below establish.
+    assert all(
+        isinstance(error, RevisionConflict) for error in first_errors
+    ), first_errors
 
     events = store.list_events(run["id"])
     assert sum(
         event["event_type"] == "scheduler.completed" for event in events
     ) == 1
     assert not any(event["event_type"] == "task.canceled" for event in events)
+    assert "stale owner output" not in str(events)
     assert store.get_run(run["id"])["status"] == "succeeded"
     assert store.get_task("run.scheduler:implement:owned")["status"] == "succeeded"
 
