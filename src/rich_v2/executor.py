@@ -238,7 +238,13 @@ class WorkspaceBootstrapper:
 
     runtime: TrustedNodePnpmRuntime
     runtime_directory: str = ".rich/runtime"
-    timeout_seconds: float = 600
+    # One budget covers both installs. A cold bootstrap of the Next.js pack
+    # measured ~7 minutes for the frozen dependency graph (~1.6 GiB) and ~4 for
+    # Chromium (~650 MiB), which overran the previous 600s ceiling on a healthy
+    # connection. Failing a legitimate cold bootstrap is worse than tolerating a
+    # slow one: the sandbox still enforces memory, process, file and CPU limits,
+    # and this deadline remains hard.
+    timeout_seconds: float = 1800
     max_output_bytes: int = 1024 * 1024
     max_network_concurrency: int = 8
     max_fetch_retries: int = 2

@@ -376,7 +376,7 @@ def test_workspace_bootstrap_uses_pinned_commands_and_bounded_network(tmp_path):
     )
     assert "--network-concurrency" in install_argv
     assert install_policy.network is True
-    assert install_policy.timeout_seconds == 600
+    assert install_policy.timeout_seconds == bootstrapper.timeout_seconds == 1800
     assert install_policy.environment["CI"] == "1"
     assert install_policy.environment["PNPM_MAX_WORKERS"] == "1"
     assert install_policy.environment["NODE_OPTIONS"] == (
