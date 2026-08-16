@@ -178,7 +178,7 @@ class ClaudeCodeCliProvider:
             # appending to it: the worker must be bounded by RICH's instructions
             # alone, not by a coding agent's defaults layered underneath.
             "--system-prompt",
-            request.system_prompt,
+            _system_prompt_with_schema(request),
         ]
 
     def _isolated_home(self, root: Path) -> Path:
@@ -221,7 +221,7 @@ class ClaudeCodeCliProvider:
                 request_was_sent=False,
             )
         for label, value in (
-            ("system prompt", request.system_prompt),
+            ("system prompt", _system_prompt_with_schema(request)),
             ("model", request.model),
         ):
             if len(value.encode("utf-8")) > MAX_ARGUMENT_BYTES:
@@ -463,6 +463,32 @@ class ClaudeCodeCliProvider:
                 usage=usage,
                 request_was_sent=True,
             )
+
+
+def _system_prompt_with_schema(request: ModelRequest) -> str:
+    """Carry the response schema in the prompt, since it cannot be enforced.
+
+    The API route hands the schema to the decoder, which makes conformance a
+    property of generation. Here it can only be stated. That difference is not
+    cosmetic: without this, the caller's instruction to "return one JSON object
+    matching the supplied schema" referred to a schema the worker was never
+    shown, and it answered with the right file paths in the wrong envelope.
+
+    Stating it is still only a request. The bundle parser is what enforces it.
+    """
+
+    schema = json.dumps(
+        dict(request.response_schema),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        f"{request.system_prompt}\n\n"
+        "Reply with exactly one JSON object and nothing else: no prose before "
+        "or after it, and no markdown fences. It must validate against this "
+        f"JSON Schema, including every required property:\n{schema}"
+    )
 
 
 def _structured_text(value: Any, usage: Usage) -> str:

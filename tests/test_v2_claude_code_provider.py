@@ -161,10 +161,38 @@ def test_the_worker_is_launched_with_no_tool_affordance_at_all(credential):
     # --system-prompt replaces the harness's own agent prompt; --append would
     # leave a coding agent's defaults underneath RICH's instructions.
     assert "--append-system-prompt" not in argv
-    assert argv[argv.index("--system-prompt") + 1] == _request().system_prompt
+    system_prompt = argv[argv.index("--system-prompt") + 1]
+    assert system_prompt.startswith(_request().system_prompt)
+    # The schema travels in the prompt because this route cannot enforce one.
+    # Omitting it left the caller's "match the supplied schema" pointing at a
+    # schema the worker was never shown.
+    assert '"required":["summary"]' in system_prompt
+    assert "no markdown fences" in system_prompt
     # The task prompt goes over stdin, well clear of the kernel's argv limit.
     assert runner.calls[0]["prompt"] == _request().user_prompt
     assert _request().user_prompt not in argv
+
+
+def test_the_response_schema_is_stated_because_it_cannot_be_enforced(credential):
+    runner = RecordingRunner(_envelope())
+    schema = {
+        "type": "object",
+        "properties": {"summary": {"type": "string"}, "files": {"type": "array"}},
+        "required": ["summary", "files"],
+        "additionalProperties": False,
+    }
+
+    _provider(credential, runner).generate(_request(response_schema=schema))
+
+    argv = runner.calls[0]["argv"]
+    system_prompt = argv[argv.index("--system-prompt") + 1]
+    # Object keys are sorted for a stable prompt; array order is the schema's
+    # own and is left alone.
+    assert '"required":["summary","files"]' in system_prompt
+    # Stating it is only a request; the bundle parser is what enforces it. The
+    # first end-to-end run failed exactly here -- right file paths, wrong
+    # envelope -- because the schema never reached the worker at all.
+    assert "exactly one JSON object" in system_prompt
 
 
 def test_effort_is_explicit_and_validated():
