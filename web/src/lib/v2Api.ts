@@ -496,6 +496,26 @@ export const v2Api = {
       },
     ),
 
+  reviseArchitecture: async (
+    project: Project,
+    specRevisionId: string,
+    specApprovalId: string,
+    architecture: Architecture,
+    decisions: string[] = [],
+    risks: string[] = [],
+  ): Promise<ArchitectureSubmission> =>
+    post<ArchitectureSubmission>(
+      `/v2/projects/${encodeURIComponent(project.id)}/architecture-revisions`,
+      {
+        spec_revision_id: specRevisionId,
+        spec_approval_id: specApprovalId,
+        expected_revision: project.current_revision,
+        architecture,
+        decisions,
+        risks,
+      },
+    ),
+
   decideApproval: async (
     approvalId: string,
     approved: boolean,

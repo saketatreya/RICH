@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
-from typing import Any, Mapping, Protocol
+from typing import Any, Iterable, Mapping, Protocol
 from uuid import uuid4
 
 from .budget import RunBudget
@@ -186,6 +186,78 @@ class ControlPlane:
             raise ValueError("spec revision does not belong to the requested project")
         spec = ProjectSpecV2.from_dict(spec_revision.document)
         proposal = plan_nextjs_architecture(spec)
+        return self._save_architecture(
+            project_id=project_id,
+            spec_revision_id=spec_revision_id,
+            expected_revision=expected_revision,
+            proposal=proposal,
+        )
+
+    def revise_architecture(
+        self,
+        *,
+        project_id: str,
+        spec_revision_id: str,
+        spec_approval_id: str,
+        expected_revision: int,
+        document: Mapping[str, Any],
+        decisions: Iterable[str] = (),
+        risks: Iterable[str] = (),
+    ) -> ArchitectureSubmission:
+        """Record an architecture a human authored or corrected.
+
+        ``propose_architecture`` discards whatever it is given and re-derives
+        the graph, which makes rejecting a proposal a dead end: the only way to
+        a different architecture is to change the spec until the planner
+        happens to emit one. That is a veto, not a review.
+
+        This takes the document instead. It is not a weaker gate -- the
+        document goes through exactly the same constructor, the same
+        ``validate_against_project``, and the same compiler as anything the
+        planner produces, and it lands as a new immutable revision needing its
+        own approval. What changes is only who may author the proposal.
+        """
+
+        self._require_approval(
+            spec_approval_id,
+            gate="product_spec",
+            project_id=project_id,
+            revision_id=spec_revision_id,
+        )
+        spec_revision = self.store.get_revision(spec_revision_id)
+        if (
+            spec_revision.project_id != project_id
+            or spec_revision.kind != "product_spec"
+        ):
+            raise ValueError("spec revision does not belong to the requested project")
+        spec = ProjectSpecV2.from_dict(spec_revision.document)
+        architecture = ArchitectureSpecV2.from_dict(document)
+        if architecture.project_id != project_id:
+            raise ValueError("architecture belongs to a different project")
+        architecture.validate_against_project(spec)
+        # Compile before storing. A graph that validates but cannot be compiled
+        # into tasks is not an architecture anyone can act on, and finding that
+        # out at run-preparation time would strand an approved revision.
+        compile_architecture(architecture, spec)
+        return self._save_architecture(
+            project_id=project_id,
+            spec_revision_id=spec_revision_id,
+            expected_revision=expected_revision,
+            proposal=ArchitectureProposal(
+                architecture=architecture,
+                decisions=tuple(decisions),
+                risks=tuple(risks),
+            ),
+        )
+
+    def _save_architecture(
+        self,
+        *,
+        project_id: str,
+        spec_revision_id: str,
+        expected_revision: int,
+        proposal: ArchitectureProposal,
+    ) -> ArchitectureSubmission:
         architecture = proposal.architecture
         revision = self.store.save_revision(
             project_id,

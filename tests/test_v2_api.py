@@ -578,3 +578,206 @@ def test_a_journal_is_readable_through_the_run_that_wrote_it(tmp_path):
     assert fetched.status == 200
     original = fetched.body["content"]["files"][0]["original"]
     assert base64.b64decode(original["content_base64"]) == b"export const a = 1;\n"
+
+
+# --------------------------------------------------------------------------
+# Editing the machine's proposal. Without this, rejecting one is a dead end:
+# the only route to a different architecture is to change the spec until the
+# planner happens to emit one, which is a veto rather than a review.
+# --------------------------------------------------------------------------
+
+
+def _approved_spec(application):
+    application.handle(
+        "POST",
+        "/v2/projects",
+        body={"project_id": "project.edit", "name": "Edit"},
+        headers=_headers("k-project"),
+    )
+    submission = application.handle(
+        "POST",
+        "/v2/projects/project.edit/spec-submissions",
+        body={
+            "project_name": "Edit",
+            "expected_revision": 0,
+            "answers": {
+                "goal": "Publish an accessible launch checklist.",
+                "audiences": ["technical founders"],
+                "capabilities": [
+                    {
+                        "id": "req.checklist",
+                        "title": "Launch checklist",
+                        "statement": "A founder can review the approved checklist.",
+                    }
+                ],
+                "quality_constraints": [
+                    {
+                        "id": "req.a11y",
+                        "title": "Keyboard access",
+                        "statement": "The checklist is operable with a keyboard.",
+                    }
+                ],
+                "scenarios": [
+                    {
+                        "id": "scenario.checklist",
+                        "title": "Review checklist",
+                        "when": ["A founder opens the checklist."],
+                        "then": ["The approved checklist is visible."],
+                        "requirement_ids": ["req.checklist"],
+                        "oracle": [
+                            {"action": "navigate", "value": "/"},
+                            {
+                                "action": "assert_visible",
+                                "locator": {"kind": "text", "value": "Checklist"},
+                            },
+                        ],
+                    },
+                    {
+                        "id": "scenario.a11y",
+                        "title": "Keyboard",
+                        "when": ["A founder uses a keyboard."],
+                        "then": ["The checklist responds."],
+                        "requirement_ids": ["req.a11y"],
+                        "oracle": [
+                            {"action": "navigate", "value": "/"},
+                            {
+                                "action": "assert_visible",
+                                "locator": {"kind": "role", "value": "link"},
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+        headers=_headers("k-spec"),
+    ).body
+    application.handle(
+        "POST",
+        f"/v2/approvals/{submission['approval']['id']}/decisions",
+        body={"approved": True, "actor": "founder", "reason": "looks right"},
+        headers=_headers("k-decide"),
+    )
+    return submission
+
+
+def test_a_human_edited_architecture_becomes_its_own_revision(tmp_path):
+    application = V2Application(RichStore(tmp_path))
+    spec = _approved_spec(application)
+    proposed = application.handle(
+        "POST",
+        "/v2/projects/project.edit/architecture-submissions",
+        body={
+            "spec_revision_id": spec["revision"]["id"],
+            "spec_approval_id": spec["approval"]["id"],
+            "expected_revision": 1,
+        },
+        headers=_headers("k-arch"),
+    ).body
+
+    edited = json.loads(json.dumps(proposed["architecture"]))
+    for node in edited["nodes"]:
+        if node["id"] == "web":
+            node["name"] = "Renamed by a human"
+
+    response = application.handle(
+        "POST",
+        "/v2/projects/project.edit/architecture-revisions",
+        body={
+            "spec_revision_id": spec["revision"]["id"],
+            "spec_approval_id": spec["approval"]["id"],
+            "expected_revision": 2,
+            "architecture": edited,
+            "decisions": ["Renamed the web node."],
+        },
+        headers=_headers("k-revise"),
+    )
+
+    assert response.status == 201
+    names = {
+        node["id"]: node["name"] for node in response.body["architecture"]["nodes"]
+    }
+    assert names["web"] == "Renamed by a human"
+    # A new immutable revision needing its own approval; the earlier one is
+    # untouched, because approving one revision never authorizes another.
+    assert response.body["revision"]["id"] != proposed["revision"]["id"]
+    assert response.body["approval"]["status"] == "requested"
+    assert response.body["decisions"] == ["Renamed the web node."]
+
+
+def test_an_edited_architecture_faces_exactly_the_same_validators(tmp_path):
+    application = V2Application(RichStore(tmp_path))
+    spec = _approved_spec(application)
+    proposed = application.handle(
+        "POST",
+        "/v2/projects/project.edit/architecture-submissions",
+        body={
+            "spec_revision_id": spec["revision"]["id"],
+            "spec_approval_id": spec["approval"]["id"],
+            "expected_revision": 1,
+        },
+        headers=_headers("k-arch"),
+    ).body
+
+    broken = json.loads(json.dumps(proposed["architecture"]))
+    # A plausible human edit: delete the behaviors that serve one requirement,
+    # because you decided this layer should not handle it. The graph stays
+    # structurally sound; it just stops delivering the whole product.
+    for node in broken["nodes"]:
+        node["requirement_ids"] = [
+            value for value in node["requirement_ids"] if value != "req.a11y"
+        ]
+    for contract in broken["contracts"]:
+        for collection in ("operations", "invariants", "obligations"):
+            contract[collection] = [
+                behavior
+                for behavior in contract.get(collection, [])
+                if behavior["requirement_ids"] != ["req.a11y"]
+            ]
+
+    response = application.handle(
+        "POST",
+        "/v2/projects/project.edit/architecture-revisions",
+        body={
+            "spec_revision_id": spec["revision"]["id"],
+            "spec_approval_id": spec["approval"]["id"],
+            "expected_revision": 2,
+            "architecture": broken,
+        },
+        headers=_headers("k-broken"),
+    )
+
+    # Letting a human author the document changes who proposes, not what is
+    # checked -- and the rejection names the fixable thing, because that
+    # message is the human's feedback too.
+    assert response.status == 400
+    assert "req.a11y" in response.body["message"]
+
+
+def test_editing_an_architecture_still_needs_the_spec_approval(tmp_path):
+    application = V2Application(RichStore(tmp_path))
+    spec = _approved_spec(application)
+    proposed = application.handle(
+        "POST",
+        "/v2/projects/project.edit/architecture-submissions",
+        body={
+            "spec_revision_id": spec["revision"]["id"],
+            "spec_approval_id": spec["approval"]["id"],
+            "expected_revision": 1,
+        },
+        headers=_headers("k-arch"),
+    ).body
+
+    response = application.handle(
+        "POST",
+        "/v2/projects/project.edit/architecture-revisions",
+        body={
+            "spec_revision_id": spec["revision"]["id"],
+            # The architecture approval is not a substitute for the spec one.
+            "spec_approval_id": proposed["approval"]["id"],
+            "expected_revision": 2,
+            "architecture": proposed["architecture"],
+        },
+        headers=_headers("k-wrong-gate"),
+    )
+
+    assert response.status == 403

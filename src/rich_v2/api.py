@@ -347,16 +347,26 @@ class V2Application:
                 spec_approval_id=_required(body, "spec_approval_id"),
                 expected_revision=_required_int(body, "expected_revision"),
             )
-            return ApiResponse(
-                201,
-                {
-                    "architecture": submission.proposal.architecture.to_dict(),
-                    "decisions": list(submission.proposal.decisions),
-                    "risks": list(submission.proposal.risks),
-                    "revision": asdict(submission.revision),
-                    "approval": submission.approval,
-                },
+            return _architecture_response(submission)
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v2", "projects"]
+            and parts[3] == "architecture-revisions"
+            and method == "POST"
+        ):
+            architecture = body.get("architecture")
+            if not isinstance(architecture, Mapping):
+                raise ValueError("architecture document is required")
+            submission = self.control_plane.revise_architecture(
+                project_id=parts[2],
+                spec_revision_id=_required(body, "spec_revision_id"),
+                spec_approval_id=_required(body, "spec_approval_id"),
+                expected_revision=_required_int(body, "expected_revision"),
+                document=architecture,
+                decisions=_optional_strings(body, "decisions"),
+                risks=_optional_strings(body, "risks"),
             )
+            return _architecture_response(submission)
         if (
             len(parts) == 4
             and parts[:2] == ["v2", "approvals"]
@@ -613,6 +623,30 @@ class V2Application:
         if not relative.parts:
             raise ValueError("scaffold destination cannot be the workspace root")
         return candidate
+
+
+def _architecture_response(submission: Any) -> ApiResponse:
+    return ApiResponse(
+        201,
+        {
+            "architecture": submission.proposal.architecture.to_dict(),
+            "decisions": list(submission.proposal.decisions),
+            "risks": list(submission.proposal.risks),
+            "revision": asdict(submission.revision),
+            "approval": submission.approval,
+        },
+    )
+
+
+def _optional_strings(body: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    value = body.get(key)
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) for item in value
+    ):
+        raise ValueError(f"{key} must be a list of strings")
+    return tuple(value)
 
 
 def _error_response(exc: Exception) -> ApiResponse:
