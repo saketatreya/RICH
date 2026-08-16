@@ -252,6 +252,9 @@ def test_a_real_model_authors_source_that_independent_gates_judge(tmp_path):
         config=RunEngineConfig(
             max_task_attempts=2,
             task_timeout_seconds=1_800,
+            # Route-specific: the CLI adds harness overhead on top of
+            # generation and cannot cap output before the fact.
+            coding_limits=runtime.coding_limits,
             lint_argv=runtime.commands.lint_argv,
             static_argv=runtime.commands.static_argv,
             unit_argv=runtime.commands.unit_argv,
@@ -277,24 +280,24 @@ def test_a_real_model_authors_source_that_independent_gates_judge(tmp_path):
     assert runtime.ledger.usage.cost_usd > Decimal("0")
     assert runtime.ledger.usage.output_tokens > 0
 
-    # Generation is never evidence. Every published success must be backed by
-    # a command the trusted runner observed itself.
     published = [
         event
         for event in durable
         if event["event_type"] == "evidence.recorded"
         and event.get("payload", {}).get("status") == "passed"
     ]
-    for event in published:
-        assert event["payload"]["kind"] in {
-            "lint",
-            "static",
-            "unit",
-            "build",
-            "acceptance",
-            "schema",
-            "generation",
-        }
+    kinds_published = {event["payload"]["kind"] for event in published}
+    # Generation is never evidence of behavior. A run may record that source
+    # was produced and applied, but the gate kinds are what a verdict rests on,
+    # and at least one of them has to have actually run.
+    assert kinds_published & {"lint", "static", "unit", "build", "acceptance"}, (
+        f"nothing was independently verified: {sorted(kinds_published)}"
+    )
+    generation = [
+        event for event in published if event["payload"]["kind"] == "generation"
+    ]
+    for event in generation:
+        assert "verification was not run" in event["payload"]["summary"]
 
     # The model may or may not have produced code the gates accept -- that is
     # the open question this test exists to answer, and either answer is

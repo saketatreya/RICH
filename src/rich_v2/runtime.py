@@ -9,7 +9,7 @@ the provider is about to cross the network boundary.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 import os
 from typing import Any
@@ -22,6 +22,7 @@ from .anthropic_provider import (
 )
 from .budget import BudgetLedger, RunBudget, Usage
 from .claude_code_provider import CLAUDE_CODE_PROVIDER, ClaudeCodeCliProvider
+from .coding import DEFAULT_LIMITS, CodingLimits
 from .executor import (
     BubblewrapExecutor,
     TrustedNodePnpmRuntime,
@@ -66,6 +67,25 @@ MODEL_ROUTES: dict[str, str] = {
     API_ROUTE: DEFAULT_PROVIDER,
     CLAUDE_CODE_ROUTE: CLAUDE_CODE_PROVIDER,
 }
+# The CLI route needs different bounds, from measurement rather than taste. On
+# the reference project one task generated 9,275 output tokens against the
+# 8,000 the API route reserves, and took 86 seconds against a 120-second
+# attempt limit -- close enough that the same task timed out twice inside the
+# run engine. Neither number is a defect in the model: this route adds harness
+# startup and auxiliary calls on top of generation, and it cannot cap output
+# before the fact, so it needs headroom the bounded HTTP route does not.
+CLAUDE_CODE_LIMITS = replace(
+    DEFAULT_LIMITS,
+    max_output_tokens=24_000,
+    # Not rate-derived: on this route the harness reports what an attempt
+    # actually cost, so this is a per-attempt ceiling rather than an estimate.
+    max_cost_usd=Decimal("1.00"),
+    timeout_seconds=600,
+)
+CODING_LIMITS_BY_ROUTE: dict[str, CodingLimits] = {
+    API_ROUTE: DEFAULT_LIMITS,
+    CLAUDE_CODE_ROUTE: CLAUDE_CODE_LIMITS,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +128,7 @@ class DefaultRunRuntime:
     provider_name: str = DEFAULT_PROVIDER
     model: str = DEFAULT_MODEL
     route: str = API_ROUTE
+    coding_limits: CodingLimits = DEFAULT_LIMITS
 
     @property
     def executor(self) -> BubblewrapExecutor:
@@ -201,6 +222,7 @@ class DefaultRunRuntimeFactory:
             commands=PinnedRunCommands.for_toolchain(toolchain),
             provider_name=MODEL_ROUTES[self.route],
             route=self.route,
+            coding_limits=CODING_LIMITS_BY_ROUTE[self.route],
         )
 
 
