@@ -274,6 +274,13 @@ def test_the_slice_keeps_operations_a_retained_obligation_names():
                 requirement_ids=("req.one",),
                 example=ObligationExample(argument=True, result=False),
             ),
+            ProofObligation(
+                id="obl.decode.example",
+                relation=ObligationRelation.EXAMPLE,
+                subject_operation_id="op.decode",
+                requirement_ids=("req.two",),
+                example=ObligationExample(argument=False, result=True),
+            ),
         ),
     )
 

@@ -1927,18 +1927,24 @@ class ContractV2:
             if obligation.relation is ObligationRelation.EXAMPLE:
                 anchored.add(subject.id)
             else:
-                constrained.add(subject.id)
+                # Every operation the obligation names, not just its subject.
+                # A predicate that always returns true makes PRESERVES and
+                # ESTABLISHES trivially true no matter what the subject does,
+                # and a guard that always returns false makes TOTAL trivially
+                # true by excluding every case. Anchoring only subjects would
+                # leave both holes open.
+                constrained.update(obligation.operand_operation_ids)
         unanchored = constrained - anchored
         if unanchored:
             # Identity satisfies IDEMPOTENT, PRESERVES and ROUND_TRIP, and a
             # function that never fails satisfies TOTAL.  Without at least one
-            # ground example pinning what the operation actually computes, a
-            # passing property gate -- or a machine-checked proof -- says
-            # nothing at all.
+            # ground example pinning what each named operation actually
+            # computes, a passing property gate -- or a machine-checked proof --
+            # says nothing at all.
             raise ModelValidationError(
-                "every operation constrained by a non-example obligation needs at "
-                "least one example obligation to rule out a trivial "
-                f"implementation; unanchored operations: {sorted(unanchored)}"
+                "every operation a non-example obligation names needs at least "
+                "one example obligation to rule out a trivial implementation; "
+                f"unanchored operations: {sorted(unanchored)}"
             )
 
     @staticmethod

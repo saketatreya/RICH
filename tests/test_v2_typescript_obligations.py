@@ -146,7 +146,11 @@ def test_round_trip_pipes_the_subject_through_its_witness():
     suite = compile_obligation_suite(
         _contract(
             (subject, witness),
-            (obligation, _example("op.encode", "encode", 1, "b")),
+            (
+                obligation,
+                _example("op.encode", "encode", 1, "b"),
+                _example("op.decode", "decode", "b", 1),
+            ),
         )
     )
 
@@ -173,7 +177,11 @@ def test_preservation_skips_cases_the_predicate_rejects():
     suite = compile_obligation_suite(
         _contract(
             (subject, predicate),
-            (obligation, _example("op.insert", "insert", [1], [1])),
+            (
+                obligation,
+                _example("op.insert", "insert", [1], [1]),
+                _example("op.sorted", "isSorted", [1], True),
+            ),
         )
     )
 
@@ -200,7 +208,11 @@ def test_establishment_judges_the_output_unconditionally():
     suite = compile_obligation_suite(
         _contract(
             (subject, predicate),
-            (obligation, _example("op.render", "render", 1, "b")),
+            (
+                obligation,
+                _example("op.render", "render", 1, "b"),
+                _example("op.lower", "isLower", "b", True),
+            ),
         )
     )
 
@@ -236,11 +248,15 @@ def test_totality_asserts_no_throw_and_honours_its_guard():
         sample_size=8,
     )
 
+    guard_anchor = _example("op.nonzero", "isNonZero", 1, True)
+
     plain = compile_obligation_suite(_contract((subject, guard), (unguarded, anchor)))
     assert "expect(() => operations.divide(value)).not.toThrow()" in plain
     assert "isNonZero" not in plain
 
-    fenced = compile_obligation_suite(_contract((subject, guard), (guarded, anchor)))
+    fenced = compile_obligation_suite(
+        _contract((subject, guard), (guarded, anchor, guard_anchor))
+    )
     assert "if (!operations.isNonZero(value)) continue;" in fenced
 
 
@@ -515,3 +531,297 @@ def test_the_generator_source_is_shipped_where_the_suite_imports_it():
     assert suite_import in suite
     assert "do not edit" in suite
     assert "do not edit" in VALUE_GENERATOR_SOURCE
+
+
+# --------------------------------------------------------------------------
+# The whole point: a compiled suite must fail a wrong implementation.
+# Run it for real under the pinned Node, with a vitest shim rather than an
+# install, so the generated file executes exactly as written.
+# --------------------------------------------------------------------------
+
+
+LIST_OF_INT = ValueType(
+    kind=ValueTypeKind.LIST,
+    element=ValueType(kind=ValueTypeKind.INTEGER, minimum=-20, maximum=20),
+    max_length=6,
+)
+ENCODED = ValueType(
+    kind=ValueTypeKind.STRING, max_length=64, char_set=CharSet.ASCII_PRINTABLE
+)
+
+
+def _sorting_contract():
+    operations = (
+        _operation("op.sort", "sortList", input_type=LIST_OF_INT, output_type=LIST_OF_INT),
+        _operation("op.sorted", "isSorted", input_type=LIST_OF_INT, output_type=BOOLEAN),
+        _operation("op.encode", "encodeList", input_type=LIST_OF_INT, output_type=ENCODED),
+        _operation("op.decode", "decodeList", input_type=ENCODED, output_type=LIST_OF_INT),
+    )
+    obligations = (
+        _example("op.sort", "sortList", [3, 1, 2], [1, 2, 3]),
+        # A negative anchor, deliberately: an always-true predicate is what
+        # makes ESTABLISHES vacuous, and only a case it must reject rules it out.
+        _example("op.sorted", "isSorted", [2, 1], False),
+        _example("op.encode", "encodeList", [1, 2], "1,2"),
+        _example("op.decode", "decodeList", "1,2", [1, 2]),
+        ProofObligation(
+            id="obl.sort.idempotent",
+            relation=ObligationRelation.IDEMPOTENT,
+            subject_operation_id="op.sort",
+            requirement_ids=("req.core",),
+            sample_size=200,
+        ),
+        ProofObligation(
+            id="obl.sort.establishes",
+            relation=ObligationRelation.ESTABLISHES,
+            subject_operation_id="op.sort",
+            predicate_operation_id="op.sorted",
+            requirement_ids=("req.core",),
+            sample_size=200,
+        ),
+        ProofObligation(
+            id="obl.codec.round_trip",
+            relation=ObligationRelation.ROUND_TRIP,
+            subject_operation_id="op.encode",
+            witness_operation_id="op.decode",
+            requirement_ids=("req.core",),
+            sample_size=200,
+        ),
+    )
+    return _contract(operations, obligations)
+
+
+CORRECT_OPERATIONS = """\
+export const operations = {
+  sortList(input: number[]): number[] {
+    return [...input].sort((a, b) => a - b);
+  },
+  isSorted(input: number[]): boolean {
+    return input.every((value, index) => index === 0 || input[index - 1] <= value);
+  },
+  encodeList(input: number[]): string {
+    return input.join(",");
+  },
+  decodeList(input: string): number[] {
+    return input === "" ? [] : input.split(",").map((part) => Number(part));
+  },
+};
+"""
+
+# Each of these is wrong in exactly one way, to show which claim catches it.
+WRONG_OPERATIONS = {
+    # Identity satisfies IDEMPOTENT perfectly. Nothing but the ground example
+    # and the predicate claim can tell it apart from a real sort.
+    "sort_is_identity": CORRECT_OPERATIONS.replace(
+        "return [...input].sort((a, b) => a - b);", "return [...input];"
+    ),
+    # An always-true predicate would make ESTABLISHES pass for any subject.
+    "predicate_always_true": CORRECT_OPERATIONS.replace(
+        "return input.every((value, index) => index === 0 || input[index - 1] <= value);",
+        "return true;",
+    ),
+    # Loses information, so the witness cannot recover the input.
+    "encode_drops_data": CORRECT_OPERATIONS.replace(
+        'return input.join(",");', 'return input.slice(0, 1).join(",");'
+    ),
+    # Sorts, but not stably against duplicates in a way the example pins.
+    "sort_reverses": CORRECT_OPERATIONS.replace(
+        "return [...input].sort((a, b) => a - b);",
+        "return [...input].sort((a, b) => b - a);",
+    ),
+}
+
+
+_VITEST_SHIM = """\
+const failures = [];
+const passes = [];
+let suite = null;
+
+export function describe(name, body) {
+  suite = name;
+  body();
+}
+
+export function it(name, body) {
+  try {
+    body();
+    passes.push(name);
+  } catch (error) {
+    failures.push({ name, message: String(error && error.message ? error.message : error) });
+  }
+}
+
+function fail(message) {
+  throw new Error(message);
+}
+
+export function expect(actual) {
+  const matchers = {
+    toBe(expected) {
+      if (!Object.is(actual, expected)) {
+        fail(`expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+      }
+    },
+    toThrow() {
+      let threw = false;
+      try { actual(); } catch { threw = true; }
+      if (!threw) fail("expected a throw");
+    },
+    not: {
+      toBe(expected) {
+        if (Object.is(actual, expected)) fail("expected a difference");
+      },
+      toThrow() {
+        try { actual(); } catch (error) { fail(`threw: ${error}`); }
+      },
+    },
+  };
+  return matchers;
+}
+
+process.on("exit", () => {
+  process.stdout.write(JSON.stringify({ suite, passes, failures }) + "\\n");
+});
+"""
+
+_TS_RESOLVER = """\
+export async function resolve(specifier, context, next) {
+  if (specifier.startsWith(".") && !/\\.[a-z]+$/.test(specifier)) {
+    try {
+      return await next(specifier + ".ts", context);
+    } catch {
+      // fall through to the default resolution below
+    }
+  }
+  return next(specifier, context);
+}
+"""
+
+_REGISTER = """\
+import { register } from "node:module";
+import { pathToFileURL } from "node:url";
+
+register("./ts-resolve.mjs", pathToFileURL("./"));
+"""
+
+
+def _run_suite(node, root, contract, operations_source):
+    """Execute a compiled suite against one implementation, unmodified."""
+
+    (root / "tests" / "properties").mkdir(parents=True)
+    (root / "packages" / "domain" / "src").mkdir(parents=True)
+    (root / "node_modules" / "vitest").mkdir(parents=True)
+
+    (root / "tests/properties/rich-value-generator.ts").write_text(
+        VALUE_GENERATOR_SOURCE
+    )
+    (root / "tests/properties/obligations.test.ts").write_text(
+        compile_obligation_suite(contract)
+    )
+    (root / "packages/domain/src/operations.ts").write_text(operations_source)
+    # A shim rather than an install: the suite has to run exactly as generated,
+    # and pulling 2 GiB of packages to learn whether an assertion fires would
+    # tell us nothing extra.
+    (root / "node_modules/vitest/package.json").write_text(
+        json.dumps({"name": "vitest", "version": "0.0.0", "type": "module", "main": "index.js"})
+    )
+    (root / "node_modules/vitest/index.js").write_text(_VITEST_SHIM)
+    # Node ESM will not resolve an extensionless relative import; vitest does.
+    # A resolve hook supplies that instead of editing the generated import.
+    (root / "ts-resolve.mjs").write_text(_TS_RESOLVER)
+    (root / "register.mjs").write_text(_REGISTER)
+
+    result = subprocess.run(
+        [
+            node,
+            "--experimental-strip-types",
+            "--import",
+            "./register.mjs",
+            "tests/properties/obligations.test.ts",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=root,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def _failed_obligations(report):
+    return {failure["name"].split(":")[0] for failure in report["failures"]}
+
+
+@pytest.mark.live
+def test_a_correct_implementation_satisfies_every_compiled_obligation(tmp_path):
+    node = _node()
+
+    report = _run_suite(node, tmp_path, _sorting_contract(), CORRECT_OPERATIONS)
+
+    assert report["failures"] == [], report["failures"]
+    assert len(report["passes"]) == 7
+
+
+@pytest.mark.live
+@pytest.mark.parametrize(
+    ("defect", "expected"),
+    [
+        # Identity is idempotent, so IDEMPOTENT does not fire. The ground
+        # example and the predicate claim are what catch it -- which is the
+        # anti-vacuity rule paying for itself in running code.
+        (
+            "sort_is_identity",
+            {"obl.sortList.example", "obl.sort.establishes"},
+        ),
+        ("predicate_always_true", {"obl.isSorted.example"}),
+        (
+            "encode_drops_data",
+            {"obl.encodeList.example", "obl.codec.round_trip"},
+        ),
+        ("sort_reverses", {"obl.sortList.example", "obl.sort.establishes"}),
+    ],
+)
+def test_each_defect_is_caught_by_the_obligation_that_should_catch_it(
+    defect, expected, tmp_path
+):
+    node = _node()
+
+    report = _run_suite(
+        node, tmp_path, _sorting_contract(), WRONG_OPERATIONS[defect]
+    )
+
+    assert _failed_obligations(report) == expected, report["failures"]
+
+
+@pytest.mark.live
+def test_idempotence_alone_cannot_tell_identity_from_a_real_sort(tmp_path):
+    """The empirical case for requiring a ground example alongside a property."""
+
+    node = _node()
+    contract = _contract(
+        (
+            _operation(
+                "op.sort", "sortList", input_type=LIST_OF_INT, output_type=LIST_OF_INT
+            ),
+        ),
+        (
+            _example("op.sort", "sortList", [3, 1, 2], [1, 2, 3]),
+            ProofObligation(
+                id="obl.sort.idempotent",
+                relation=ObligationRelation.IDEMPOTENT,
+                subject_operation_id="op.sort",
+                requirement_ids=("req.core",),
+                sample_size=200,
+            ),
+        ),
+    )
+
+    report = _run_suite(
+        node, tmp_path, contract, WRONG_OPERATIONS["sort_is_identity"]
+    )
+
+    # 200 random cases, and the property is perfectly satisfied by a function
+    # that does nothing. Only the single ground fact fails.
+    assert "obl.sort.idempotent" in {
+        name.split(":")[0] for name in report["passes"]
+    }
+    assert _failed_obligations(report) == {"obl.sortList.example"}

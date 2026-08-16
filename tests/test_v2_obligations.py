@@ -488,6 +488,54 @@ def test_an_operation_constrained_without_an_example_is_rejected_as_vacuous():
     }
 
 
+def test_a_predicate_or_guard_must_be_anchored_too_not_just_the_subject():
+    # Anchoring only the subject leaves the claim trivialisable from the other
+    # side: an always-true predicate satisfies ESTABLISHES and PRESERVES
+    # whatever the subject does, and an always-false guard satisfies TOTAL by
+    # excluding every case. Both are exactly as vacuous as an unanchored
+    # subject, so the rule covers every operation an obligation names.
+    render = _operation("op.render", input_type=SMALL_INT, output_type=SHORT_TEXT)
+    predicate = _operation("op.lower", input_type=SHORT_TEXT, output_type=BOOLEAN)
+    establishes = ProofObligation(
+        id="obl.render.establishes",
+        relation=ObligationRelation.ESTABLISHES,
+        subject_operation_id="op.render",
+        predicate_operation_id="op.lower",
+        requirement_ids=("req.core",),
+        sample_size=8,
+    )
+    subject_anchor = _example("op.render", 1, "b")
+
+    with pytest.raises(ModelValidationError, match="op.lower"):
+        _contract((render, predicate), (establishes, subject_anchor))
+
+    predicate_anchor = _example(
+        "op.lower", "b", True, obligation_id="obl.lower.example"
+    )
+    assert _contract(
+        (render, predicate), (establishes, subject_anchor, predicate_anchor)
+    ).obligations
+
+    divide = _operation(
+        "op.divide",
+        input_type=SMALL_INT,
+        output_type=SMALL_INT,
+        errors=(ErrorContract(id="err.zero", code="ZERO", description="No zero."),),
+    )
+    guard = _operation("op.nonzero", input_type=SMALL_INT, output_type=BOOLEAN)
+    total = ProofObligation(
+        id="obl.divide.total",
+        relation=ObligationRelation.TOTAL,
+        subject_operation_id="op.divide",
+        guard_operation_id="op.nonzero",
+        requirement_ids=("req.core",),
+        sample_size=8,
+    )
+
+    with pytest.raises(ModelValidationError, match="op.nonzero"):
+        _contract((divide, guard), (total, _example("op.divide", 4, 2)))
+
+
 def test_totality_of_an_operation_that_cannot_fail_is_rejected():
     infallible = _operation("op.pure", input_type=SMALL_INT, output_type=SMALL_INT)
     total = ProofObligation(
@@ -548,22 +596,28 @@ def test_round_trip_requires_the_witness_to_invert_the_subject():
         requirement_ids=("req.core",),
         sample_size=16,
     )
-    anchor = _example("op.encode", 1, "b")
+    anchors = (
+        _example("op.encode", 1, "b"),
+        _example("op.decode", "b", 1, obligation_id="obl.decode.example"),
+    )
 
     with pytest.raises(ModelValidationError, match="return the subject's input"):
-        _contract((encode, wrong), (obligation, anchor))
+        _contract((encode, wrong), (obligation, *anchors))
 
     swapped = _operation("op.decode", input_type=BOOLEAN, output_type=SMALL_INT)
     with pytest.raises(ModelValidationError, match="accept the subject's output"):
-        _contract((encode, swapped), (obligation, anchor))
+        _contract((encode, swapped), (obligation, _example("op.encode", 1, "b")))
 
     right = _operation("op.decode", input_type=SHORT_TEXT, output_type=SMALL_INT)
-    assert _contract((encode, right), (obligation, anchor)).obligations
+    assert _contract((encode, right), (obligation, *anchors)).obligations
 
 
 def test_preserves_and_establishes_require_a_boolean_predicate_over_the_right_domain():
     insert = _operation("op.insert", input_type=INT_LIST, output_type=INT_LIST)
     anchor = _example("op.insert", [2], [2])
+    sorted_anchor = _example(
+        "op.sorted", [2], True, obligation_id="obl.sorted.example"
+    )
     not_boolean = _operation("op.sorted", input_type=INT_LIST, output_type=SMALL_INT)
     preserves = ProofObligation(
         id="obl.insert.preserves",
@@ -582,7 +636,9 @@ def test_preserves_and_establishes_require_a_boolean_predicate_over_the_right_do
         _contract((insert, wrong_domain), (preserves, anchor))
 
     sorted_predicate = _operation("op.sorted", input_type=INT_LIST, output_type=BOOLEAN)
-    assert _contract((insert, sorted_predicate), (preserves, anchor)).obligations
+    assert _contract(
+        (insert, sorted_predicate), (preserves, anchor, sorted_anchor)
+    ).obligations
 
     # ESTABLISHES judges the *output*, so its predicate accepts the output type.
     render = _operation("op.render", input_type=SMALL_INT, output_type=SHORT_TEXT)
@@ -604,7 +660,12 @@ def test_preserves_and_establishes_require_a_boolean_predicate_over_the_right_do
         "op.lowercase", input_type=SHORT_TEXT, output_type=BOOLEAN
     )
     assert _contract(
-        (render, judges_output), (establishes, _example("op.render", 1, "b"))
+        (render, judges_output),
+        (
+            establishes,
+            _example("op.render", 1, "b"),
+            _example("op.lowercase", "b", True, obligation_id="obl.lower.example"),
+        ),
     ).obligations
 
 
