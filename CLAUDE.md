@@ -26,6 +26,10 @@ python -m pytest --run-live tests/test_v2_claude_code_provider.py
 python -m pytest --run-live --basetemp=.rich/live-tests tests/test_v2_public_runtime_live.py
 # ^ downloads locked pnpm deps + Chromium (>2 GiB); needs a non-tmpfs basetemp and
 #   Linux with Bubblewrap + user namespaces. It does NOT call a model.
+python -m pytest --run-live --basetemp=.rich/live-loop tests/test_v2_closed_loop_live.py
+# ^ the whole loop: intent → architecture → scaffold → a REAL model authors source →
+#   lint/typecheck/unit/build/Playwright in Bubblewrap. Needs everything above plus a
+#   `claude` login; ~3.5 min and a few dollars of quota.
 
 # v1 canned regression demos (no LLM, deterministic — keep these green)
 python cli.py                # pipeline demo
