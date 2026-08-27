@@ -493,17 +493,43 @@ def test_the_real_cli_answers_with_a_structured_document(tmp_path):
         pytest.skip("live test; run `claude` once to log in first")
 
     provider = ClaudeCodeCliProvider()
+    # The schema has to describe the same document the prompt asks for. This
+    # test used to ask in prose for a "files" array while passing the default
+    # summary-only schema with additionalProperties false -- and once the CLI
+    # route began sending the schema, the model rightly obeyed the schema and
+    # dropped the array. Which is the behavior we want: the schema is the
+    # contract, and prose that disagrees with it is the thing that is wrong.
     request = _request(
         system_prompt=(
             "You are a bounded generator. Return exactly one JSON object "
-            'matching {"summary": string, "files": [{"operation": "create", '
-            '"path": string, "content": string}]}. No prose, no markdown '
-            "fences."
+            "matching the supplied schema. No prose, no markdown fences."
         ),
         user_prompt=(
             "Create apps/web/generated.ts exporting a const named ok set to "
             "true."
         ),
+        response_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["summary", "files"],
+            "properties": {
+                "summary": {"type": "string"},
+                "files": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["operation", "path", "content"],
+                        "properties": {
+                            "operation": {"type": "string", "enum": ["create"]},
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
         timeout_seconds=180,
     )
 
