@@ -25,6 +25,9 @@ rich doctor                           # host checks
 rich rebuild-node --project P --node domain   # forget one node's memo
 rich cancel-run RUN_ID                        # stop at the next checkpoint
 rich logs RUN_ID --follow                     # watch a run as a timeline
+rich plan-change --project P --from-spec A --to-spec B \
+  --from-architecture C --to-architecture D   # what an amendment costs
+rich apply-change ...                         # stale exactly that set
 npm --prefix web run dev              # hot-reload dev; Vite proxies /v1 → :8767
 
 # Live tests (marker `live`, skipped unless --run-live is passed)
@@ -86,6 +89,12 @@ contract.
   `operations` from `packages/domain/src/operations.ts`. No suite scaffolded
   means no gate — a property run over an empty directory would pass without
   checking anything.
+- **A change costs what it changes.** `change.py` computes the stale set
+  from two approved revisions. An implementation change cannot reach a
+  consumer (the firewall); a contract change invalidates consumers
+  transitively. Contracts are compared on behaviour, never on
+  planner-defined metadata. Allocation decides the cost, so the architect
+  is asked for the minimum one.
 - **Generation is memoized; verification never is.** `generation_cache_key`
   hashes the exact request (both prompts, provider, model, response schema); a
   hit replays the bundle through the same parser, transaction and gates.

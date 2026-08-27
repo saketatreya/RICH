@@ -301,6 +301,38 @@ The run cannot publish success merely because a handler returns success. The sch
 checks required evidence kinds, blocking status, artifact roles, and exact acceptance
 coverage before committing task and run status.
 
+### 6a. A change costs what it changes
+
+Software is not built once. Given two approved revisions, `change.py` computes the
+smallest set of components that must be regenerated; everything else replays from memo.
+
+What matters is not that some nodes are stale but *why the blast radius stops where it
+does*, and the answer is the information firewall. A worker is shown its dependencies'
+contracts and never their source, so:
+
+- a node whose **implementation** changed cannot affect its consumers, because none of
+  them was ever shown that implementation; and
+- a node whose **contract** changed invalidates every consumer transitively, because the
+  contract is exactly what they were shown.
+
+That is a compositional guarantee falling out of a discipline already enforced, not a
+heuristic about what probably broke. Contracts are compared on the behaviour a consumer
+is shown — operations, obligations, invariants — and never on planner-defined metadata:
+the built-in planner copies the whole project spec into every contract's metadata, so
+comparing that would make every contract differ whenever any requirement anywhere
+changed. A node's *shape* (owned paths, ports, kind) is not part of its promise, so
+changing it makes that node stale and tells its consumers nothing.
+
+Verification is a separate question with a separate answer: the gates are
+whole-application and always re-run. Reusing an answer is never reusing a verdict, and
+every plan says so in words.
+
+**The allocation is what decides the cost.** The deterministic planner gives every layer
+every requirement, which is honest for a layered baseline — a feature really does cut
+through UI, domain and data — and buys no change locality at all: every amendment stales
+everything. Modularity under change is a property of the allocation, not of having
+drawn boxes, so the architect is asked for the minimum allocation and told why.
+
 ### 7b. Obligations are executed, not merely declared
 
 A contract's proof obligations are compiled into a vitest suite against a pinned
