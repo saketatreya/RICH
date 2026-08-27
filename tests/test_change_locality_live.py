@@ -38,6 +38,13 @@ def _narrow(architecture, node_id, keep):
         if contract.node_id != node_id:
             contracts.append(contract)
             continue
+        obligations = tuple(
+            item for item in contract.obligations if keep & set(item.requirement_ids)
+        )
+        surviving = {item.id for item in obligations}
+        # Operations, obligations and invariants are narrowed in one step: a
+        # contract validates on construction, so dropping obligations first
+        # would leave an invariant citing something that no longer exists.
         contracts.append(
             replace(
                 contract,
@@ -46,10 +53,18 @@ def _narrow(architecture, node_id, keep):
                     for item in contract.operations
                     if keep & set(item.requirement_ids)
                 ),
-                obligations=tuple(
-                    item
-                    for item in contract.obligations
-                    if keep & set(item.requirement_ids)
+                obligations=obligations,
+                invariants=tuple(
+                    replace(
+                        invariant,
+                        obligation_ids=tuple(
+                            identifier
+                            for identifier in invariant.obligation_ids
+                            if identifier in surviving
+                        ),
+                    )
+                    for invariant in contract.invariants
+                    if keep & set(invariant.requirement_ids)
                 ),
             )
         )
@@ -72,28 +87,25 @@ def _narrow(architecture, node_id, keep):
 
 
 def _amend(spec: ProjectSpec, requirement_id: str, statement: str) -> ProjectSpec:
-    """Reword one requirement and the scenario that checks it."""
+    """Reword one requirement and the oracle that checks it.
 
-    requirements = tuple(
-        replace(item, statement=statement) if item.id == requirement_id else item
-        for item in spec.requirements
-    )
-    scenarios = tuple(
-        replace(
-            scenario,
-            oracle=tuple(
-                {**step, "locator": {**step["locator"], "value": statement}}
-                if step.get("action") == "assert_visible"
-                and isinstance(step.get("locator"), dict)
-                else step
-                for step in scenario.oracle
-            ),
-        )
-        if requirement_id in scenario.requirement_ids
-        else scenario
-        for scenario in spec.acceptance_scenarios
-    )
-    return replace(spec, requirements=requirements, acceptance_scenarios=scenarios)
+    Rebuilt through the dictionary form because a scenario's steps are typed
+    objects, and the browser oracle asserts the statement verbatim -- so an
+    amendment that left the oracle behind would be checking the old claim.
+    """
+
+    document = spec.to_dict()
+    for requirement in document["requirements"]:
+        if requirement["id"] == requirement_id:
+            requirement["statement"] = statement
+    for scenario in document["acceptance_scenarios"]:
+        if requirement_id not in scenario["requirement_ids"]:
+            continue
+        for step in scenario["oracle"]:
+            locator = step.get("locator")
+            if step.get("action") == "assert_visible" and isinstance(locator, dict):
+                locator["value"] = statement
+    return ProjectSpec.from_dict(document)
 
 
 def _require_login():
