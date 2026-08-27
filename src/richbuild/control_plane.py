@@ -15,6 +15,7 @@ from uuid import uuid4
 from .budget import RunBudget
 from .compiler import CompiledArchitecture, compile_architecture
 from .interview import AdaptiveInterview, InterviewState
+from .change import compile_change
 from .models import ApprovalGate, ArchitectureSpec, ProjectSpec
 from .planner import ArchitectureProposal, plan_nextjs_architecture
 from .preview import (
@@ -172,6 +173,86 @@ class ControlPlane:
 
     def create_project(self, *, project_id: str, name: str) -> dict[str, Any]:
         return self.store.create_project(name, project_id=project_id)
+
+    def plan_change(
+        self,
+        *,
+        project_id: str,
+        from_spec_revision_id: str,
+        to_spec_revision_id: str,
+        from_architecture_revision_id: str,
+        to_architecture_revision_id: str,
+    ) -> dict[str, Any]:
+        """Compute what moving between two approved revisions actually costs.
+
+        Reads only. A plan is something to look at before deciding, and
+        deciding is `apply_change`.
+        """
+
+        before_spec = ProjectSpec.from_dict(
+            self._revision_document(project_id, from_spec_revision_id, "product_spec")
+        )
+        after_spec = ProjectSpec.from_dict(
+            self._revision_document(project_id, to_spec_revision_id, "product_spec")
+        )
+        before_architecture = ArchitectureSpec.from_dict(
+            self._revision_document(
+                project_id, from_architecture_revision_id, "architecture"
+            )
+        )
+        after_architecture = ArchitectureSpec.from_dict(
+            self._revision_document(
+                project_id, to_architecture_revision_id, "architecture"
+            )
+        )
+        change = compile_change(
+            before_spec=before_spec,
+            after_spec=after_spec,
+            before_architecture=before_architecture,
+            after_architecture=after_architecture,
+        )
+        return {"project_id": project_id, "change": change.to_dict()}
+
+    def apply_change(
+        self,
+        *,
+        project_id: str,
+        from_spec_revision_id: str,
+        to_spec_revision_id: str,
+        from_architecture_revision_id: str,
+        to_architecture_revision_id: str,
+    ) -> dict[str, Any]:
+        """Mark exactly the stale components stale, and nothing else.
+
+        This is rebuild-one-node applied to a computed set rather than a name
+        a human picked, which is the difference between a convenience and a
+        compiler.
+        """
+
+        planned = self.plan_change(
+            project_id=project_id,
+            from_spec_revision_id=from_spec_revision_id,
+            to_spec_revision_id=to_spec_revision_id,
+            from_architecture_revision_id=from_architecture_revision_id,
+            to_architecture_revision_id=to_architecture_revision_id,
+        )
+        forgotten = {
+            node_id: self.store.forget_generation_memos(
+                project_id=project_id, node_id=node_id
+            )
+            for node_id in planned["change"]["stale"]
+        }
+        return {**planned, "forgotten": forgotten}
+
+    def _revision_document(
+        self, project_id: str, revision_id: str, kind: str
+    ) -> dict[str, Any]:
+        revision = self.store.get_revision(revision_id)
+        if revision.project_id != project_id or revision.kind != kind:
+            raise ValueError(
+                f"revision {revision_id!r} is not a {kind} of that project"
+            )
+        return dict(revision.document)
 
     def rebuild_node(
         self,

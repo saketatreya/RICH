@@ -433,3 +433,100 @@ def test_scaffold_and_execute_both_refuse_an_escaping_destination(tmp_path):
     with pytest.raises(ValueError, match="inside the configured workspace root"):
         control_plane.execute_run(run_id="run.x", workspace="../escape")
     assert executor.calls == [], "the escape never reached the engine"
+
+
+def _amended_spec_revision(store, control_plane, project, spec, architecture):
+    """A second approved spec revision with one requirement reworded."""
+
+    document = dict(spec.revision.document)
+    requirements = [dict(item) for item in document["requirements"]]
+    requirements[0] = {
+        **requirements[0],
+        "statement": requirements[0]["statement"].replace(".", " today."),
+    }
+    document["requirements"] = requirements
+    return store.save_revision(
+        project["id"],
+        kind="product_spec",
+        schema_version=document["schema_version"],
+        document=document,
+        expected_revision=store.get_project(project["id"])["current_revision"],
+    )
+
+
+def test_a_change_plan_reads_without_deciding_anything(tmp_path):
+    store = RichStore(tmp_path / "state")
+    control_plane = ControlPlane(store)
+    project, spec, architecture = _approved_architecture(control_plane)
+    amended = _amended_spec_revision(store, control_plane, project, spec, architecture)
+    store.put_generation_memo(
+        "e" * 64,
+        payload=b'{"schema":"rich.generation-memo/v1","bundle":{"summary":"s","files":[]}}',
+        project_id=project["id"],
+        node_id="domain",
+        provider="anthropic",
+        model="claude-sonnet-5",
+        run_id="run.1",
+        task_id="run.1:implement:domain",
+    )
+
+    planned = control_plane.plan_change(
+        project_id=project["id"],
+        from_spec_revision_id=spec.revision.id,
+        to_spec_revision_id=amended.id,
+        from_architecture_revision_id=architecture.revision.id,
+        to_architecture_revision_id=architecture.revision.id,
+    )
+
+    assert planned["change"]["requirements"]["modified"], "the amendment was seen"
+    assert "forgotten" not in planned, "planning decides nothing"
+    assert store.get_generation_memo("e" * 64) is not None, "and forgets nothing"
+
+
+def test_applying_a_change_forgets_exactly_the_stale_components(tmp_path):
+    store = RichStore(tmp_path / "state")
+    control_plane = ControlPlane(store)
+    project, spec, architecture = _approved_architecture(control_plane)
+    amended = _amended_spec_revision(store, control_plane, project, spec, architecture)
+    for index, node in enumerate(("domain", "web", "app")):
+        store.put_generation_memo(
+            f"{index}" + "e" * 63,
+            payload=b'{"schema":"rich.generation-memo/v1","bundle":{"summary":"s","files":[]}}',
+            project_id=project["id"],
+            node_id=node,
+            provider="anthropic",
+            model="claude-sonnet-5",
+            run_id="run.1",
+            task_id=f"run.1:implement:{node}",
+        )
+
+    applied = control_plane.apply_change(
+        project_id=project["id"],
+        from_spec_revision_id=spec.revision.id,
+        to_spec_revision_id=amended.id,
+        from_architecture_revision_id=architecture.revision.id,
+        to_architecture_revision_id=architecture.revision.id,
+    )
+
+    stale = set(applied["change"]["stale"])
+    assert stale, "an amendment has to make something stale"
+    assert set(applied["forgotten"]) == stale
+    for index, node in enumerate(("domain", "web", "app")):
+        remembered = store.get_generation_memo(f"{index}" + "e" * 63)
+        assert (remembered is None) == (node in stale), node
+
+
+def test_a_revision_from_another_project_is_refused(tmp_path):
+    store = RichStore(tmp_path / "state")
+    control_plane = ControlPlane(store)
+    project, spec, architecture = _approved_architecture(control_plane)
+    other = store.create_project("Other", project_id="project.other")
+
+    with pytest.raises(ValueError, match="not a product_spec of that project"):
+        control_plane.plan_change(
+            project_id=other["id"],
+            from_spec_revision_id=spec.revision.id,
+            to_spec_revision_id=spec.revision.id,
+            from_architecture_revision_id=architecture.revision.id,
+            to_architecture_revision_id=architecture.revision.id,
+        )
