@@ -95,11 +95,16 @@ def test_example_compiles_to_a_single_ground_assertion():
     )
 
     assert "operations.clamp(4)" in suite
-    assert "equals(actual, 2)" in suite
+    assert "expect(actual).toEqual(2)" in suite, (
+        "a failing check has to say what it got, not just that it was false"
+    )
     # A single ground fact needs no case list -- and an import of the case
     # drawer it never calls would fail the typecheck gate this file runs beside.
     assert "casesFor" not in suite
-    assert 'import { equals } from "./rich-value-generator";' in suite
+    assert 'import { equals }' not in suite, (
+        "an example suite draws no cases and compares no structures, so it "
+        "imports nothing from the generator"
+    )
 
 
 def test_idempotence_applies_the_operation_twice():
@@ -122,11 +127,11 @@ def test_idempotence_applies_the_operation_twice():
     )
 
     assert "const once = operations.normalize(value)" in suite
-    assert "equals(operations.normalize(once), once)" in suite
+    assert "expect(operations.normalize(once)).toEqual(once)" in suite
     assert (
-        'import { casesFor, equals, type ValueType } from "./rich-value-generator";'
+        'import { casesFor, type ValueType } from "./rich-value-generator";'
         in suite
-    )
+    ), "cases are still drawn; equality is now vitest's, so it prints a diff"
     assert '"obl.normalize.idempotent"' in suite
     assert ", 32)" in suite
 
@@ -155,7 +160,7 @@ def test_round_trip_pipes_the_subject_through_its_witness():
     )
 
     assert "operations.decode(operations.encode(value))" in suite
-    assert "equals(restored, value)" in suite
+    assert "expect(restored).toEqual(value)" in suite
 
 
 def test_preservation_skips_cases_the_predicate_rejects():

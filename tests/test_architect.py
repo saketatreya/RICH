@@ -299,7 +299,7 @@ def test_proposed_obligations_compile_into_checks_a_wrong_answer_would_fail():
 
     suite = compile_obligation_suite(architecture.contract_index["contract:domain"])
 
-    assert "operations.normalizeTasks(once), once" in suite
+    assert "expect(operations.normalizeTasks(once)).toEqual(once)" in suite
     assert "operations.isNormalized(operations.normalizeTasks(value))" in suite
     # Sampled over a domain the generator can actually draw from, which is only
     # true because the architect was required to bound every string and list.

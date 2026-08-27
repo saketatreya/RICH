@@ -255,7 +255,10 @@ def _example_test(obligation: ProofObligation, subject: OperationContract) -> st
         "() => {\n"
         f"  const actual = operations.{_identifier(subject)}"
         f"({_literal(example.argument)});\n"
-        f"  expect(equals(actual, {_literal(example.result)})).toBe(true);\n"
+        # toEqual, not equals(...) collapsed to a boolean: vitest prints the
+        # diff, and "expected false to be true" tells a reader -- or the worker
+        # reading the gate output on its next attempt -- nothing at all.
+        f"  expect(actual).toEqual({_literal(example.result)});\n"
         "});\n"
     )
 
@@ -287,14 +290,14 @@ def _relation_body(
             "  for (const value of cases) {\n"
             f"    const restored = operations.{_identifier(witness)}"
             f"({call}(value));\n"
-            "    expect(equals(restored, value)).toBe(true);\n"
+            "    expect(restored).toEqual(value);\n"
             "  }\n"
         )
     if relation is ObligationRelation.IDEMPOTENT:
         return (
             "  for (const value of cases) {\n"
             f"    const once = {call}(value);\n"
-            f"    expect(equals({call}(once), once)).toBe(true);\n"
+            f"    expect({call}(once)).toEqual(once);\n"
             "  }\n"
         )
     if relation is ObligationRelation.PRESERVES:
