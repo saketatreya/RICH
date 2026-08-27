@@ -20,6 +20,8 @@ import time
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlencode, urlsplit
+
+from .paths import is_safe_relative_path
 from urllib.request import Request, urlopen
 import zipfile
 
@@ -864,17 +866,11 @@ def _validate_approved_files(
     previous: str | None = None
     total = 0
     for file in files:
-        relative = PurePosixPath(file.file)
-        if (
-            relative.is_absolute()
-            or not relative.parts
-            or any(part in {"", ".", ".."} for part in relative.parts)
-            or "\\" in file.file
-            or file.file in seen
-        ):
+        if not is_safe_relative_path(file.file) or file.file in seen:
             raise UnsafeSourceTree(
                 f"approved deployment source contains an unsafe path: {file.file!r}"
             )
+        relative = PurePosixPath(file.file)
         if (
             relative.parts[:2] == (".rich", "runtime")
             or any(part in _EXCLUDED_DIRECTORIES for part in relative.parts)
@@ -931,18 +927,15 @@ def extract_deployment_snapshot(
         if not entries or len(entries) > max_files:
             raise UnsafeSourceTree("preview source snapshot has an invalid file count")
         for entry in entries:
-            relative = PurePosixPath(entry.filename)
             if (
                 entry.is_dir()
-                or relative.is_absolute()
-                or not relative.parts
-                or any(part in {"", ".", ".."} for part in relative.parts)
-                or "\\" in entry.filename
+                or not is_safe_relative_path(entry.filename)
                 or entry.filename in seen
             ):
                 raise UnsafeSourceTree(
                     f"preview source snapshot contains an unsafe path: {entry.filename!r}"
                 )
+            relative = PurePosixPath(entry.filename)
             if entry.flag_bits & 0x1:
                 raise UnsafeSourceTree("encrypted preview snapshots are not supported")
             if entry.file_size > max_file_bytes:

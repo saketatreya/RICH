@@ -28,6 +28,7 @@ import time
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 
 from .canonical import canonical_json_text as _canonical_json
+from .paths import UnsafePath, is_owned, safe_relative_path
 from .compiler import CompiledTask, compile_architecture
 from .models import ArchitectureSpecV2, ProjectSpecV2
 from .providers import GenerationRole, ModelGateway, ModelRequest, ModelResponse
@@ -633,46 +634,21 @@ def _is_secret_path(path: PurePosixPath) -> bool:
 
 
 def _validate_relative_path(value: Any, limits: CodingLimits) -> PurePosixPath:
-    if not isinstance(value, str):
-        raise FileBundleValidationError("generated file path must be a string")
-    if not value or len(value.encode("utf-8")) > limits.max_path_bytes:
-        raise FileBundleValidationError("generated file path exceeds its limit")
-    if (
-        value.startswith("/")
-        or value.endswith("/")
-        or "\\" in value
-        or "\x00" in value
-    ):
-        raise FileBundleValidationError(
-            f"generated file path is not a strict relative POSIX path: {value!r}"
+    try:
+        path = safe_relative_path(
+            value, max_bytes=limits.max_path_bytes, label="generated file path"
         )
-    raw_parts = value.split("/")
-    if any(part in {"", ".", ".."} for part in raw_parts):
+    except UnsafePath as exc:
+        raise FileBundleValidationError(str(exc)) from exc
+    if _is_secret_path(path):
         raise FileBundleValidationError(
-            f"generated file path is not a strict relative POSIX path: {value!r}"
-        )
-    if any(len(part.encode("utf-8")) > 255 for part in raw_parts):
-        raise FileBundleValidationError(
-            f"generated file path has an oversized component: {value!r}"
-        )
-    path = PurePosixPath(value)
-    if path.is_absolute() or _is_secret_path(path):
-        if _is_secret_path(path):
-            raise FileBundleValidationError(
-                f"generated secret-bearing filename is forbidden: {value!r}"
-            )
-        raise FileBundleValidationError(
-            f"generated file path must be relative: {value!r}"
+            f"generated secret-bearing filename is forbidden: {value!r}"
         )
     return path
 
 
 def _is_owned(path: PurePosixPath, owned_paths: Sequence[str]) -> bool:
-    candidate = path.parts
-    return any(
-        candidate[: len(owner.parts)] == owner.parts
-        for owner in (PurePosixPath(item) for item in owned_paths)
-    )
+    return is_owned(path, owned_paths)
 
 
 _PROTECTED_FILE_NAMES = frozenset(

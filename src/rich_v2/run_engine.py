@@ -50,6 +50,7 @@ from .coding import (
     source_transaction_lock,
 )
 from .canonical import canonical_json_bytes
+from .paths import UnsafePath, is_owned, safe_relative_path
 from .budget import RunBudget
 from .compiler import CompiledArchitecture, CompiledTask, compile_architecture
 from .executor import (
@@ -2606,17 +2607,12 @@ def _relative_posix(prefix: Path, name: str) -> PurePosixPath:
 
 
 def _safe_manifest_path(value: str) -> PurePosixPath:
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or not path.parts
-        or any(part in {"", ".", ".."} for part in path.parts)
-        or "\\" in value
-    ):
+    try:
+        return safe_relative_path(value, label="scaffold manifest path")
+    except UnsafePath as exc:
         raise WorkspaceValidationError(
             f"scaffold manifest path escapes the workspace: {value!r}"
-        )
-    return path
+        ) from exc
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -2709,8 +2705,10 @@ def _is_runtime_output(path: PurePosixPath) -> bool:
     return any(part in _RUNTIME_DIRECTORY_NAMES for part in path.parts)
 
 
-def _is_owned(path: PurePosixPath, owned_paths: Sequence[PurePosixPath]) -> bool:
-    return any(path == owned or owned in path.parents for owned in owned_paths)
+def _is_owned(
+    path: PurePosixPath, owned_paths: Sequence[PurePosixPath]
+) -> bool:
+    return is_owned(path, owned_paths)
 
 
 def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
