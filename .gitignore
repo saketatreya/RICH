@@ -1,36 +1,21 @@
-.agentctl/
+# Python
 __pycache__/
 *.pyc
-.pytest_cache/
-richv1.md
-rich.canvas.json
-
-# Generated build artifacts (the recursive engine's output tree + audit logs)
-build/
-build_archive/
-
-# Editor / scratch
-*.swp
-
-# Python packaging output
 *.egg-info/
 .eggs/
 dist/
+.pytest_cache/
+.ruff_cache/
+
+# RICH state: SQLite store, content-addressed artifacts, generated workspaces,
+# and live-test scratch. All reproducible; none of it belongs in the repo.
 .rich/
 
-# Web frontend (React/Vite): deps + build output
+# Web frontend
 web/node_modules/
 web/dist/
 
-# Scratch gate / probe harnesses (one-off per-phase test drivers)
-gate_*.py
-carry_*.py
-
-# Evidence dumps + test-run logs
-*_evidence/
-testlog/
-
-# Phase / fix reports + ledgers (kept local, not part of the repo)
-*_REPORT.md
-*_LEDGER.md
-CLAUDE_CODE_FINDING.md
+# Editor / tooling scratch
+*.swp
+.agentctl/
+.claude/
