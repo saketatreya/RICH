@@ -1183,7 +1183,8 @@ export default function V2ControlPlane() {
                 <div>
                   <b>Trusted execution</b>
                   <span>
-                    Frozen install → lint → typecheck → unit → production build → acceptance
+                    Frozen install → lint → typecheck → unit → contract obligations →
+                    production build → acceptance
                   </span>
                 </div>
                 <button
