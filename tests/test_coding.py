@@ -1239,3 +1239,45 @@ def test_the_key_is_fixed_at_the_first_attempt_of_a_run(tmp_path):
         first.evidence[0].details["cache_key"]
         == second.evidence[0].details["cache_key"]
     ), "the question did not change; only the state of the repair did"
+
+
+def test_a_replayed_bundle_states_its_operations_against_this_workspace(tmp_path):
+    """The winning attempt of an earlier run is often a repair, whose bundle
+    says "replace" for files a fresh scaffold does not have. Refusing that
+    would make every memo earned by a retry unusable -- and most are.
+
+    A create/replace mismatch is a real guard on a model's answer: claiming to
+    create a file that exists means it has misunderstood something. It is not a
+    guard on a replay, where the bundle has already been verified and only the
+    destination has moved.
+    """
+
+    workspace = _workspace(tmp_path, "replay")
+    (workspace / "apps/web").mkdir(parents=True)
+    (workspace / "apps/web/here.tsx").write_text("existing\n")
+    document = {
+        "summary": "s",
+        "files": [
+            {"operation": "replace", "path": "apps/web/absent.tsx", "content": "a"},
+            {"operation": "create", "path": "apps/web/here.tsx", "content": "b"},
+        ],
+    }
+
+    restated = coding._replayable(document, workspace)
+
+    by_path = {item["path"]: item["operation"] for item in restated["files"]}
+    assert by_path == {
+        "apps/web/absent.tsx": "create",
+        "apps/web/here.tsx": "replace",
+    }
+    assert restated["summary"] == "s", "only the operations are restated"
+    assert [item["content"] for item in restated["files"]] == ["a", "b"]
+
+
+def test_restating_leaves_a_malformed_document_for_the_parser_to_refuse(tmp_path):
+    """It must not quietly repair something the security boundary should see."""
+
+    workspace = _workspace(tmp_path, "malformed")
+
+    for document in ({"summary": "s"}, {"files": "nope"}, {"files": [{"path": 7}]}):
+        assert coding._replayable(document, workspace) == dict(document)

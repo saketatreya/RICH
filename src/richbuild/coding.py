@@ -1195,6 +1195,39 @@ class AtomicSourceWriter:
 
 
 
+
+def _replayable(document: Mapping[str, Any], workspace: Path) -> dict[str, Any]:
+    """Restate a remembered bundle's operations against this workspace.
+
+    A create/replace mismatch is a real guard on a *model's* answer: a worker
+    claiming to create a file that already exists has misunderstood something.
+    It is not a guard on a replay. The winning attempt of an earlier run may
+    have been a repair, whose bundle says "replace" for files that a fresh
+    scaffold does not have -- and refusing that would make every memo earned by
+    a retry unusable.
+
+    What the bundle asserts is the intended contents of paths the task owns.
+    Whether reaching that state is a create or a replace is a fact about the
+    destination, so it is read from the destination.
+    """
+
+    files = document.get("files")
+    if not isinstance(files, list):
+        return dict(document)
+    restated = []
+    for item in files:
+        if not isinstance(item, Mapping) or not isinstance(item.get("path"), str):
+            return dict(document)
+        destination = workspace.joinpath(*PurePosixPath(item["path"]).parts)
+        restated.append(
+            {
+                **dict(item),
+                "operation": "replace" if destination.is_file() else "create",
+            }
+        )
+    return {**dict(document), "files": restated}
+
+
 def _read_current_files(
     workspace: Path,
     owned_paths: Sequence[str],
@@ -1843,7 +1876,7 @@ class CodingWorker:
             # ownership and limits. A memo is a way to skip asking, not a way
             # to skip checking.
             bundle = parse_file_bundle(
-                remembered["bundle"],
+                _replayable(remembered["bundle"], self.workspace),
                 owned_paths=task.owned_paths,
                 limits=self.limits,
             )
