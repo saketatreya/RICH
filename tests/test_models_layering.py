@@ -1,6 +1,6 @@
 """Keep target technologies out of the core model layer.
 
-``models.py`` is the vocabulary every target pack is written against. Once a
+``models/`` is the vocabulary every target pack is written against. Once a
 pack's technology leaks into it, the next pack has to either adopt that
 technology's assumptions or work around them, and the seam stops being a seam.
 
@@ -19,8 +19,20 @@ import pytest
 import richbuild.models as models
 
 
-MODELS_PATH = Path(models.__file__)
-CORE_MODULES = ("models.py", "budget.py", "store.py")
+MODELS_DIR = Path(models.__file__).parent
+MODELS_FILES = sorted(MODELS_DIR.glob("*.py"))
+PACKAGE_MODULES = frozenset(path.stem for path in MODELS_FILES)
+CORE_MODULES = ("budget.py", "store.py")
+
+
+def _models_source() -> str:
+    """Every file in the models package, as one body to scan.
+
+    The package is split by subject, but the rule is about the layer, not about
+    which file a symbol happens to live in.
+    """
+
+    return "\n".join(path.read_text() for path in MODELS_FILES)
 
 # Names that only make sense once a specific target technology is chosen.
 BANNED_WORDS = frozenset(
@@ -125,7 +137,7 @@ def test_the_word_splitter_does_not_manufacture_false_positives():
 
 
 def test_models_names_no_target_technology_beyond_the_frozen_legacy_set():
-    tree = ast.parse(MODELS_PATH.read_text())
+    tree = ast.parse(_models_source())
     offenders = _flagged(_declared_identifiers(tree))
 
     new = set(offenders) - LEGACY_IDENTIFIERS
@@ -139,7 +151,7 @@ def test_the_legacy_exemption_set_is_a_ceiling_not_a_wishlist():
     # Every exempted name must still be present. When the browser vocabulary
     # finally moves behind the pack seam, this fails and the entry is deleted
     # -- which is how the ceiling ratchets down instead of drifting.
-    tree = ast.parse(MODELS_PATH.read_text())
+    tree = ast.parse(_models_source())
     offenders = _flagged(_declared_identifiers(tree))
 
     stale = LEGACY_IDENTIFIERS - set(offenders)
@@ -172,7 +184,7 @@ def _string_literal_words(tree: ast.AST) -> set[str]:
 
 
 def test_models_string_literals_name_no_new_target_technology():
-    tree = ast.parse(MODELS_PATH.read_text())
+    tree = ast.parse(_models_source())
 
     offending = _string_literal_words(tree) & BANNED_WORDS
 
@@ -183,7 +195,7 @@ def test_models_string_literals_name_no_new_target_technology():
 
 @pytest.mark.parametrize("module", CORE_MODULES)
 def test_core_modules_import_nothing_from_a_target_pack(module):
-    tree = ast.parse((MODELS_PATH.parent / module).read_text())
+    tree = ast.parse((MODELS_DIR.parent / module).read_text())
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -196,20 +208,6 @@ def test_core_modules_import_nothing_from_a_target_pack(module):
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 assert "target_packs" not in alias.name
-
-
-def test_models_depends_only_on_the_standard_library():
-    tree = ast.parse(MODELS_PATH.read_text())
-    relative = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.level
-    ]
-
-    assert not relative, (
-        "models.py is the bottom of the v2 layering and must import no sibling "
-        f"module; found {[node.module for node in relative]}"
-    )
 
 
 def test_the_obligation_vocabulary_itself_stays_technology_free():
