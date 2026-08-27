@@ -1868,7 +1868,16 @@ class CodingWorker:
                 limits=self.limits,
             )
         )
-        remembered = None if self.memo is None else self.memo.get(cache_key)
+        # A retry never replays. The key is fixed at the run's baseline so a
+        # memo stays reachable, which means it would otherwise be replayed
+        # again on every attempt -- the same answer, the same gate failure,
+        # forever. The memo already answered here and its answer did not hold,
+        # so this attempt asks properly, with the failures in hand.
+        remembered = (
+            None
+            if self.memo is None or earlier_failures
+            else self.memo.get(cache_key)
+        )
         reused = remembered is not None
         if reused:
             # Revalidated, never trusted: a remembered bundle goes back through

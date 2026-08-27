@@ -1281,3 +1281,43 @@ def test_restating_leaves_a_malformed_document_for_the_parser_to_refuse(tmp_path
 
     for document in ({"summary": "s"}, {"files": "nope"}, {"files": [{"path": 7}]}):
         assert coding._replayable(document, workspace) == dict(document)
+
+
+def test_a_retry_asks_rather_than_replaying_the_answer_that_just_failed(tmp_path):
+    """The key is fixed at the run's baseline so a memo stays reachable across
+    runs. Within a run that would mean replaying the same rejected answer on
+    every attempt -- the same gate failure, forever."""
+
+    project, architecture, plan, approval = _fixture()
+    task = plan.task_index["web"]
+    memo = _Memo()
+    memo.entries["seeded"] = None  # never consulted; presence is the point
+
+    provider = RecordingProvider(_valid_bundle())
+    worker = CodingWorker(
+        _gateway(provider),
+        workspace=_workspace(tmp_path, "retry"),
+        project=project, architecture=architecture, approval=approval,
+        provider="fake", model="test-model",
+        dependency_summaries={"domain": "Domain generation completed."},
+        prior_failures=lambda _task, attempt: [
+            PriorAttemptFailure(
+                attempt=attempt - 1, gate="property",
+                summary="property exited with 1",
+                diagnostics=("apps/web/note.tsx(1,1): wrong",),
+            )
+        ],
+        memo=memo,
+    )
+
+    result = worker.run_task(
+        run_id="run.retry.memo",
+        durable_task_id="run.retry.memo:implement:web",
+        attempt=2,
+        task=task,
+    )
+
+    assert memo.reads == 0, "a retry must not even consult the memo"
+    assert len(provider.requests) == 1, "it asks, with the failure in hand"
+    assert "property exited with 1" in provider.requests[0].user_prompt
+    assert result.evidence[0].details["generation_reused"] is False
