@@ -123,6 +123,7 @@ def _prepare(
     architecture=None,
     narrow=None,
     run_id="run.closed-loop",
+    store=None,
 ):
     """Bring a run to the exact state RunEngine.execute expects to resume.
 
@@ -139,7 +140,9 @@ def _prepare(
 
     tmp_path = Path(tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
-    store = RichStore(tmp_path / "state")
+    # A second run has to share the first run's store, because the memo store
+    # is where change locality actually lives.
+    store = store or RichStore(tmp_path / "state")
     try:
         record = store.create_project(project.name, project_id=project.id)
         assert record["id"] == project.id
@@ -260,7 +263,7 @@ def _execute(state, events=None):
         model=runtime.model,
         workspace_preparer=runtime.bootstrapper,
         config=RunEngineConfig(
-            max_task_attempts=2,
+            max_task_attempts=3,
             task_timeout_seconds=1_800,
             coding_limits=runtime.coding_limits,
             lint_argv=runtime.commands.lint_argv,

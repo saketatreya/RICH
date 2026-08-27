@@ -159,14 +159,14 @@ def test_an_amendment_replays_the_components_it_did_not_touch(tmp_path):
     for node_id in change.stale:
         store.forget_generation_memos(project_id=before_spec.id, node_id=node_id)
 
+    # The same store, because the memo store is the whole mechanism.
     second_state = _prepare(
         tmp_path / "second",
         project=after_spec,
         architecture=after_arch,
         run_id="run.closed-loop-2",
+        store=store,
     )
-    # The memo store is shared: that is the whole mechanism.
-    second_state["store"] = store
     second = _execute(second_state)
 
     reused = _reused_nodes(store, second_state["run"]["id"])
