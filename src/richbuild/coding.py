@@ -1741,6 +1741,8 @@ class CodingWorker:
         self.prior_failures = prior_failures
         self.memo = memo
         self._pending_memo: dict[str, Any] | None = None
+        # One key per node, fixed at the run's first attempt. See below.
+        self._baseline_keys: dict[str, str] = {}
         self.limits = limits
         self.max_attempts = max_attempts
         self.commit_sink = commit_sink
@@ -1805,11 +1807,19 @@ class CodingWorker:
             limits=self.limits,
         )
         response_schema = file_bundle_schema(self.limits)
-        cache_key = generation_cache_key(
-            canonical,
-            provider=self.provider,
-            model=self.model,
-            response_schema=response_schema,
+        # The key describes the task as it stood when the run began. A failed
+        # attempt leaves its source in the workspace for the next attempt to
+        # repair, so keying on what is there now would record the winning
+        # answer under "the workspace after a failure" -- a state no fresh run
+        # ever reproduces, making the memo unreachable exactly when it matters.
+        cache_key = self._baseline_keys.setdefault(
+            task.node_id,
+            generation_cache_key(
+                canonical,
+                provider=self.provider,
+                model=self.model,
+                response_schema=response_schema,
+            ),
         )
         prompt = (
             canonical

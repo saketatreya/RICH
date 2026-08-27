@@ -1181,3 +1181,61 @@ def test_the_worker_cannot_decide_its_own_answer_is_worth_keeping(tmp_path):
     assert staged == {}, "run_task must stage rather than write"
     assert committed is True and memo.entries, "the gates' verdict commits it"
     assert worker.commit_memo() is False, "and it commits exactly once"
+
+
+def test_the_key_is_fixed_at_the_first_attempt_of_a_run(tmp_path):
+    """A failed attempt leaves its source behind for the next one to repair.
+    Keying on what is in the workspace *now* would record the winning answer
+    under "the workspace after a failure" -- a state no fresh run reproduces."""
+
+    project, architecture, plan, approval = _fixture()
+    task = plan.task_index["web"]
+    workspace = _workspace(tmp_path, "repair")
+    memo = _Memo()
+    worker = CodingWorker(
+        _gateway(RecordingProvider(_valid_bundle())),
+        workspace=workspace,
+        project=project,
+        architecture=architecture,
+        approval=approval,
+        provider="fake",
+        model="test-model",
+        dependency_summaries={"domain": "Domain generation completed."},
+        memo=memo,
+    )
+
+    first = worker.run_task(
+        run_id="run.repair",
+        durable_task_id="run.repair:implement:web",
+        attempt=1,
+        task=task,
+    )
+    # Attempt one wrote source; a second attempt sees it and must still key
+    # the task the same way.
+    assert (workspace / "apps/web/page.tsx").is_file()
+    worker._pending_memo = None
+    # The repair replaces what the failed attempt wrote, as a real one does.
+    worker.gateway = _gateway(
+        RecordingProvider(
+            _valid_bundle(
+                files=[
+                    {
+                        "operation": "replace",
+                        "path": "apps/web/page.tsx",
+                        "content": "export const repaired = true;\n",
+                    }
+                ]
+            )
+        )
+    )
+    second = worker.run_task(
+        run_id="run.repair",
+        durable_task_id="run.repair:implement:web",
+        attempt=2,
+        task=task,
+    )
+
+    assert (
+        first.evidence[0].details["cache_key"]
+        == second.evidence[0].details["cache_key"]
+    ), "the question did not change; only the state of the repair did"
