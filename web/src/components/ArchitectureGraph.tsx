@@ -10,7 +10,7 @@ import {
   type Node,
 } from '@xyflow/react'
 
-import type { Architecture, ArchitectureNode, DurableTask } from '../lib/v2Api'
+import type { Architecture, ArchitectureNode, DurableTask } from '../lib/api'
 
 /**
  * The approved architecture, as a graph.

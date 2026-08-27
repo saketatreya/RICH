@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 
-import type { Architecture, ArchitectureDraft } from '../lib/v2Api'
+import type { Architecture, ArchitectureDraft } from '../lib/api'
 
 /**
  * Review a proposal before anything records it.

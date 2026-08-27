@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import {
-  v2Api,
+  api,
   type Approval,
   type Preview,
   type Run,
-} from '../lib/v2Api'
+} from '../lib/api'
 
 /**
  * The last step: put what was verified somewhere a person can click.
@@ -42,7 +42,7 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
 
   const refresh = useCallback(async () => {
     try {
-      setPreviews(await v2Api.previews(run.id))
+      setPreviews(await api.previews(run.id))
     } catch {
       // The page's connection banner owns transient API errors.
     }
@@ -126,7 +126,7 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
           }
           onClick={() =>
             guard('request-preview', async () => {
-              const submission = await v2Api.requestPreview(run.id, {
+              const submission = await api.requestPreview(run.id, {
                 sourceDir: destination,
                 neonProjectId: neonProjectId.trim(),
                 expiresAt: new Date(expiresAt).toISOString(),
@@ -144,7 +144,7 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
             disabled={!!busy}
             onClick={() =>
               guard('destroy-preview', async () => {
-                await v2Api.destroyPreview(latest.id)
+                await api.destroyPreview(latest.id)
               })
             }
           >
@@ -165,13 +165,13 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
               disabled={!!busy}
               onClick={() =>
                 guard('deploy-preview', async () => {
-                  await v2Api.decideApproval(
+                  await api.decideApproval(
                     approval.id,
                     true,
                     actor,
                     'Approved for preview deployment',
                   )
-                  if (latest) await v2Api.deployPreview(latest.id, approval.id)
+                  if (latest) await api.deployPreview(latest.id, approval.id)
                   setApproval(null)
                 })
               }
@@ -183,7 +183,7 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
               disabled={!!busy}
               onClick={() =>
                 guard('reject-preview', async () => {
-                  await v2Api.decideApproval(
+                  await api.decideApproval(
                     approval.id,
                     false,
                     actor,

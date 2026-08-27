@@ -1,98 +1,146 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) working in this repository.
 
 ## Commands
 
 ```bash
-python -m pip install -e '.[test]'   # install (editable) with test deps
+python -m pip install -e '.[test]'    # install (editable) with test deps
+npm --prefix web ci                   # frontend deps
+npm --prefix web run build            # frontend → web/dist, served by the Python server
 
-# Offline suite — this is what CI runs; it never calls a model or provider.
-# Needs the `bwrap` binary on PATH: the sandbox-argv tests resolve it while
-# building a command (they never execute it), so a host without Bubblewrap
-# installed fails 12 tests in tests/test_v2_executor.py.
+# The offline suite — what CI runs. It never calls a model or a provider.
+# Needs `bwrap` on PATH: the sandbox-argv tests resolve it while building a
+# command (they never execute it), so a host without Bubblewrap fails 12 tests
+# in tests/test_executor.py.
 ruff check .
 python -m pytest
-python -m pytest tests/test_v2_store.py                    # one file
-python -m pytest tests/test_v2_store.py::test_name         # one test
+python -m pytest tests/test_store.py                # one file
+python -m pytest tests/test_store.py::test_name     # one test
+npm --prefix web run typecheck
+
+# Run it: one server, API and canvas on the same port.
+rich serve                            # → http://127.0.0.1:8767
+rich doctor                           # host checks
+rich rebuild-node --project P --node domain   # forget one node's memo
+rich cancel-run RUN_ID                        # stop at the next checkpoint
+npm --prefix web run dev              # hot-reload dev; Vite proxies /v1 → :8767
 
 # Live tests (marker `live`, skipped unless --run-live is passed)
-python -m pytest --run-live tests/test_v2_executor.py
-python -m pytest --run-live tests/test_v2_typescript_obligations.py
-python -m pytest --run-live tests/test_v2_claude_code_provider.py
-# ^ makes one small real `claude -p` call; needs a Claude Code login, no API key.
-# ^ runs the generated obligation sampler under the pinned Node and checks every
-#   drawn value against ValueType.accepts. Needs `node` 22.x on PATH; no model.
-python -m pytest --run-live --basetemp=.rich/live-tests tests/test_v2_public_runtime_live.py
-# ^ downloads locked pnpm deps + Chromium (>2 GiB); needs a non-tmpfs basetemp and
-#   Linux with Bubblewrap + user namespaces. It does NOT call a model.
-python -m pytest --run-live --basetemp=.rich/live-loop tests/test_v2_closed_loop_live.py
-# ^ the whole loop: intent → architecture → scaffold → a REAL model authors source →
-#   lint/typecheck/unit/build/Playwright in Bubblewrap. Needs everything above plus a
-#   `claude` login; ~3.5 min and a few dollars of quota.
-
-# v1 canned regression demos (no LLM, deterministic — keep these green)
-python cli.py                # pipeline demo
-python cli.py --fan-in       # shared-dependency fan-in
-python cli.py --deep         # depth-2 tree
-python cli.py --memo-test    # memoization/resume
-
-# Canvas (web UI + JSON API on http://127.0.0.1:8765, v2 API under /v2)
-npm --prefix web ci
-npm --prefix web run build       # frontend → web/dist, served by canvas.py
-npm --prefix web run typecheck
-python canvas.py
-npm --prefix web run dev         # hot-reload dev; Vite proxies /api → :8765
-
-# v2 CLI
-python -m rich_v2.cli doctor     # host checks (also installed as `rich-v2`)
-python -m rich_v2.cli rebuild-node --project P --node domain   # forget one node's memo
-python -m rich_v2.cli cancel-run RUN_ID                        # stop at next checkpoint
+python -m pytest --run-live tests/test_executor.py
+python -m pytest --run-live tests/test_typescript_obligations.py
+python -m pytest --run-live tests/test_claude_code_provider.py
+# ^ one small real `claude -p` call; needs a Claude Code login, no API key.
+# ^ obligations run the generated sampler under the pinned Node and check every
+#   drawn value against ValueType.accepts. Needs `node` 22.x; no model.
+python -m pytest --run-live --basetemp=.rich/live-tests tests/test_public_runtime_live.py
+# ^ downloads locked pnpm deps + Chromium (>2 GiB); needs a non-tmpfs basetemp
+#   and Linux with Bubblewrap + user namespaces. It does NOT call a model.
+python -m pytest --run-live --basetemp=.rich/live-loop tests/test_closed_loop_live.py
+# ^ the whole loop: intent → architecture → scaffold → a REAL model authors
+#   source → lint/typecheck/unit/properties/build/Playwright in Bubblewrap.
+#   ~3.5 min and a few dollars of quota.
 ```
-
-`tests/run_tests.py` is a standalone, destructive, OpenRouter-backed phase runner that writes into `build/` — it is deliberately not part of the pytest suite.
 
 ## What this repo is
 
-Two related systems share this repo:
+**RICH is an intent-to-verified-software compiler.** One system, one package
+(`src/richbuild/`), one server, one UI.
 
-- **v1 (root-level `.py` modules)** — a recursive LLM build engine: one procedure `build(contract)` either implements a module as a leaf or asks a PLAN skill to decompose it into children whose contracts the parent authors, then recurses. Three LLM skills (PLAN / IMPLEMENT / DERIVE_TESTS in `skills.py`) do the thinking; two deterministic engines in `build.py` (`run_tests` pytest-subprocess verification, `assemble` topological injection fold → `build/main.py`) do the rest.
-- **v2 (`src/rich_v2/`)** — the active direction: an intent-to-verified-software compiler. Interview → approved immutable spec revision → approved architecture → compiled dependency-ordered tasks → frozen Next.js target-pack scaffold → bounded model-authored source → independent sandboxed gates (lint/types/unit/build/Playwright) → content-addressed release ZIP → digest-bound Neon/Vercel preview. SQLite + a SHA-256 content-addressed artifact store (`store.py`) is the source of truth, not the filesystem.
+Interview → approved immutable spec revision → approved architecture → compiled
+dependency-ordered tasks → frozen Next.js target-pack scaffold → bounded
+model-authored source → independent sandboxed gates (lint / types / unit /
+contract obligations / build / Playwright) → content-addressed release ZIP →
+digest-bound Neon/Vercel preview. SQLite plus a SHA-256 content-addressed
+artifact store (`store.py`) is the source of truth, not the filesystem.
 
-The Canvas (`canvas.py` + `web/`, React + Vite + React Flow) is the product surface for both: design a module graph, build it, inspect generated code/tests per module, rebuild one module (`build.invalidate_node`), preview vibe-edit diffs.
+The canvas (`web/`, React + Vite + React Flow) is the product surface: run the
+interview, review and revise the architecture as a graph, approve each gate,
+watch the run, read what each node produced, rebuild one node, deploy a preview.
 
-## v1 architecture (root modules)
+Read `docs/architecture.md` before changing anything — it is the operating
+contract.
 
-- **The information firewall**: a module's IMPLEMENT call sees its own contract and its dependencies' *contracts*, never their source. The firewall is the prompt — do not leak dependency source into skill prompts.
-- Contracts flow **down** from the parent (PLAN's decomposition output *is* the children's contracts). Dependencies are injected by constructor parameter, never imported; `assemble` does the wiring and constructs a shared dependency exactly once.
-- Hard caps live in `build.py`: `K_IMPL=3`, `MAX_DEPTH=3`, `MAX_CHILDREN=8`, `MAX_LLM_CALLS=50`, `REPLANS_MAX=2`. There is intentionally no implement-then-check size enforcer — leaf-vs-decompose is PLAN's judgment.
-- **Resumption is first-class**: re-running the same build memo-hits verified subtrees and reuses prior PLAN decisions by contract hash. `build/manifest.jsonl` is the append-only audit/cost ledger (`live-PLAN`, `memo-hit`, `decision-reuse`, …); for live gates `manual-plan-reuse` is a forbidden event. Per-call token/cost logging goes to `build/llm_calls.jsonl`.
-- Backends are selected by `RICH_BACKEND=claude|codex|openrouter` (`backend.py`; default claude). `backend.install_from_env()` monkeypatches the skills. Claude mode runs `claude -p --tools "" --max-turns 6` subprocesses (`subagent_skill.py`); codex mode runs `codex exec` read-only in an empty temp dir (`codex_skill.py`); openrouter uses `llm.py`.
-- `node.py` is the `Node` dataclass + on-disk persistence under `build/`; `tree_viewer.py` is strictly read-only over `build/`.
+## Non-negotiable invariants
 
-## v2 architecture (`src/rich_v2/`)
+- **Everything fails closed.** A transition proceeds only when identity,
+  approval, ownership, budget, lease, sandbox, evidence, and digest checks all
+  pass. Never add a permissive fallback: no unsandboxed execution path, no
+  alternate model/provider fallback, no clipping a budget overage.
+- **Model output is never evidence.** Only independently observed command
+  results (trusted runner, Bubblewrap, network off) can publish task/run
+  success, and the protected Playwright reporter must return the exact passed
+  scenario-ID set bound to the run/task/attempt nonce. Evidence may flow the
+  other way — a failed gate's redacted output informs the next attempt
+  (`redact_diagnostics`) — but generation may never become evidence.
+- **Approvals bind exact revisions.** Revisions are append-only; approving one
+  never authorizes a later one. Gates are validated against `ApprovalGate` at
+  the store boundary, so an approval cannot be opened at a gate nothing checks.
+- **Generated source is confined to approved owned paths.** Package manifests,
+  lockfiles, tests, configs, the pinned operations interface, and RICH metadata
+  are protected generation inputs the model cannot touch.
+- **Obligations are run, not just declared.** A contract's proof obligations are
+  scaffolded as a vitest suite against `packages/contracts/src/operations.ts`
+  and executed as a distinct PROPERTY gate; the domain node must export
+  `operations` from `packages/domain/src/operations.ts`. No suite scaffolded
+  means no gate — a property run over an empty directory would pass without
+  checking anything.
+- **Generation is memoized; verification never is.** `generation_cache_key`
+  hashes the exact request (both prompts, provider, model, response schema); a
+  hit replays the bundle through the same parser, transaction and gates.
+  `rich rebuild-node` forgets one node's memos.
+- **One fenced owner mutates a run.** SQLite leases with fencing tokens checked
+  in the same transaction as every authoritative write; source writes go through
+  CAS-backed write-ahead transactions. Coding is single-worker by design.
+- **Money is a decimal string, never a float.** Budgets must be complete;
+  reservations are recorded before provider calls and settled after; crashes
+  charge the reservation.
+- **One canonical encoding.** `canonical.py` is the single definition of the
+  bytes digests are taken over. Never add a second.
+- **One path guard.** `paths.py` is the single relative-path validator and
+  ownership check. `models.py` keeps its own copy on purpose: a layering test
+  says it is the bottom of the stack and imports no sibling module.
+- Toolchain identity is exact (Node 22.22.3, pnpm 10.34.5) and the sole trusted
+  model policy is `anthropic/claude-sonnet-5` — no silent fallback. Two
+  **routes** reach it, chosen explicitly via `route=` on `default_run_runtime`
+  and never substituted for one another: `"api"` (`anthropic_provider.py`, needs
+  `ANTHROPIC_API_KEY`) and `"claude-code"` (`claude_code_provider.py`, spends an
+  existing `claude` login). The CLI route runs `claude -p --tools ""` in an
+  empty cwd under a throwaway `HOME` holding only a symlink to the credential —
+  without that isolation the worker receives the operator's own `CLAUDE.md`
+  memory, which the information firewall exists to prevent. It cannot bound
+  output tokens before the fact. `openai_provider.py` is retained but wired to
+  nothing; it keeps the `ModelProvider` seam vendor-neutral and must not become
+  a fallback.
+- API rules: `/v1` prefix, loopback bind, mutations require `Idempotency-Key`,
+  bounded bodies, host/origin checks.
 
-Read `docs/v2-architecture.md` before changing v2 — it is the operating contract. The non-negotiable invariants:
+## Module map
 
-- **Everything fails closed.** A transition proceeds only when identity, approval, ownership, budget, lease, sandbox, evidence, and digest checks all pass. Never add a permissive fallback (no unsandboxed execution path, no alternate model/provider fallback, no clipping a budget overage).
-- **Model output is never evidence.** Only independently observed command results (via the trusted runner, in Bubblewrap, network off) can publish task/run success, and the protected Playwright reporter must return the exact passed scenario-ID set bound to run/task/attempt nonce. Evidence may flow the other way — a failed gate's redacted output is fed into the next attempt's prompt (`redact_diagnostics`) — but generation may never become evidence.
-- **Obligations are run.** A contract's proof obligations are scaffolded as a vitest suite against the pinned `packages/contracts/src/operations.ts` interface and executed as a distinct PROPERTY gate; the domain node must export `operations` from `packages/domain/src/operations.ts`. No suite scaffolded means no gate — a property run over an empty directory would pass without checking anything.
-- **Generation is memoized, verification never is.** `generation_cache_key` hashes the exact request (both prompts, provider, model, response schema); a hit replays the bundle through the same parser, transaction and gates. `rebuild-node` forgets one node's memos.
-- **Approvals bind exact revisions**; revisions are append-only; approving one revision never authorizes a later one.
-- **Generated source is confined to approved owned paths.** Package manifests, lockfiles, tests, configs, and RICH metadata are protected generation inputs the model cannot touch.
-- **One fenced owner mutates a run**: SQLite leases with fencing tokens checked in the same transaction as every authoritative write; source writes go through CAS-backed write-ahead transactions. Coding is single-worker by design — parallelism requires worktrees + reverification, not racing one directory.
-- **Money is a decimal string, never a float.** Budgets must be complete; reservations are recorded before provider calls and settled after; crashes charge the reservation.
-- Toolchain identity is exact (Node 22.22.3, pnpm 10.34.5) and the sole trusted model policy is `anthropic/claude-sonnet-5` — no silent fallback. Two **routes** reach it, chosen explicitly via `route=` on `default_run_runtime` and never substituted for one another: `"api"` (`anthropic_provider.py`, needs `ANTHROPIC_API_KEY`) and `"claude-code"` (`claude_code_provider.py`, spends an existing `claude` login). The CLI route runs `claude -p --tools ""` in an empty cwd under a throwaway `HOME` holding only a symlink to the credential — without that isolation the worker receives the operator's own `CLAUDE.md` memory, which the information firewall exists to prevent. It cannot bound output tokens before the fact, and the harness's auxiliary small-model calls are charged too. `openai_provider.py` is retained but wired to nothing; it exists to keep the `ModelProvider` seam vendor-neutral, and must not become a fallback.
-- API rules: `/v2`, loopback bind, mutations require `Idempotency-Key`, bounded bodies, host/origin checks.
-
-Rough module map: `interview.py`/`compiler.py`/`planner.py` (intent → spec → architecture → tasks), `models.py` (typed objects), `store.py` (SQLite + CAS), `budget.py`, `scheduler.py`/`run_engine.py`/`execution.py`/`executor.py` (fenced execution + Bubblewrap gates), `coding.py` + `anthropic_provider.py`/`providers.py` (bounded generation), `target_packs/` (Next.js pack), `preview.py`/`migration.py` (Neon/Vercel), `control_plane.py`/`api.py`/`cli.py` (surfaces).
+`interview.py` / `compiler.py` / `planner.py` / `architect.py` (intent → spec →
+architecture → tasks), `models.py` (typed objects), `store.py` (SQLite + CAS),
+`canonical.py`, `paths.py`, `budget.py`, `scheduler.py` / `run_engine.py` /
+`execution.py` / `executor.py` (fenced execution + Bubblewrap gates),
+`coding.py` + `anthropic_provider.py` / `claude_code_provider.py` /
+`providers.py` (bounded generation), `target_packs/` (Next.js pack + TypeScript
+obligation compiler), `preview.py` (Neon/Vercel), `control_plane.py` / `api.py`
+/ `cli.py` / `runtime.py` (surfaces).
 
 ## Testing conventions
 
-- Any test that calls an external model or provider must carry the `live` marker (skipped by default via `tests/conftest.py`; enabled with `--run-live`) and must self-skip with a useful message when its provider is unavailable. Never put credentials — even placeholders — in test source.
-- Pytest is configured with `--strict-markers`, `xfail_strict`, and `pythonpath = [".", "src"]` (import `rich_v2` directly, no install needed for tests).
+- Any test that calls an external model or provider carries the `live` marker
+  (skipped by default via `tests/conftest.py`; enabled with `--run-live`) and
+  self-skips with a useful message when its provider is unavailable. Never put
+  credentials — even placeholders — in test source.
+- Pytest is configured with `--strict-markers`, `xfail_strict`, and
+  `pythonpath = ["src"]` (import `richbuild` directly; no install needed).
 - Ruff lint scope is intentionally narrow (`E4`, `E7`, `E9`, `F`), target py310.
 
 ## Credentials
 
-Resolved lazily from env, never persisted in run documents or model events: `ANTHROPIC_API_KEY` (v2 model runs on the `api` route; the `claude-code` route needs no key and deliberately does not inherit one, so an expired login fails closed instead of silently changing payer), `NEON_API_TOKEN` + `VERCEL_TOKEN` (previews), `OPENROUTER_API_KEY` (v1 openrouter backend). No generated Node process ever receives the preview database credential — migrations run through trusted Python/psycopg only.
+Resolved lazily from env, never persisted in run documents or model events:
+`ANTHROPIC_API_KEY` (the `api` route; the `claude-code` route needs no key and
+deliberately does not inherit one, so an expired login fails closed instead of
+silently changing payer), `NEON_API_TOKEN` + `VERCEL_TOKEN` (previews). No
+generated Node process ever receives the preview database credential —
+migrations run through trusted Python/psycopg only.

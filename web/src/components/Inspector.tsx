@@ -1,294 +1,356 @@
-import { useEffect, useState } from 'react'
-import { useStore } from '../store'
-import { api } from '../lib/api'
-import { findNode, flatten, nodeKind, normDep, parentOf } from '../lib/tree'
-import type { Artifacts, Op, TreeNode } from '../lib/types'
-import EditForm from './EditForm'
-import CodeBlock from './CodeBlock'
+import { useEffect, useMemo, useState } from 'react'
 
-function typeStr(v: any): string {
-  if (v === null) return 'null'
-  if (Array.isArray(v)) return '[' + v.map(typeStr).join(', ') + ']'
-  if (typeof v === 'object') return '{ ' + Object.entries(v).map(([k, t]) => `${k}: ${typeStr(t)}`).join(', ') + ' }'
-  return String(v)
-}
-function shapeNL(obj: Record<string, any>) {
-  const ks = Object.keys(obj || {})
-  return ks.length ? ks.map((k) => `${k}: ${typeStr(obj[k])}`).join(', ') : '—'
+import CodeBlock, { langForPath } from './CodeBlock'
+import {
+  api,
+  type DurableTask,
+  type GeneratedSource,
+  type RunArtifact,
+  type RunEvent,
+  type SourceJournal,
+  type SourceTransaction,
+} from '../lib/api'
+
+/**
+ * Read what the machine wrote, one node at a time.
+ *
+ * v2 could build software and then show a human nothing but an event feed —
+ * approve or veto, with no way to see a line of the result. Everything here is
+ * a read: the durable store is the source of truth and this only renders it.
+ */
+
+interface Props {
+  runId: string
+  events: RunEvent[]
+  /** Set when the caller knows the project, which rebuilding a node needs. */
+  projectId?: string
+  /** Selection shared with the architecture graph, so both read as one view. */
+  selectedNode?: string | null
+  onSelectNode?: (nodeId: string | null) => void
 }
 
-function OpView({ op }: { op: Op }) {
-  const errs = (op.errors || []).join(', ')
-  return (
-    <div className="op">
-      <div className="opname">{op.name || '(unnamed)'}</div>
-      <div className="opio"><span className="l">in</span><span className="v">{shapeNL(op.inputs)}</span></div>
-      <div className="opio"><span className="l">out</span><span className="v">{shapeNL(op.outputs)}</span></div>
-      {errs && <div className="opio"><span className="l err">raises</span><span className="v">{errs}</span></div>}
-    </div>
+type DiffLine = { kind: ' ' | '-' | '+'; text: string }
+
+/**
+ * A minimal line diff. Deliberately not a dependency: the point is to show a
+ * human what changed, and an LCS over the handful of files one task writes is
+ * cheaper than another package in the supply chain.
+ */
+function diffLines(before: string, after: string): DiffLine[] {
+  const a = before.length ? before.split('\n') : []
+  const b = after.length ? after.split('\n') : []
+  const lengths: number[][] = Array.from({ length: a.length + 1 }, () =>
+    new Array(b.length + 1).fill(0),
   )
+  for (let i = a.length - 1; i >= 0; i -= 1) {
+    for (let j = b.length - 1; j >= 0; j -= 1) {
+      lengths[i][j] =
+        a[i] === b[j]
+          ? lengths[i + 1][j + 1] + 1
+          : Math.max(lengths[i + 1][j], lengths[i][j + 1])
+    }
+  }
+  const out: DiffLine[] = []
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      out.push({ kind: ' ', text: a[i] })
+      i += 1
+      j += 1
+    } else if (lengths[i + 1][j] >= lengths[i][j + 1]) {
+      out.push({ kind: '-', text: a[i] })
+      i += 1
+    } else {
+      out.push({ kind: '+', text: b[j] })
+      j += 1
+    }
+  }
+  while (i < a.length) out.push({ kind: '-', text: a[i++] })
+  while (j < b.length) out.push({ kind: '+', text: b[j++] })
+  return out
 }
 
-function CardsSection() {
-  const cards = useStore((s) => s.cards)
-  const setVibeDraft = useStore((s) => s.setVibeDraft)
-  const select = useStore((s) => s.select)
-  if (!cards.length) return null
-  return (
-    <div className="cardstack">
-      {cards.map((c, i) => (
-        <div key={i} className={`vcard ${c.severity || 'info'}`}>
-          <div className="ct">{c.title || 'Note'}{c.node_id ? <> · <code>{c.node_id}</code></> : null}</div>
-          <div className="cm">{c.message || ''}</div>
-          {c.action === 'mark_adapter' && c.node_id && (
-            <div className="ca">
-              <button className="tiny" onClick={() => { select(c.node_id!); setVibeDraft({ prompt: `mark ${c.node_id} as an external adapter`, nodeId: c.node_id! }) }}>Mark adapter</button>
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
-  )
+function decodeBase64(value: string): string {
+  try {
+    const binary = atob(value)
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+    return new TextDecoder().decode(bytes)
+  } catch {
+    return ''
+  }
 }
 
-function ArtifactsView({ node }: { node: TreeNode }) {
-  const [art, setArt] = useState<Artifacts | null>(null)
-  const build = useStore((s) => s.build)
-  const setVibeDraft = useStore((s) => s.setVibeDraft)
-  const jobRunning = useStore((s) => s.job.status === 'running')
-  const status = node.status
+function evidenceFor(events: RunEvent[], taskId: string) {
+  return events
+    .filter(
+      (event) => event.event_type === 'evidence.recorded' && event.task_id === taskId,
+    )
+    .map((event) => ({
+      sequence: event.sequence,
+      kind: String(event.payload.kind ?? 'unknown'),
+      status: String(event.payload.status ?? 'unknown'),
+      summary: String(event.payload.summary ?? ''),
+    }))
+}
+
+export default function Inspector({
+  runId,
+  events,
+  projectId,
+  selectedNode = null,
+  onSelectNode,
+}: Props) {
+  const [tasks, setTasks] = useState<DurableTask[]>([])
+  const [artifacts, setArtifacts] = useState<RunArtifact[]>([])
+  const [transactions, setTransactions] = useState<SourceTransaction[]>([])
+  const [selected, setSelected] = useState<string | null>(null)
+  const [source, setSource] = useState<GeneratedSource | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [rebuilding, setRebuilding] = useState(false)
+  const [rebuilt, setRebuilt] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    let live = true
-    if (status === 'verified' || status === 'failed') api.node(node.id).then((a) => live && setArt(a))
-    else setArt(null)
-    return () => { live = false }
-  }, [node.id, status])
+    let cancelled = false
+    const load = async () => {
+      try {
+        const [nextTasks, nextArtifacts, nextTransactions] = await Promise.all([
+          api.tasks(runId),
+          api.artifacts(runId),
+          api.sourceTransactions(runId),
+        ])
+        if (cancelled) return
+        setTasks(nextTasks)
+        setArtifacts(nextArtifacts)
+        setTransactions(nextTransactions)
+        setError(null)
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause))
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+    // Re-read whenever the run produces something new.
+  }, [runId, events.length])
 
-  if (!art || !art.built) return null
-  const report = art.report
-  const failed = art.status === 'failed'
+  // The graph selects by node, this panel by durable task; either can drive
+  // the other, and a click in one has to land in the other or they read as two
+  // unrelated views of the same run.
+  const selectedTask = useMemo(
+    () =>
+      tasks.find((task) => task.id === selected) ??
+      tasks.find((task) => task.node_id === selectedNode) ??
+      null,
+    [tasks, selected, selectedNode],
+  )
 
-  const vibeFix = () => {
-    const hint = report?.failures?.length
-      ? `Fix ${node.id}: its tests fail — ${report.failures.slice(0, 4).join(' | ')}. Adjust the contract/behavior so the implementation can satisfy the tests.`
-      : `Fix ${node.id}: ${art.reason || 'it failed to build'}.`
-    setVibeDraft({ prompt: hint, nodeId: node.id })
+  const sourceArtifact = useMemo(
+    () =>
+      artifacts.find(
+        (artifact) =>
+          artifact.task_id === selected && artifact.role === 'generated-source',
+      ) ?? null,
+    [artifacts, selected],
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    if (!sourceArtifact) {
+      setSource(null)
+      return
+    }
+    setLoading(true)
+    void api
+      .artifact<GeneratedSource>(runId, sourceArtifact.digest)
+      .then((result) => {
+        if (!cancelled) setSource(result.content ?? null)
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [runId, sourceArtifact])
+
+  // The transaction record carries digests, not bytes: the journal artifact is
+  // where each file's pre-write content lives, and it is the only thing that
+  // turns "here is the new file" into a real diff.
+  const [originals, setOriginals] = useState<Map<string, string>>(new Map())
+
+  useEffect(() => {
+    let cancelled = false
+    const journals = transactions.filter(
+      (transaction) => transaction.task_id === selected,
+    )
+    if (!selected || journals.length === 0) {
+      setOriginals(new Map())
+      return
+    }
+    void Promise.all(
+      journals.map((transaction) =>
+        api
+          .artifact<SourceJournal>(runId, transaction.journal_digest)
+          .then((result) => result.content ?? null)
+          .catch(() => null),
+      ),
+    ).then((results) => {
+      if (cancelled) return
+      const byPath = new Map<string, string>()
+      for (const journal of results) {
+        for (const file of journal?.files ?? []) {
+          if (!file.original?.existed || !file.original.content_base64) continue
+          byPath.set(file.path, decodeBase64(file.original.content_base64))
+        }
+      }
+      setOriginals(byPath)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [runId, transactions, selected])
+
+  if (error) {
+    return (
+      <section className="v2-panel">
+        <div className="v2-section-title">
+          <div>
+            <span className="v2-eyebrow">Inspector</span>
+            <h2>Generated source</h2>
+          </div>
+        </div>
+        <p className="muted">Could not read run artifacts: {error}</p>
+      </section>
+    )
   }
 
   return (
-    <>
-      {failed && (
-        <div className="sec">
-          <div className="fail-banner">
-            <b>✗ build failed</b>
-            {art.reason && <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>{art.reason}</div>}
-          </div>
-          <div className="rowbtns">
-            <button className="primary sm" disabled={jobRunning} onClick={() => build(node.id)}>↻ Rebuild this module</button>
-            <button className="sm" disabled={jobRunning} onClick={vibeFix}>✦ Vibe a fix</button>
-          </div>
+    <section className="v2-panel">
+      <div className="v2-section-title">
+        <div>
+          <span className="v2-eyebrow">Inspector</span>
+          <h2>What each node produced</h2>
         </div>
-      )}
+        <span className="chip">{tasks.length} nodes</span>
+      </div>
 
-      {report && (
-        <div className="sec">
-          <h4>Tests</h4>
-          <div className="test-summary">
-            <span className={report.passed ? 'ok' : 'bad'}>{report.passed ? '✓ passed' : '✗ failed'}</span>
-            <span className="faint">· {report.attempts} attempt{report.attempts === 1 ? '' : 's'}</span>
-          </div>
-          {report.failures?.map((f, i) => <div key={i} className="testline fail">{f}</div>)}
-          {Object.entries(art.tests).map(([fname, body]) => (
-            <details key={fname} className="artifact"><summary>{fname}</summary><CodeBlock code={body} /></details>
-          ))}
-        </div>
-      )}
-
-      <div className="sec">
-        <h4>Generated code</h4>
-        {Object.entries(art.src).map(([fname, body]) => (
-          <details key={fname} className="artifact" open={Object.keys(art.src).length === 1}><summary>{fname}</summary><CodeBlock code={body} /></details>
+      <div className="v2-node-grid">
+        {tasks.map((task) => (
+          <button
+            key={task.id}
+            className={`v2-node-card${selectedTask?.id === task.id ? ' selected' : ''}`}
+            onClick={() => {
+              const next = selectedTask?.id === task.id ? null : task.id
+              setSelected(next)
+              onSelectNode?.(next === null ? null : task.node_id)
+            }}
+          >
+            <b>{task.node_id}</b>
+            <span className={`chip ${task.status}`}>{task.status}</span>
+            <small>
+              attempt {task.attempt} ·{' '}
+              {artifacts.filter((artifact) => artifact.task_id === task.id).length} artifacts
+            </small>
+          </button>
         ))}
-        {!failed && (
-          <div className="rowbtns" style={{ marginTop: 9 }}>
-            <button className="sm" disabled={jobRunning} onClick={() => build(node.id)}>↻ Rebuild this module</button>
-          </div>
-        )}
-      </div>
-    </>
-  )
-}
-
-function Relationships({ root, node }: { root: TreeNode; node: TreeNode }) {
-  const par = parentOf(root, node.id)
-  const uses = (node.dependencies || []).map(normDep).filter((d) => d.id)
-  const receives = par ? (par.edges || []).filter((e) => e.to === node.id) : []
-  const feeds = par ? (par.edges || []).filter((e) => e.from === node.id) : []
-  const usedBy = flatten(root).filter((m) => m !== node && (m.dependencies || []).some((d) => normDep(d).id === node.id))
-  const compose = node.is_leaf === false ? (node.children || []).map((c) => c.id) : null
-
-  return (
-    <div className="sec">
-      <h4>Relationships</h4>
-      <div className="rel"><span className="l">part of</span>{par ? <b className="mono">{par.id}</b> : <span className="faint">root goal</span>}</div>
-      <div className="rel"><span className="l">composed of</span>{compose ? <span className="mono">{compose.join(', ')}</span> : <span className="faint">leaf — does the work itself</span>}</div>
-      <div className="rel"><span className="l">receives</span>{receives.length ? receives.map((e, i) => <span key={i} className="mono"><b className="dfv">{e.name || 'value'}</b> ← {e.from}{i < receives.length - 1 ? '; ' : ''}</span>) : <span className="faint">—</span>}</div>
-      <div className="rel"><span className="l">feeds</span>{feeds.length ? feeds.map((e, i) => <span key={i} className="mono">→ {e.to}{e.name ? <span className="dfv"> ({e.name})</span> : null}{i < feeds.length - 1 ? '; ' : ''}</span>) : <span className="faint">—</span>}</div>
-      <div className="rel"><span className="l">uses</span>{uses.length ? uses.map((d, i) => <span key={i} className="mono"><b className="uv">{d.id}</b> as {d.name}{i < uses.length - 1 ? '; ' : ''}</span>) : <span className="faint">self-contained</span>}</div>
-      <div className="rel"><span className="l">used by</span>{usedBy.length ? <span className="mono">{usedBy.map((m) => m.id).join(', ')}</span> : <span className="faint">—</span>}</div>
-      <div className="rel-help"><b className="dfv">data flow</b> — one stage's output becomes the next's input (a pipe). <b className="uv">uses</b> — calls it as a held tool.</div>
-    </div>
-  )
-}
-
-function WireEditors({ root, node }: { root: TreeNode; node: TreeNode }) {
-  const mutate = useStore((s) => s.mutate)
-  const par = parentOf(root, node.id)
-  const [efFrom, setEfFrom] = useState('')
-  const [efTo, setEfTo] = useState('')
-  const [efName, setEfName] = useState('')
-  const [udId, setUdId] = useState('')
-  const [udName, setUdName] = useState('')
-  const children = node.children || []
-  const sibs = par ? (par.children || []).map((c) => c.id).filter((id) => id !== node.id) : []
-  const uses = (node.dependencies || []).map(normDep).filter((d) => d.id)
-
-  return (
-    <>
-      {node.is_leaf === false && (
-        <div className="sec">
-          <h4>Wire children · data flow</h4>
-          {(node.edges || []).length ? (node.edges || []).map((e, i) => (
-            <div key={i} className="edge-row">
-              <span className="mono">{e.from} <span className="dfv">→ {e.name || 'value'} →</span> {e.to}</span>
-              <button className="tiny danger" onClick={() => mutate((t) => { findNode(t, node.id)!.edges!.splice(i, 1) }, { pushUndo: true })}>✕</button>
-            </div>
-          )) : <span className="faint">no data-flow links</span>}
-          <div className="edge-row" style={{ marginTop: 7 }}>
-            <select value={efFrom} onChange={(e) => setEfFrom(e.target.value)}><option value="">from…</option>{children.map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}</select>
-            <span>→</span>
-            <select value={efTo} onChange={(e) => setEfTo(e.target.value)}><option value="">to…</option>{children.map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}</select>
-            <input className="mono" placeholder="value" style={{ width: 70 }} value={efName} onChange={(e) => setEfName(e.target.value)} />
-            <button className="tiny" onClick={() => {
-              if (!efFrom || !efTo || efFrom === efTo) return
-              mutate((t) => { const n = findNode(t, node.id)!; n.edges = n.edges || []; if (!n.edges.some((e) => e.from === efFrom && e.to === efTo)) n.edges.push({ from: efFrom, to: efTo, name: efName.trim() || 'value' }) }, { pushUndo: true })
-              setEfFrom(''); setEfTo(''); setEfName('')
-            }}>+ link</button>
-          </div>
-        </div>
-      )}
-      {par && sibs.length > 0 && (
-        <div className="sec">
-          <h4>Uses · held capabilities</h4>
-          {uses.length ? uses.map((d, i) => (
-            <div key={i} className="edge-row">
-              <span className="mono"><b className="uv">{d.id}</b> as {d.name}</span>
-              <button className="tiny danger" onClick={() => mutate((t) => { findNode(t, node.id)!.dependencies!.splice(i, 1) }, { pushUndo: true })}>✕</button>
-            </div>
-          )) : <span className="faint">holds nothing</span>}
-          <div className="edge-row" style={{ marginTop: 7 }}>
-            <select value={udId} onChange={(e) => setUdId(e.target.value)}><option value="">sibling…</option>{sibs.map((s) => <option key={s} value={s}>{s}</option>)}</select>
-            <span>as</span>
-            <input className="mono" placeholder="name" style={{ width: 80 }} value={udName} onChange={(e) => setUdName(e.target.value)} />
-            <button className="tiny" onClick={() => {
-              if (!udId) return
-              mutate((t) => { const n = findNode(t, node.id)!; n.dependencies = n.dependencies || []; if (!n.dependencies.some((d) => normDep(d).id === udId)) n.dependencies.push({ name: udName.trim() || udId, id: udId }) }, { pushUndo: true })
-              setUdId(''); setUdName('')
-            }}>+ uses</button>
-          </div>
-        </div>
-      )}
-    </>
-  )
-}
-
-export default function Inspector() {
-  const tree = useStore((s) => s.tree)!
-  const selectedId = useStore((s) => s.selectedId)
-  const editMode = useStore((s) => s.editMode)
-  const config = useStore((s) => s.config)
-  const select = useStore((s) => s.select)
-  const setEditMode = useStore((s) => s.setEditMode)
-  const planNode = useStore((s) => s.planNode)
-  const vibeNode = useStore((s) => s.vibeNode)
-  const addChild = useStore((s) => s.addChild)
-  const markLeaf = useStore((s) => s.markLeaf)
-  const deleteNode = useStore((s) => s.deleteNode)
-  const jobRunning = useStore((s) => s.job.status === 'running')
-
-  const n = selectedId ? findNode(tree, selectedId) : null
-  if (!n) return null
-
-  const kind = n.is_leaf === true ? 'leaf' : n.is_leaf === false ? 'internal' : 'unplanned'
-  const mk = nodeKind(n)
-  const depth = depthOf(tree, n.id)
-  const canDecompose = depth < (config?.max_depth ?? 3)
-  const ext = n.external || {}
-  const adapter = mk === 'adapter'
-
-  return (
-    <div className="inspector glass">
-      <div className="insp-head">
-        <div className="row1">
-          <span className="insp-id">{n.id}</span>
-          <span className={`badge ${kind}`}>{kind === 'internal' ? `${(n.children || []).length} children` : kind}</span>
-          <span className={`badge ${mk}`}>{mk}</span>
-          <button className="ghost insp-close" onClick={() => select(null)} title="Close">✕</button>
-        </div>
-        <div className="sub">
-          <span className={'dot'} style={{ background: `var(--${n.status})` }} />
-          {n.status} · depth {depth}{n.lane ? ` · ${n.lane}` : ''}
-        </div>
+        {tasks.length === 0 && <p className="muted">No durable tasks yet.</p>}
       </div>
 
-      <div className="insp-scroll">
-        <CardsSection />
-        <div className="act">
-          <p className="lead">Plan / decompose <b>{n.id}</b></p>
-          <div className="rowbtns">
-            <button className="primary sm" disabled={!canDecompose || jobRunning} onClick={() => planNode(n.id)}>Plan layer</button>
-            <button className="sm" disabled={!canDecompose || jobRunning} onClick={() => vibeNode(n.id)}>Vibe ✦</button>
-          </div>
-          <div className="rowbtns" style={{ marginTop: 8 }}>
-            <button className="sm" onClick={() => addChild(n.id)}>+ Child</button>
-            <button className="sm" onClick={() => markLeaf(n.id)}>Mark leaf</button>
-            <button className="sm danger" disabled={n.id === tree.id} onClick={() => { if (confirm(`Delete "${n.id}"?`)) deleteNode(n.id) }}>Delete</button>
-          </div>
-        </div>
-
-        {editMode ? (
-          <EditForm node={n} />
-        ) : (
-          <>
-            <ArtifactsView node={n} />
-            <div className="sec"><h4>Purpose</h4><p className="purpose">{n.description || '(no description yet)'}</p></div>
-            <div className="sec">
-              <h4>Interface</h4>
-              {(n.operations || []).length ? (n.operations || []).map((op, i) => <OpView key={i} op={op} />) : <span className="faint">no operations defined</span>}
-            </div>
-            {adapter && (
-              <div className="sec">
-                <h4>External adapter</h4>
-                <div className="rel"><span className="l">provider</span><b>{ext.provider || 'external'}</b></div>
-                <div className="rel"><span className="l">unit tests</span><span>{ext.mock_policy || 'mock provider I/O'}</span></div>
-                <div className="rel"><span className="l">live smoke</span><span>{ext.live_smoke ? 'allowed' : 'off by default'}</span></div>
-                <div className="rel-help">Adapters isolate API/network/file boundaries. Unit tests fake provider responses; live calls belong in separate smoke tests.</div>
-              </div>
+      {selectedTask && (
+        <div className="v2-inspect">
+          <div className="v2-inspect-head">
+            <h3>{selectedTask.node_id}</h3>
+            {projectId && (
+              <button
+                className="v2-secondary"
+                disabled={rebuilding}
+                onClick={async () => {
+                  setRebuilding(true)
+                  setRebuilt(null)
+                  setError(null)
+                  try {
+                    const result = await api.rebuildNode(
+                      projectId,
+                      selectedTask.node_id,
+                    )
+                    setRebuilt(
+                      result.forgotten_generations === 0
+                        ? 'Nothing was remembered for this node; the next run writes it fresh.'
+                        : `Forgot ${result.forgotten_generations} remembered generation(s). The next run rewrites this node and replays the rest.`,
+                    )
+                  } catch (cause) {
+                    setError(
+                      cause instanceof Error ? cause.message : String(cause),
+                    )
+                  } finally {
+                    setRebuilding(false)
+                  }
+                }}
+              >
+                {rebuilding ? 'Marking…' : 'Rebuild this node'}
+              </button>
             )}
-            <Relationships root={tree} node={n} />
-            <WireEditors root={tree} node={n} />
-            <div className="sec"><button className="sm" onClick={() => setEditMode(true)}>✎ Edit contract</button></div>
-          </>
-        )}
-      </div>
-    </div>
-  )
-}
+          </div>
+          {rebuilt && <p className="v2-note">{rebuilt}</p>}
 
-function depthOf(root: TreeNode, id: string): number {
-  let d = 0
-  const walk = (n: TreeNode, depth: number) => { if (n.id === id) { d = depth; return } ;(n.children || []).forEach((c) => walk(c, depth + 1)) }
-  walk(root, 0)
-  return d
+          <h4>Evidence</h4>
+          <div className="v2-evidence">
+            {evidenceFor(events, selectedTask.id).map((record) => (
+              <div key={record.sequence}>
+                <span className={`chip ${record.status}`}>{record.status}</span>
+                <b>{record.kind}</b>
+                <small>{record.summary}</small>
+              </div>
+            ))}
+            {evidenceFor(events, selectedTask.id).length === 0 && (
+              <p className="muted">
+                No evidence recorded for this node yet. Generation is not evidence;
+                only an observed command result is.
+              </p>
+            )}
+          </div>
+
+          <h4>Generated source</h4>
+          {loading && <p className="muted">Reading artifact…</p>}
+          {!loading && !source && (
+            <p className="muted">This node produced no source artifact.</p>
+          )}
+          {source && (
+            <>
+              <p className="muted">{source.summary}</p>
+              {source.files.map((file) => {
+                const before = originals.get(file.path)
+                return (
+                  <details key={file.path} className="artifact">
+                    <summary>
+                      {file.path} <small>{file.size} bytes</small>
+                    </summary>
+                    {before === undefined ? (
+                      <CodeBlock code={file.content} lang={langForPath(file.path)} />
+                    ) : (
+                      <pre className="codeblock diff">
+                        {diffLines(before, file.content).map((line, index) => (
+                          <span key={index} className={`d-${line.kind === '+' ? 'add' : line.kind === '-' ? 'del' : 'same'}`}>
+                            {line.kind}
+                            {line.text}
+                            {'\n'}
+                          </span>
+                        ))}
+                      </pre>
+                    )}
+                  </details>
+                )
+              })}
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  )
 }

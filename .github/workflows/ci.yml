@@ -13,25 +13,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.12 is the declared floor for CI; 3.14 is what development runs on.
-        # Without both, a local-green/CI-red divergence is invisible.
-        python-version: ["3.12", "3.14"]
+        # Every version the package claims in requires-python. Advertising a
+        # floor nobody runs is a support claim with no evidence behind it.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      # The offline suite verifies the exact bubblewrap argv the sandbox
-      # builds, so BubblewrapExecutor resolves the binary before constructing a
-      # command. The runner image does not ship it. Skipping those tests
-      # instead would drop the sandbox-policy coverage that matters most.
+      # The offline suite verifies the exact bubblewrap argv the sandbox builds,
+      # so BubblewrapExecutor resolves the binary before constructing a command.
+      # The runner image does not ship it, and skipping those tests would drop
+      # the sandbox-policy coverage that matters most.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
       - run: python -m pip install -e ".[test]"
       - run: ruff check .
       - run: python -m pytest
 
-  canvas:
+  web:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
