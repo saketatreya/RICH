@@ -669,8 +669,31 @@ function fail(message) {
   throw new Error(message);
 }
 
+function deepEqual(left, right) {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length
+      && left.every((item, index) => deepEqual(item, right[index]));
+  }
+  if (typeof left === "object" && typeof right === "object" && left && right) {
+    const lk = Object.keys(left).sort();
+    const rk = Object.keys(right).sort();
+    return lk.length === rk.length
+      && lk.every((key, index) => key === rk[index])
+      && lk.every((key) => deepEqual(left[key], right[key]));
+  }
+  return false;
+}
+
 export function expect(actual) {
   const matchers = {
+    // Structural, and it reports both sides -- which is the entire reason the
+    // generated assertions moved off a collapsed boolean.
+    toEqual(expected) {
+      if (!deepEqual(actual, expected)) {
+        fail(`expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+      }
+    },
     toBe(expected) {
       if (!Object.is(actual, expected)) {
         fail(`expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
@@ -684,6 +707,9 @@ export function expect(actual) {
     not: {
       toBe(expected) {
         if (Object.is(actual, expected)) fail("expected a difference");
+      },
+      toEqual(expected) {
+        if (deepEqual(actual, expected)) fail("expected a difference");
       },
       toThrow() {
         try { actual(); } catch (error) { fail(`threw: ${error}`); }
