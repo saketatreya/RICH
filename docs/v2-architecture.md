@@ -299,6 +299,29 @@ The run cannot publish success merely because a handler returns success. The sch
 checks required evidence kinds, blocking status, artifact roles, and exact acceptance
 coverage before committing task and run status.
 
+### 7a. Evidence flows forward into the retry
+
+A gate failure is recorded as a `rich.command-verification/v1` artifact holding the exact
+command, exit status, and bounded stdout/stderr. That evidence is also fed into the next
+attempt's prompt (`redact_diagnostics`, `PriorAttemptFailure`), because a retry that
+cannot see why the last attempt failed is just another first attempt charged to the same
+budget.
+
+This does not weaken §7. What flows forward is an *independently observed command result*,
+never a model's claim about itself; verification still runs out of process, and a worker
+still cannot publish its own success. The direction matters: evidence may inform
+generation, but generation may never become evidence.
+
+It does raise a firewall question, since a compiler or test diagnostic can name files the
+task does not own and quote their contents. A diagnostic line is disclosed only when every
+path it names is either the task's own source or a generated test — those being the
+approved requirements and acceptance scenarios rendered executable, which the prompt
+already contains. Continuation lines such as code frames carry no path of their own and so
+inherit the disclosability of the line that last named a file; without that rule a
+sibling's source would pass through inside an indented context block. Withheld lines are
+reported to the worker as a count, which is the signal it needs: a consumer broke, so
+re-read the contract rather than guess at the consumer.
+
 ### 8. What was verified is what can deploy
 
 Before root verification, RICH records the deployment-source digest set. Verification
