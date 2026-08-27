@@ -18,6 +18,7 @@ from rich_v2.coding import (
     SourceTransactionError,
     build_task_prompt,
     file_bundle_schema,
+    generation_cache_key,
     parse_file_bundle,
     redact_diagnostics,
 )
@@ -797,3 +798,192 @@ def test_the_worker_asks_for_prior_failures_only_when_retrying(tmp_path):
     assert asked == [("web", 2)], "a first attempt has nothing to learn from"
     assert "no-unused-vars" not in first_provider.requests[0].user_prompt
     assert "no-unused-vars" in retry_provider.requests[0].user_prompt
+
+
+class _Memo:
+    """The smallest thing satisfying GenerationMemoStore."""
+
+    def __init__(self):
+        self.entries = {}
+        self.reads = 0
+
+    def get(self, cache_key):
+        self.reads += 1
+        return self.entries.get(cache_key)
+
+    def put(self, cache_key, *, document, node_id, provider, model, run_id, task_id):
+        self.entries[cache_key] = {
+            "bundle": document["bundle"],
+            "provider": provider,
+            "model": model,
+            "origin_run_id": run_id,
+            "origin_task_id": task_id,
+        }
+
+
+def _workspace(tmp_path, name):
+    root = tmp_path / name
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _run(worker, task, *, run_id="run.memo", attempt=1):
+    return worker.run_task(
+        run_id=run_id,
+        durable_task_id=f"{run_id}:implement:web",
+        attempt=attempt,
+        task=task,
+    )
+
+
+def test_an_identical_request_reuses_the_bundle_without_calling_the_model(tmp_path):
+    project, architecture, plan, approval = _fixture()
+    memo = _Memo()
+    task = plan.task_index["web"]
+
+    first_provider = RecordingProvider(_valid_bundle())
+    first = _run(
+        CodingWorker(
+            _gateway(first_provider),
+            workspace=_workspace(tmp_path, "a"),
+            project=project,
+            architecture=architecture,
+            approval=approval,
+            provider="fake",
+            model="test-model",
+            dependency_summaries={"domain": "Domain generation completed."},
+            memo=memo,
+        ),
+        task,
+    )
+    second_provider = RecordingProvider(_valid_bundle())
+    second = _run(
+        CodingWorker(
+            _gateway(second_provider),
+            workspace=_workspace(tmp_path, "b"),
+            project=project,
+            architecture=architecture,
+            approval=approval,
+            provider="fake",
+            model="test-model",
+            dependency_summaries={"domain": "Domain generation completed."},
+            memo=memo,
+        ),
+        task,
+        run_id="run.memo2",
+    )
+
+    assert len(first_provider.requests) == 1
+    assert len(second_provider.requests) == 0, "the model must not be asked twice"
+    assert first.succeeded and second.succeeded
+    assert (tmp_path / "b/apps/web/page.tsx").is_file(), "the source is still written"
+    assert first.evidence[0].details["generation_reused"] is False
+    assert second.evidence[0].details["generation_reused"] is True
+    assert second.evidence[0].details["reused_from_run_id"] == "run.memo"
+    assert "Reused" in second.evidence[0].summary
+    assert "Generated" in first.evidence[0].summary
+
+
+def test_a_reused_bundle_is_revalidated_not_trusted(tmp_path):
+    """A memo is a way to skip asking, never a way to skip checking."""
+
+    project, architecture, plan, approval = _fixture()
+    task = plan.task_index["web"]
+    memo = _Memo()
+    provider = RecordingProvider(_valid_bundle())
+    worker = CodingWorker(
+        _gateway(provider),
+        workspace=_workspace(tmp_path, "a"),
+        project=project,
+        architecture=architecture,
+        approval=approval,
+        provider="fake",
+        model="test-model",
+        dependency_summaries={"domain": "Domain generation completed."},
+        memo=memo,
+    )
+    _run(worker, task)
+
+    # Poison the store the way a corrupted or tampered payload would.
+    (key,) = memo.entries
+    memo.entries[key]["bundle"]["files"][0]["path"] = "packages/db/schema.ts"
+
+    poisoned = CodingWorker(
+        _gateway(RecordingProvider(_valid_bundle())),
+        workspace=_workspace(tmp_path, "c"),
+        project=project,
+        architecture=architecture,
+        approval=approval,
+        provider="fake",
+        model="test-model",
+        dependency_summaries={"domain": "Domain generation completed."},
+        memo=memo,
+    )
+    with pytest.raises(FileBundleValidationError, match="outside task ownership"):
+        _run(poisoned, task, run_id="run.memo3")
+    assert not (tmp_path / "c/packages").exists(), "nothing was written"
+
+
+def test_a_retry_never_replays_the_answer_that_just_failed(tmp_path):
+    """The prompt carries the prior failure, so the key changes with it."""
+
+    project, architecture, plan, approval = _fixture()
+    task = plan.task_index["web"]
+
+    def _prompt(prior):
+        return build_task_prompt(
+            workspace=tmp_path,
+            project=project,
+            architecture=architecture,
+            task=task,
+            approval=approval,
+            dependency_summaries={"domain": "Exposes a stable getNote operation."},
+            prior_failures=prior,
+        )
+
+    schema = file_bundle_schema()
+    clean = generation_cache_key(
+        _prompt(()), provider="fake", model="test-model", response_schema=schema
+    )
+    after_failure = generation_cache_key(
+        _prompt(
+            [
+                PriorAttemptFailure(
+                    attempt=1,
+                    gate="types",
+                    summary="types exited with 2",
+                    diagnostics=("apps/web/note.tsx(1,1): error TS2304",),
+                )
+            ]
+        ),
+        provider="fake",
+        model="test-model",
+        response_schema=schema,
+    )
+
+    assert clean != after_failure
+    assert len(clean) == 64
+
+
+def test_the_key_separates_provider_model_and_schema(tmp_path):
+    project, architecture, plan, approval = _fixture()
+    prompt = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["web"],
+        approval=approval,
+        dependency_summaries={"domain": "Exposes a stable getNote operation."},
+    )
+    base = dict(provider="fake", model="test-model", response_schema=file_bundle_schema())
+    key = generation_cache_key(prompt, **base)
+
+    assert generation_cache_key(prompt, **{**base, "provider": "other"}) != key
+    assert generation_cache_key(prompt, **{**base, "model": "other"}) != key
+    assert (
+        generation_cache_key(
+            prompt, **{**base, "response_schema": file_bundle_schema(CodingLimits(max_files=3))}
+        )
+        != key
+    )
+    assert generation_cache_key(prompt, **base) == key, "and it is stable"

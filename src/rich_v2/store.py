@@ -24,7 +24,7 @@ from .models import ApprovalGate
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 _UNSET = object()
 
 _RUN_TRANSITIONS = {
@@ -445,6 +445,28 @@ class RichStore:
                         ON previews(status, updated_at, id);
                     INSERT INTO schema_migrations(version, applied_at)
                     VALUES (8, CURRENT_TIMESTAMP);
+                    COMMIT;
+                    """
+                )
+            if 9 not in applied:
+                conn.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+                    CREATE TABLE generation_memos (
+                        cache_key TEXT PRIMARY KEY,
+                        payload_digest TEXT NOT NULL
+                            REFERENCES artifacts(digest),
+                        node_id TEXT NOT NULL,
+                        provider TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        origin_run_id TEXT NOT NULL,
+                        origin_task_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX generation_memos_origin
+                        ON generation_memos(origin_run_id, created_at);
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (9, CURRENT_TIMESTAMP);
                     COMMIT;
                     """
                 )
@@ -946,6 +968,98 @@ class RichStore:
             }
             for row in rows
         ]
+
+    def get_generation_memo(self, cache_key: str) -> dict[str, Any] | None:
+        """Return a previously generated bundle for byte-identical inputs.
+
+        The memo is keyed by the exact request that would be sent, so a hit
+        means the model has already been asked this and nothing has changed.
+        The payload is returned for revalidation, never for trust: the caller
+        puts it back through the same parser a live response goes through.
+        """
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM generation_memos WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            artifact = self.get_artifact(row["payload_digest"])
+        except (NotFoundError, StoreError):
+            # A pruned or corrupt payload means no memo, never a broken run.
+            return None
+        return {
+            "cache_key": row["cache_key"],
+            "payload_digest": row["payload_digest"],
+            "node_id": row["node_id"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "origin_run_id": row["origin_run_id"],
+            "origin_task_id": row["origin_task_id"],
+            "created_at": row["created_at"],
+            "payload": artifact.path.read_bytes(),
+        }
+
+    def put_generation_memo(
+        self,
+        cache_key: str,
+        *,
+        payload: bytes,
+        node_id: str,
+        provider: str,
+        model: str,
+        run_id: str,
+        task_id: str,
+    ) -> str:
+        """Record one generation against the exact inputs that produced it."""
+
+        if (
+            not isinstance(cache_key, str)
+            or len(cache_key) != 64
+            or any(character not in "0123456789abcdef" for character in cache_key)
+        ):
+            raise ValueError("cache_key must be a lowercase sha256 digest")
+        artifact = self.put_artifact(
+            payload,
+            media_type="application/vnd.rich.generation-memo+json",
+            metadata={"cache_key": cache_key, "node_id": node_id},
+        )
+        with self._transaction(immediate=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO generation_memos(
+                    cache_key, payload_digest, node_id, provider, model,
+                    origin_run_id, origin_task_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO NOTHING
+                """,
+                (
+                    cache_key,
+                    artifact.digest,
+                    node_id,
+                    provider,
+                    model,
+                    run_id,
+                    task_id,
+                    _now(),
+                ),
+            )
+        return artifact.digest
+
+    def forget_generation_memos(self, *, node_id: str) -> int:
+        """Drop every memo for one architecture node.
+
+        This is the whole of "rebuild this node and mean it": the next run
+        recomputes it rather than replaying what it said last time.
+        """
+
+        with self._transaction(immediate=True) as conn:
+            cursor = conn.execute(
+                "DELETE FROM generation_memos WHERE node_id = ?", (node_id,)
+            )
+        return cursor.rowcount
 
     def request_approval(
         self,

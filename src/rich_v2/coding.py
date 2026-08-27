@@ -1527,6 +1527,71 @@ def generated_source_artifact_bytes(
     return (_canonical_json(document) + "\n").encode("utf-8")
 
 
+
+def generation_cache_key(
+    prompt: PromptBundle,
+    *,
+    provider: str,
+    model: str,
+    response_schema: Mapping[str, Any],
+) -> str:
+    """Identify one generation request by everything that determines its answer.
+
+    Keyed on the exact bytes that would be sent -- both prompts, the provider
+    and model, and the response schema -- rather than on a summary of the
+    inputs. A summary can be right by accident; this cannot be wrong, because
+    a hit means the request is byte-identical to one already asked.
+
+    Note what this makes fall out: a retry carries its predecessor's failures
+    in the prompt, so it keys differently and never replays the answer that
+    just failed. The cache busts itself exactly when it should.
+    """
+
+    identity = _canonical_json(
+        {
+            "schema": "rich.generation-cache-key/v1",
+            "system_prompt": prompt.system_prompt,
+            "user_prompt": prompt.user_prompt,
+            "provider": provider,
+            "model": model,
+            "response_schema": dict(response_schema),
+        }
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+
+@dataclass(frozen=True, slots=True)
+class _ReusedGeneration:
+    """Where a bundle came from, whether the model answered or a memo did."""
+
+    provider: str
+    model: str
+    attempt: int = 0
+    origin_run_id: str = ""
+    origin_task_id: str = ""
+
+
+class GenerationMemoStore(Protocol):
+    """Somewhere to remember what a byte-identical request already answered."""
+
+    def get(self, cache_key: str) -> Mapping[str, Any] | None:
+        ...
+
+    def put(
+        self,
+        cache_key: str,
+        *,
+        document: Mapping[str, Any],
+        node_id: str,
+        provider: str,
+        model: str,
+        run_id: str,
+        task_id: str,
+    ) -> None:
+        ...
+
+
 DependencySummarySource = (
     Mapping[str, str] | Callable[[CompiledTask], Mapping[str, str]]
 )
@@ -1589,6 +1654,7 @@ class CodingWorker:
         model: str,
         dependency_summaries: DependencySummarySource | None = None,
         prior_failures: PriorFailureSource | None = None,
+        memo: GenerationMemoStore | None = None,
         limits: CodingLimits = DEFAULT_LIMITS,
         max_attempts: int = 1,
         commit_sink: CommitSink | None = None,
@@ -1623,6 +1689,7 @@ class CodingWorker:
         if prior_failures is not None and not callable(prior_failures):
             raise TypeError("prior_failures must be callable")
         self.prior_failures = prior_failures
+        self.memo = memo
         self.limits = limits
         self.max_attempts = max_attempts
         self.commit_sink = commit_sink
@@ -1681,30 +1748,62 @@ class CodingWorker:
             prior_failures=earlier_failures,
             limits=self.limits,
         )
-        request = ModelRequest(
-            run_id=run_id,
-            task_id=durable_task_id,
-            correlation_id=(
-                f"{run_id}:{durable_task_id}:attempt:{attempt}:implementation"
-            ),
-            role=GenerationRole.IMPLEMENTER,
+        response_schema = file_bundle_schema(self.limits)
+        cache_key = generation_cache_key(
+            prompt,
             provider=self.provider,
             model=self.model,
-            system_prompt=prompt.system_prompt,
-            user_prompt=prompt.user_prompt,
-            response_schema=file_bundle_schema(self.limits),
-            max_input_tokens=self.limits.max_input_tokens,
-            max_output_tokens=self.limits.max_output_tokens,
-            max_cost_usd=self.limits.max_cost_usd,
-            timeout_seconds=self.limits.timeout_seconds,
+            response_schema=response_schema,
         )
-        response = self.gateway.generate(request, max_attempts=self.max_attempts)
-        self._require_mutation_authority(cancellation_check)
-        bundle = parse_file_bundle(
-            response,
-            owned_paths=task.owned_paths,
-            limits=self.limits,
-        )
+        remembered = None if self.memo is None else self.memo.get(cache_key)
+        reused = remembered is not None
+        if reused:
+            # Revalidated, never trusted: a remembered bundle goes back through
+            # the same parser a live response does, against this task's own
+            # ownership and limits. A memo is a way to skip asking, not a way
+            # to skip checking.
+            bundle = parse_file_bundle(
+                remembered["bundle"],
+                owned_paths=task.owned_paths,
+                limits=self.limits,
+            )
+            generation = _ReusedGeneration(
+                provider=str(remembered.get("provider") or self.provider),
+                model=str(remembered.get("model") or self.model),
+                origin_run_id=str(remembered.get("origin_run_id") or ""),
+                origin_task_id=str(remembered.get("origin_task_id") or ""),
+            )
+            self._require_mutation_authority(cancellation_check)
+        else:
+            request = ModelRequest(
+                run_id=run_id,
+                task_id=durable_task_id,
+                correlation_id=(
+                    f"{run_id}:{durable_task_id}:attempt:{attempt}:implementation"
+                ),
+                role=GenerationRole.IMPLEMENTER,
+                provider=self.provider,
+                model=self.model,
+                system_prompt=prompt.system_prompt,
+                user_prompt=prompt.user_prompt,
+                response_schema=response_schema,
+                max_input_tokens=self.limits.max_input_tokens,
+                max_output_tokens=self.limits.max_output_tokens,
+                max_cost_usd=self.limits.max_cost_usd,
+                timeout_seconds=self.limits.timeout_seconds,
+            )
+            response = self.gateway.generate(request, max_attempts=self.max_attempts)
+            self._require_mutation_authority(cancellation_check)
+            bundle = parse_file_bundle(
+                response,
+                owned_paths=task.owned_paths,
+                limits=self.limits,
+            )
+            generation = _ReusedGeneration(
+                provider=response.provider,
+                model=response.model,
+                attempt=response.attempt,
+            )
         self._require_mutation_authority(cancellation_check)
         prepared_journal: SourceTransactionJournal | None = None
 
@@ -1782,6 +1881,40 @@ class CodingWorker:
                     commit=commit,
                 )
 
+        if self.memo is not None and not reused:
+            # Recorded only now, because a bundle that never applied is not an
+            # answer worth replaying. A memo write must never be able to fail
+            # the task that earned it.
+            try:
+                self.memo.put(
+                    cache_key,
+                    document={
+                        "schema": "rich.generation-memo/v1",
+                        "provider": generation.provider,
+                        "model": generation.model,
+                        "bundle": {
+                            "summary": bundle.summary,
+                            "files": [
+                                {
+                                    "path": item.path,
+                                    "operation": item.operation,
+                                    # Text on the way in, so text on the
+                                    # way out; the parser decodes it again.
+                                    "content": item.content.decode("utf-8"),
+                                }
+                                for item in bundle.files
+                            ],
+                        },
+                    },
+                    node_id=task.node_id,
+                    provider=generation.provider,
+                    model=generation.model,
+                    run_id=run_id,
+                    task_id=durable_task_id,
+                )
+            except Exception:
+                pass
+
         artifact = ProducedArtifact(
             content=generated_source_artifact_bytes(bundle, commit),
             role="generated-source",
@@ -1791,9 +1924,10 @@ class CodingWorker:
                 "file_count": len(bundle.files),
                 "total_bytes": bundle.total_bytes,
                 "node_id": task.node_id,
-                "provider": response.provider,
-                "model": response.model,
-                "provider_attempt": response.attempt,
+                "provider": generation.provider,
+                "model": generation.model,
+                "provider_attempt": generation.attempt,
+                "generation_reused": reused,
                 "verification_status": "not_run",
                 "acceptance_status": "not_evaluated",
             },
@@ -1802,17 +1936,28 @@ class CodingWorker:
             kind="generation",
             status="passed",
             summary=(
-                f"Generated and transactionally applied {len(bundle.files)} "
-                "owned source file(s); verification was not run"
+                f"{'Reused' if reused else 'Generated'} and transactionally "
+                f"applied {len(bundle.files)} owned source file(s); "
+                "verification was not run"
             ),
             blocking=False,
             details={
                 "source_digest": commit.source_digest,
                 "paths": list(commit.paths),
-                "provider": response.provider,
-                "model": response.model,
-                "provider_attempt": response.attempt,
+                "provider": generation.provider,
+                "model": generation.model,
+                "provider_attempt": generation.attempt,
                 "prompt_bytes": prompt.prompt_bytes,
+                "cache_key": cache_key,
+                "generation_reused": reused,
+                **(
+                    {
+                        "reused_from_run_id": generation.origin_run_id,
+                        "reused_from_task_id": generation.origin_task_id,
+                    }
+                    if reused
+                    else {}
+                ),
                 "verification_status": "not_run",
                 "acceptance_status": "not_evaluated",
             },

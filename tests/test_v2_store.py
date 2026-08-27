@@ -453,3 +453,85 @@ def test_an_approval_cannot_be_opened_at_a_gate_nothing_checks(tmp_path):
             store.request_approval(
                 project["id"], gate=unknown, request={"revision_id": "rev.1"}
             )
+
+
+def _memo_payload(text: str) -> bytes:
+    return (
+        '{"schema":"rich.generation-memo/v1","bundle":{"summary":"'
+        + text
+        + '","files":[]}}'
+    ).encode()
+
+
+def test_a_generation_memo_round_trips_and_is_keyed_by_the_request(tmp_path):
+    store = RichStore(tmp_path / "state")
+    key = "a" * 64
+
+    assert store.get_generation_memo(key) is None
+    store.put_generation_memo(
+        key,
+        payload=_memo_payload("first"),
+        node_id="web",
+        provider="anthropic",
+        model="claude-sonnet-5",
+        run_id="run.1",
+        task_id="run.1:implement:web",
+    )
+    record = store.get_generation_memo(key)
+
+    assert record is not None
+    assert record["payload"] == _memo_payload("first")
+    assert record["origin_run_id"] == "run.1"
+    assert record["node_id"] == "web"
+    assert store.get_generation_memo("b" * 64) is None
+
+    # The key is the identity: the same request never records two answers.
+    store.put_generation_memo(
+        key,
+        payload=_memo_payload("second"),
+        node_id="web",
+        provider="anthropic",
+        model="claude-sonnet-5",
+        run_id="run.2",
+        task_id="run.2:implement:web",
+    )
+    assert store.get_generation_memo(key)["origin_run_id"] == "run.1"
+
+
+def test_forgetting_one_node_leaves_its_siblings_memoized(tmp_path):
+    """This is the whole of rebuild-one-node: the next run recomputes that node
+    and replays the rest."""
+
+    store = RichStore(tmp_path / "state")
+    for index, node in enumerate(("web", "web", "domain")):
+        store.put_generation_memo(
+            f"{index}" + "0" * 63,
+            payload=_memo_payload(node),
+            node_id=node,
+            provider="anthropic",
+            model="claude-sonnet-5",
+            run_id="run.1",
+            task_id=f"run.1:implement:{node}",
+        )
+
+    dropped = store.forget_generation_memos(node_id="web")
+
+    assert dropped == 2
+    assert store.get_generation_memo("0" + "0" * 63) is None
+    assert store.get_generation_memo("1" + "0" * 63) is None
+    assert store.get_generation_memo("2" + "0" * 63) is not None
+
+
+def test_a_malformed_cache_key_is_refused(tmp_path):
+    store = RichStore(tmp_path / "state")
+    for bad in ("", "abc", "A" * 64, "g" * 64):
+        with pytest.raises(ValueError, match="lowercase sha256"):
+            store.put_generation_memo(
+                bad,
+                payload=_memo_payload("x"),
+                node_id="web",
+                provider="anthropic",
+                model="claude-sonnet-5",
+                run_id="run.1",
+                task_id="run.1:implement:web",
+            )

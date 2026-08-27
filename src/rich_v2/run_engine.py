@@ -678,6 +678,61 @@ class _DurableSourceTransactionSink:
             return
 
 
+class _DurableGenerationMemo:
+    """Remember a generation across runs, keyed by the request that produced it.
+
+    Only the model call is skipped. The bundle is revalidated by the same
+    parser, applied through the same write-ahead transaction, and verified by
+    the same independent gates -- reusing an answer is never reusing a verdict,
+    because a verdict is bound to the run, task, attempt and nonce that
+    observed it."""
+
+    def __init__(self, store: RichStore) -> None:
+        self.store = store
+
+    def get(self, cache_key: str) -> dict[str, Any] | None:
+        record = self.store.get_generation_memo(cache_key)
+        if record is None:
+            return None
+        try:
+            document = json.loads(record["payload"])
+        except (ValueError, UnicodeError):
+            return None
+        if not isinstance(document, Mapping):
+            return None
+        bundle = document.get("bundle")
+        if not isinstance(bundle, Mapping):
+            return None
+        return {
+            "bundle": bundle,
+            "provider": document.get("provider"),
+            "model": document.get("model"),
+            "origin_run_id": record["origin_run_id"],
+            "origin_task_id": record["origin_task_id"],
+        }
+
+    def put(
+        self,
+        cache_key: str,
+        *,
+        document: Mapping[str, Any],
+        node_id: str,
+        provider: str,
+        model: str,
+        run_id: str,
+        task_id: str,
+    ) -> None:
+        self.store.put_generation_memo(
+            cache_key,
+            payload=canonical_json_bytes(dict(document)),
+            node_id=node_id,
+            provider=provider,
+            model=model,
+            run_id=run_id,
+            task_id=task_id,
+        )
+
+
 def _prior_failure_source(
     store: RichStore,
     run_id: str,
@@ -755,6 +810,7 @@ def _coding_worker_factory(
     mutation_guard: Callable[[], bool],
     transaction_sink: SourceTransactionSink,
     prior_failures: Callable[..., Any] | None = None,
+    memo: Any | None = None,
 ) -> TaskHandler:
     return CodingWorker(
         gateway,
@@ -769,6 +825,7 @@ def _coding_worker_factory(
         mutation_guard=mutation_guard,
         transaction_sink=transaction_sink,
         prior_failures=prior_failures,
+        memo=memo,
     )
 
 
@@ -1421,6 +1478,7 @@ class RunEngine:
                 owner_token=owner_token,
             ),
             prior_failures=_prior_failure_source(self.store, run_id),
+            memo=_DurableGenerationMemo(self.store),
         )
         if not callable(model_worker):
             raise TypeError("worker_factory must return a callable task handler")
