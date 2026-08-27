@@ -19,6 +19,7 @@ import json
 import math
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import stat
 import tempfile
@@ -66,6 +67,9 @@ class CodingLimits:
     max_current_files: int = 80
     max_current_file_bytes: int = 128 * 1024
     max_current_total_bytes: int = 512 * 1024
+    max_prior_failures: int = 3
+    max_prior_failure_lines: int = 40
+    max_prior_failure_bytes: int = 6 * 1024
     # Leave room inside the 32k input reservation for the structured-output
     # schema and trusted provider framing.  The provider performs the final
     # canonical-envelope bound before any HTTP request is sent.
@@ -89,6 +93,9 @@ class CodingLimits:
             "max_current_files",
             "max_current_file_bytes",
             "max_current_total_bytes",
+            "max_prior_failures",
+            "max_prior_failure_lines",
+            "max_prior_failure_bytes",
             "max_prompt_bytes",
             "max_input_tokens",
             "max_output_tokens",
@@ -130,6 +137,95 @@ class CodingLimits:
 
 
 DEFAULT_LIMITS = CodingLimits()
+
+
+
+_DIAGNOSTIC_PATH = re.compile(
+    r"(?:[\w.@-]+/)*[\w.@-]+\.(?:tsx?|jsx?|mts|cts|mjs|cjs|json|css)"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PriorAttemptFailure:
+    """One earlier attempt's independently observed gate failure."""
+
+    attempt: int
+    gate: str
+    summary: str
+    diagnostics: tuple[str, ...] = ()
+    withheld_line_count: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        document: dict[str, Any] = {
+            "attempt": self.attempt,
+            "gate": self.gate,
+            "summary": self.summary,
+            "diagnostics": list(self.diagnostics),
+        }
+        if self.withheld_line_count:
+            document["withheld_diagnostic_lines"] = self.withheld_line_count
+        return document
+
+
+def _is_disclosable_path(path: str, owned_paths: Sequence[str]) -> bool:
+    """A task may see its own source and the spec rendered as tests -- nothing else.
+
+    Generated tests are compiled from the same approved requirements and
+    acceptance scenarios the prompt already states, so echoing a failing one
+    discloses nothing new.  A sibling's implementation is exactly what the
+    information firewall exists to withhold, and a compiler diagnostic naming
+    it would otherwise be a side channel around that."""
+
+    normalized = path.lstrip("./")
+    if normalized.startswith("tests/"):
+        return True
+    for owned in owned_paths:
+        candidate = owned.lstrip("./")
+        if normalized == candidate or normalized.endswith("/" + candidate):
+            return True
+    return False
+
+
+def redact_diagnostics(
+    text: str,
+    *,
+    owned_paths: Sequence[str],
+    limits: CodingLimits = DEFAULT_LIMITS,
+) -> tuple[tuple[str, ...], int]:
+    """Keep the diagnostic lines this task is allowed to read, drop the rest.
+
+    Returns the kept lines and a count of what was withheld, so the worker is
+    told that consumers broke without being shown their source."""
+
+    kept: list[str] = []
+    withheld = 0
+    budget = limits.max_prior_failure_bytes
+    # Continuation lines (code frames, "expected/received" blocks) carry no path
+    # of their own, so they inherit the disclosability of the line that named a
+    # file most recently.
+    cursor_disclosable = True
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        paths = _DIAGNOSTIC_PATH.findall(line)
+        if paths:
+            cursor_disclosable = all(
+                _is_disclosable_path(path, owned_paths) for path in paths
+            )
+        if not cursor_disclosable:
+            withheld += 1
+            continue
+        if len(kept) >= limits.max_prior_failure_lines:
+            withheld += 1
+            continue
+        encoded = len(line.encode("utf-8")) + 1
+        if encoded > budget:
+            withheld += 1
+            continue
+        budget -= encoded
+        kept.append(line)
+    return tuple(kept), withheld
 
 
 def file_bundle_schema(limits: CodingLimits = DEFAULT_LIMITS) -> dict[str, Any]:
@@ -1242,6 +1338,7 @@ def build_task_prompt(
     task: CompiledTask,
     approval: ApprovalWitness,
     dependency_summaries: Mapping[str, str] | None = None,
+    prior_failures: Sequence[PriorAttemptFailure] = (),
     limits: CodingLimits = DEFAULT_LIMITS,
 ) -> PromptBundle:
     """Build a deterministic, task-scoped prompt from approved typed inputs."""
@@ -1285,6 +1382,12 @@ def build_task_prompt(
         if dependency_total > limits.max_dependency_summary_total_bytes:
             raise PromptLimitError("dependency summaries exceed their aggregate limit")
         normalized_summaries[dependency_id] = normalized
+
+    ordered_failures = sorted(prior_failures, key=lambda item: item.attempt)
+    recent_failures = ordered_failures[-limits.max_prior_failures :]
+    for failure in recent_failures:
+        if not isinstance(failure, PriorAttemptFailure):
+            raise CodingWorkerError("prior failures must be PriorAttemptFailure")
 
     root = _assert_workspace(Path(workspace))
     current_files, _ = _read_current_files(root, task.owned_paths, limits)
@@ -1348,6 +1451,14 @@ def build_task_prompt(
             ],
         },
         "dependency_summaries": normalized_summaries,
+        # Independently observed gate output from earlier attempts, redacted to
+        # what this task may read.  Verification stays out of process and the
+        # worker still cannot declare itself correct -- this only stops it from
+        # regenerating blind against a failure the harness already watched
+        # happen.
+        "prior_attempt_failures": [
+            failure.to_dict() for failure in recent_failures
+        ],
         "current_files": current_files,
         "write_authority": {
             "operations": ["create", "replace"],
@@ -1366,9 +1477,23 @@ def build_task_prompt(
         "or acceptance scenarios passed. Do not modify files merely to summarize "
         "work."
     )
+    retry_guidance = (
+        ""
+        if not recent_failures
+        else (
+            "Earlier attempts at this task failed the gates recorded under "
+            "prior_attempt_failures. That output was observed by the harness, "
+            "not reported by a model, and it is the reason this attempt "
+            "exists. Fix those causes rather than restating the previous "
+            "answer. Diagnostics naming files you do not own are withheld; a "
+            "withheld count means you broke a consumer and should re-read your "
+            "contract.\n"
+        )
+    )
     user_prompt = (
         "Produce the smallest coherent source change for this task. The control "
         "plane will validate and apply it, and separate workers will verify it.\n"
+        + retry_guidance
         + _canonical_json(context)
     )
     prompt_bytes = len(system_prompt.encode("utf-8")) + len(
@@ -1412,6 +1537,10 @@ def generated_source_artifact_bytes(
 DependencySummarySource = (
     Mapping[str, str] | Callable[[CompiledTask], Mapping[str, str]]
 )
+# Asked for the failures of attempts before this one, given (task, attempt).
+PriorFailureSource = Callable[
+    [CompiledTask, int], Sequence[PriorAttemptFailure]
+]
 CommitSink = Callable[[SourceCommit], None]
 MutationGuard = Callable[[], bool]
 
@@ -1466,6 +1595,7 @@ class CodingWorker:
         provider: str,
         model: str,
         dependency_summaries: DependencySummarySource | None = None,
+        prior_failures: PriorFailureSource | None = None,
         limits: CodingLimits = DEFAULT_LIMITS,
         max_attempts: int = 1,
         commit_sink: CommitSink | None = None,
@@ -1497,6 +1627,9 @@ class CodingWorker:
         self.provider = provider
         self.model = model
         self.dependency_summaries = dependency_summaries or {}
+        if prior_failures is not None and not callable(prior_failures):
+            raise TypeError("prior_failures must be callable")
+        self.prior_failures = prior_failures
         self.limits = limits
         self.max_attempts = max_attempts
         self.commit_sink = commit_sink
@@ -1540,6 +1673,11 @@ class CodingWorker:
         if dependency_summaries is None:
             source = self.dependency_summaries
             dependency_summaries = source(task) if callable(source) else source
+        # A retry that cannot see why the last attempt failed is just another
+        # first attempt charged to the same budget.
+        earlier_failures: Sequence[PriorAttemptFailure] = ()
+        if self.prior_failures is not None and attempt > 1:
+            earlier_failures = tuple(self.prior_failures(task, attempt))
         prompt = build_task_prompt(
             workspace=self.workspace,
             project=self.project,
@@ -1547,6 +1685,7 @@ class CodingWorker:
             task=task,
             approval=self.approval,
             dependency_summaries=dependency_summaries,
+            prior_failures=earlier_failures,
             limits=self.limits,
         )
         request = ModelRequest(

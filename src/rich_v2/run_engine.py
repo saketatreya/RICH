@@ -40,15 +40,17 @@ from .coding import (
     CodingWorker,
     DEFAULT_LIMITS,
     GeneratedFileBundle,
+    PriorAttemptFailure,
     SourceCommit,
     SourceTransactionJournal,
     SourceTransactionSink,
     generated_source_artifact_bytes,
     is_protected_generation_path,
+    redact_diagnostics,
     source_transaction_lock,
 )
 from .budget import RunBudget
-from .compiler import CompiledArchitecture, compile_architecture
+from .compiler import CompiledArchitecture, CompiledTask, compile_architecture
 from .executor import (
     BubblewrapExecutor,
     ExecutionResult,
@@ -675,6 +677,69 @@ class _DurableSourceTransactionSink:
             return
 
 
+def _prior_failure_source(
+    store: RichStore,
+    run_id: str,
+) -> Callable[[CompiledTask, int], tuple[PriorAttemptFailure, ...]]:
+    """Read earlier attempts' gate failures for a task out of the artifact store.
+
+    The verification artifacts already hold every gate's exact stdout/stderr;
+    until now nothing read them back, so each retry regenerated blind against a
+    failure the harness had watched happen and written down.  Only observed
+    command results are returned -- a model's own claims are never a source
+    here, and feeding these forward does not let one become evidence."""
+
+    def read(task: CompiledTask, attempt: int) -> tuple[PriorAttemptFailure, ...]:
+        failures: list[PriorAttemptFailure] = []
+        for record in store.list_run_artifacts(run_id):
+            role = record.get("role") or ""
+            if not role.startswith("verification:"):
+                continue
+            metadata = record.get("metadata") or {}
+            if metadata.get("node_id") != task.node_id:
+                continue
+            if metadata.get("status") == "passed":
+                continue
+            earlier = metadata.get("attempt")
+            if (
+                isinstance(earlier, bool)
+                or not isinstance(earlier, int)
+                or earlier >= attempt
+            ):
+                continue
+            try:
+                artifact = store.get_artifact(record["digest"])
+                document = json.loads(artifact.path.read_bytes())
+            except (StoreError, NotFoundError, ValueError, OSError):
+                # A missing or unreadable log must not fail the retry it was
+                # only meant to inform.
+                continue
+            observed = "\n".join(
+                part
+                for part in (document.get("stdout"), document.get("stderr"))
+                if isinstance(part, str) and part.strip()
+            )
+            diagnostics, withheld = redact_diagnostics(
+                observed, owned_paths=task.owned_paths
+            )
+            failures.append(
+                PriorAttemptFailure(
+                    attempt=earlier,
+                    gate=str(document.get("kind") or metadata.get("kind") or role),
+                    summary=(
+                        f"{document.get('kind', 'gate')} exited with "
+                        f"{document.get('returncode')}"
+                    ),
+                    diagnostics=diagnostics,
+                    withheld_line_count=withheld,
+                )
+            )
+        failures.sort(key=lambda item: (item.attempt, item.gate))
+        return tuple(failures)
+
+    return read
+
+
 def _coding_worker_factory(
     gateway: ModelGateway,
     *,
@@ -688,6 +753,7 @@ def _coding_worker_factory(
     max_attempts: int,
     mutation_guard: Callable[[], bool],
     transaction_sink: SourceTransactionSink,
+    prior_failures: Callable[..., Any] | None = None,
 ) -> TaskHandler:
     return CodingWorker(
         gateway,
@@ -701,6 +767,7 @@ def _coding_worker_factory(
         max_attempts=max_attempts,
         mutation_guard=mutation_guard,
         transaction_sink=transaction_sink,
+        prior_failures=prior_failures,
     )
 
 
@@ -1352,6 +1419,7 @@ class RunEngine:
                 run_id=run_id,
                 owner_token=owner_token,
             ),
+            prior_failures=_prior_failure_source(self.store, run_id),
         )
         if not callable(model_worker):
             raise TypeError("worker_factory must return a callable task handler")

@@ -13,11 +13,13 @@ from rich_v2.coding import (
     CodingLimits,
     CodingWorker,
     FileBundleValidationError,
+    PriorAttemptFailure,
     PromptLimitError,
     SourceTransactionError,
     build_task_prompt,
     file_bundle_schema,
     parse_file_bundle,
+    redact_diagnostics,
 )
 from rich_v2.compiler import compile_architecture
 from rich_v2.models import (
@@ -639,3 +641,159 @@ def test_invalid_provider_bundle_never_mutates_workspace(tmp_path):
         )
 
     assert list(tmp_path.iterdir()) == []
+
+
+_OWNED = ("apps/web/note.tsx",)
+
+
+def test_redaction_keeps_your_diagnostics_and_withholds_a_sibling_source():
+    """A compiler diagnostic naming another node's file would otherwise be a
+    side channel straight through the information firewall."""
+
+    observed = (
+        "apps/web/note.tsx(12,5): error TS2322: Type 'number' is not assignable.\n"
+        "packages/domain/secret.ts(3,1): error TS2554: Expected 2 arguments.\n"
+        "   3 | const APP_SECRET = 'hunter2'\n"
+        "     |       ^^^^^^^^^^\n"
+        "tests/unit/requirements/r_1.test.ts(8,3): AssertionError: expected 1\n"
+    )
+
+    kept, withheld = redact_diagnostics(observed, owned_paths=_OWNED)
+    joined = "\n".join(kept)
+
+    assert "apps/web/note.tsx(12,5)" in joined, "your own error is the point"
+    assert "tests/unit/requirements" in joined, (
+        "generated tests are the approved spec made executable, not a sibling's scope"
+    )
+    assert "secret.ts" not in joined
+    assert "APP_SECRET" not in joined
+    assert "hunter2" not in joined, "the code frame inherits its file's disclosability"
+    assert withheld == 3
+
+
+def test_redaction_is_bounded_by_lines_and_bytes():
+    limits = CodingLimits(max_prior_failure_lines=2, max_prior_failure_bytes=4096)
+    observed = "\n".join(
+        f"apps/web/note.tsx({index},1): error TS1005: ';' expected."
+        for index in range(1, 9)
+    )
+
+    kept, withheld = redact_diagnostics(observed, owned_paths=_OWNED, limits=limits)
+
+    assert len(kept) == 2
+    assert withheld == 6
+
+
+def test_a_retry_prompt_carries_the_gate_output_a_first_attempt_cannot(tmp_path):
+    project, architecture, plan, approval = _fixture()
+    task = plan.task_index["web"]
+    failure = PriorAttemptFailure(
+        attempt=1,
+        gate="types",
+        summary="types exited with 2",
+        diagnostics=("apps/web/note.tsx(4,9): error TS2304: Cannot find 'noteText'.",),
+        withheld_line_count=2,
+    )
+
+    first = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=task,
+        approval=approval,
+        dependency_summaries={"domain": "Exposes a stable getNote operation."},
+    )
+    retry = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=task,
+        approval=approval,
+        dependency_summaries={"domain": "Exposes a stable getNote operation."},
+        prior_failures=[failure],
+    )
+
+    assert "TS2304" not in first.user_prompt
+    assert "prior_attempt_failures" in first.user_prompt
+    assert "TS2304" in retry.user_prompt
+    assert "withheld_diagnostic_lines" in retry.user_prompt, (
+        "a broken consumer must be reported as a count, since its source cannot be"
+    )
+    assert "observed by the harness" in retry.user_prompt
+    assert retry.prompt_bytes <= coding.DEFAULT_LIMITS.max_prompt_bytes
+
+
+def test_only_the_most_recent_failures_are_carried(tmp_path):
+    project, architecture, plan, approval = _fixture()
+    failures = [
+        PriorAttemptFailure(
+            attempt=index,
+            gate="unit",
+            summary=f"unit exited with {index}",
+            diagnostics=(f"apps/web/note.tsx(1,1): failure number {index}",),
+        )
+        for index in range(1, 7)
+    ]
+
+    prompt = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["web"],
+        approval=approval,
+        dependency_summaries={"domain": "Exposes a stable getNote operation."},
+        prior_failures=failures,
+    )
+
+    assert "failure number 6" in prompt.user_prompt
+    assert "failure number 4" in prompt.user_prompt
+    assert "failure number 3" not in prompt.user_prompt, "bounded by max_prior_failures"
+
+
+def test_the_worker_asks_for_prior_failures_only_when_retrying(tmp_path):
+    project, architecture, plan, approval = _fixture()
+    asked = []
+
+    def prior_failures(task, attempt):
+        asked.append((task.node_id, attempt))
+        return [
+            PriorAttemptFailure(
+                attempt=attempt - 1,
+                gate="lint",
+                summary="lint exited with 1",
+                diagnostics=("apps/web/note.tsx(2,1): error: no-unused-vars",),
+            )
+        ]
+
+    def _worker(provider, workspace):
+        workspace.mkdir(parents=True, exist_ok=True)
+        return CodingWorker(
+            _gateway(provider),
+            workspace=workspace,
+            project=project,
+            architecture=architecture,
+            approval=approval,
+            provider="fake",
+            model="test-model",
+            dependency_summaries={"domain": "Domain generation completed."},
+            prior_failures=prior_failures,
+        )
+
+    first_provider = RecordingProvider(_valid_bundle())
+    _worker(first_provider, tmp_path / "first").run_task(
+        run_id="run.retry",
+        durable_task_id="run.retry:implement:web",
+        attempt=1,
+        task=plan.task_index["web"],
+    )
+    retry_provider = RecordingProvider(_valid_bundle())
+    _worker(retry_provider, tmp_path / "second").run_task(
+        run_id="run.retry",
+        durable_task_id="run.retry:implement:web",
+        attempt=2,
+        task=plan.task_index["web"],
+    )
+
+    assert asked == [("web", 2)], "a first attempt has nothing to learn from"
+    assert "no-unused-vars" not in first_provider.requests[0].user_prompt
+    assert "no-unused-vars" in retry_provider.requests[0].user_prompt

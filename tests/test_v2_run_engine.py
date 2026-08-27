@@ -10,7 +10,7 @@ import pytest
 import rich_v2.coding as coding_module
 from rich_v2.budget import BudgetLedger, RunBudget, Usage
 from rich_v2.coding import ApprovalWitness, CodingWorker
-from rich_v2.compiler import compile_architecture
+from rich_v2.compiler import CompiledTask, compile_architecture
 from rich_v2.execution import (
     DefaultRunExecutor,
     _LeaseBoundModelEventSink,
@@ -1817,3 +1817,76 @@ def test_source_symlinks_are_rejected_but_the_pnpm_link_farm_is_not(tmp_path):
     )
     with pytest.raises(WorkspaceValidationError, match="unsafe symbolic link"):
         engine.execute(run_id=state["run"]["id"], workspace=workspace)
+
+
+def test_prior_failure_source_reads_back_the_gate_logs_the_store_already_holds(
+    tmp_path,
+):
+    """The verification artifacts always carried each gate's exact output; the
+    retry that needed it simply never read them back."""
+
+    from rich_v2.run_engine import _prior_failure_source
+
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.priors")
+    run = store.create_run(
+        project["id"],
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        status="ready",
+    )
+
+    def _record(*, attempt, status, kind, stdout, node_id="web"):
+        document = {
+            "schema_version": "rich.command-verification/v1",
+            "kind": kind,
+            "status": status,
+            "returncode": 0 if status == "passed" else 2,
+            "stdout": stdout,
+            "stderr": "",
+        }
+        artifact = store.put_artifact(
+            json.dumps(document).encode(),
+            media_type="application/vnd.rich.command-verification+json",
+            metadata={
+                "kind": kind,
+                "status": status,
+                "node_id": node_id,
+                "attempt": attempt,
+            },
+        )
+        store.attach_artifact(
+            run["id"], artifact.digest, role=f"verification:{kind}"
+        )
+
+    _record(
+        attempt=1,
+        status="failed",
+        kind="types",
+        stdout=(
+            "apps/web/note.tsx(4,9): error TS2304: Cannot find name 'noteText'.\n"
+            "packages/domain/private.ts(2,2): error TS2551: hidden detail\n"
+        ),
+    )
+    _record(attempt=1, status="passed", kind="lint", stdout="clean")
+    _record(attempt=1, status="failed", kind="unit", stdout="", node_id="domain")
+    _record(attempt=2, status="failed", kind="types", stdout="a later attempt")
+
+    task = CompiledTask(
+        task_id="run:implement:web",
+        node_id="web",
+        order=0,
+        contract_id=None,
+        dependency_ids=(),
+        consumer_ids=(),
+        requirement_ids=(),
+        owned_paths=("apps/web/note.tsx",),
+    )
+    failures = _prior_failure_source(store, run["id"])(task, 2)
+
+    assert [item.gate for item in failures] == ["types"], (
+        "passed gates, other nodes, and attempts at or after this one are excluded"
+    )
+    assert "TS2304" in failures[0].diagnostics[0]
+    assert all("private.ts" not in line for line in failures[0].diagnostics)
+    assert failures[0].withheld_line_count == 1
