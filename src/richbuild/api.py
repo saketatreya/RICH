@@ -1081,13 +1081,17 @@ def serve(
     root = Path(web_root) if web_root is not None else default_web_root()
     application = Application(RichStore(state_dir), architect=architect)
     server = ThreadingHTTPServer((host, port), handler_for(application, root))
-    print(f"RICH → http://{host}:{port}")
-    print(f"  api   http://{host}:{port}/v1/health")
+    # flush: stdout is block-buffered when piped, and a server that runs
+    # forever would then print its own address only once someone kills it.
+    print(f"RICH → http://{host}:{port}", flush=True)
+    print(f"  api    http://{host}:{port}/v1/health", flush=True)
     print(
         "  canvas ready"
         if (root / "index.html").is_file()
-        else "  canvas NOT BUILT — run: npm --prefix web ci && npm --prefix web run build"
+        else "  canvas NOT BUILT — run: npm --prefix web ci && npm --prefix web run build",
+        flush=True,
     )
+    print(f"  state  {Path(state_dir).resolve()}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

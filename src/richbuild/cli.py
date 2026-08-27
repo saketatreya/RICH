@@ -20,32 +20,44 @@ from .store import RichStore
 
 
 def _parser() -> argparse.ArgumentParser:
+    # --state-dir is accepted on both sides of the subcommand. Argparse puts a
+    # top-level option before the subcommand only, and `rich serve --state-dir X`
+    # is what a person actually types -- being told that is "unrecognized" is a
+    # bad first minute with a tool.
+    shared = argparse.ArgumentParser(add_help=False)
+    # SUPPRESS, not None: the subparser shares this action, and a plain default
+    # would overwrite a value given before the subcommand with nothing.
+    shared.add_argument(
+        "--state-dir",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="durable local state directory (default: .rich/state)",
+    )
+
     parser = argparse.ArgumentParser(
         prog="rich",
         description="RICH — an intent-to-verified-software compiler",
-    )
-    parser.add_argument(
-        "--state-dir",
-        type=Path,
-        default=Path(".rich/state"),
-        help="durable local state directory (default: .rich/state)",
+        parents=[shared],
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    commands.add_parser("doctor", help="inspect required local execution capabilities")
+    def add_parser(name: str, **kwargs: object) -> argparse.ArgumentParser:
+        return commands.add_parser(name, parents=[shared], **kwargs)
 
-    serve_command = commands.add_parser("serve", help="serve the local versioned JSON API")
+    add_parser("doctor", help="inspect required local execution capabilities")
+
+    serve_command = add_parser("serve", help="serve the local versioned JSON API")
     serve_command.add_argument("--host", default="127.0.0.1")
     serve_command.add_argument("--port", type=int, default=8767)
 
-    create = commands.add_parser("project-create", help="create a durable project")
+    create = add_parser("project-create", help="create a durable project")
     create.add_argument("project_id")
     create.add_argument("name")
 
-    show = commands.add_parser("project-show", help="show durable project metadata")
+    show = add_parser("project-show", help="show durable project metadata")
     show.add_argument("project_id")
 
-    interview = commands.add_parser(
+    interview = add_parser(
         "interview-submit",
         help="compile structured interview answers and request product-spec approval",
     )
@@ -54,13 +66,13 @@ def _parser() -> argparse.ArgumentParser:
     interview.add_argument("answers", type=Path)
     interview.add_argument("--expected-revision", type=int, required=True)
 
-    approve = commands.add_parser("approve", help="decide a requested approval gate")
+    approve = add_parser("approve", help="decide a requested approval gate")
     approve.add_argument("approval_id")
     approve.add_argument("--actor", required=True)
     approve.add_argument("--reason", default="")
     approve.add_argument("--reject", action="store_true")
 
-    propose = commands.add_parser(
+    propose = add_parser(
         "architecture-propose",
         help="create the deterministic web baseline after product-spec approval",
     )
@@ -69,14 +81,14 @@ def _parser() -> argparse.ArgumentParser:
     propose.add_argument("spec_approval_id")
     propose.add_argument("--expected-revision", type=int, required=True)
 
-    prepare = commands.add_parser(
+    prepare = add_parser(
         "run-prepare",
         help="compile an approved architecture into durable tasks",
     )
     prepare.add_argument("architecture_approval_id")
     prepare.add_argument("budget", type=Path)
 
-    scaffold = commands.add_parser(
+    scaffold = add_parser(
         "scaffold",
         help="materialize the approved run's target pack into an empty destination",
     )
@@ -84,7 +96,7 @@ def _parser() -> argparse.ArgumentParser:
     scaffold.add_argument("destination", type=Path)
     scaffold.add_argument("--package-scope")
 
-    execute = commands.add_parser(
+    execute = add_parser(
         "run-execute",
         help="execute or resume a scaffolded run with the trusted runtime",
     )
@@ -92,7 +104,7 @@ def _parser() -> argparse.ArgumentParser:
     execute.add_argument("workspace", type=Path)
     execute.add_argument("--architecture-approval-id")
 
-    preview_request = commands.add_parser(
+    preview_request = add_parser(
         "preview-request",
         help="request approval for a digest-bound Neon/Vercel preview",
     )
@@ -105,26 +117,26 @@ def _parser() -> argparse.ArgumentParser:
     preview_request.add_argument("--vercel-project-id")
     preview_request.add_argument("--vercel-team-id")
 
-    preview_deploy = commands.add_parser(
+    preview_deploy = add_parser(
         "preview-deploy",
         help="deploy an exact approved source digest to Neon and Vercel",
     )
     preview_deploy.add_argument("preview_id")
     preview_deploy.add_argument("approval_id")
 
-    preview_destroy = commands.add_parser(
+    preview_destroy = add_parser(
         "preview-destroy",
         help="destroy a preview deployment and its database branch",
     )
     preview_destroy.add_argument("preview_id")
 
-    preview_list = commands.add_parser(
+    preview_list = add_parser(
         "preview-list", help="list durable previews for a run"
     )
     preview_list.add_argument("run_id")
 
 
-    rebuild = commands.add_parser(
+    rebuild = add_parser(
         "rebuild-node",
         help="forget one node's remembered generation so the next run redoes it",
     )
@@ -132,13 +144,13 @@ def _parser() -> argparse.ArgumentParser:
     rebuild.add_argument("--node", required=True)
     rebuild.add_argument("--architecture-revision")
 
-    cancel = commands.add_parser(
+    cancel = add_parser(
         "cancel-run", help="ask a run to stop at its next checkpoint"
     )
     cancel.add_argument("run_id")
     cancel.add_argument("--reason", default="canceled by operator")
 
-    events = commands.add_parser("events", help="read durable run events")
+    events = add_parser("events", help="read durable run events")
     events.add_argument("run_id")
     events.add_argument("--after", type=int, default=0)
 
@@ -147,15 +159,16 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    state_dir = getattr(args, "state_dir", None) or Path(".rich/state")
     try:
         if args.command == "doctor":
             _print_json(_doctor())
             return 0
         if args.command == "serve":
-            serve(args.state_dir, host=args.host, port=args.port)
+            serve(state_dir, host=args.host, port=args.port)
             return 0
 
-        store = RichStore(args.state_dir)
+        store = RichStore(state_dir)
         # Deliberately unconfined. An operator at their own shell can
         # already write anywhere this process can, so a workspace_root here
         # would be friction wearing the costume of safety. The network surface

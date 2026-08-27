@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from richbuild.cli import main
 
 
@@ -58,3 +60,29 @@ def test_cli_returns_machine_readable_error(tmp_path, capsys):
     assert result == 2
     error = json.loads(capsys.readouterr().err)
     assert error["error"] == "NotFoundError"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--state-dir", "/tmp/rich-x", "doctor"],
+        ["doctor", "--state-dir", "/tmp/rich-x"],
+    ],
+)
+def test_state_dir_is_accepted_on_either_side_of_the_subcommand(argv):
+    """`rich serve --state-dir X` is what a person types. Being told that is
+    "unrecognized" is a bad first minute with a tool."""
+
+    from richbuild.cli import _parser
+
+    namespace = _parser().parse_args(argv)
+
+    assert str(namespace.state_dir) == "/tmp/rich-x"
+
+
+def test_omitting_it_leaves_the_default_to_the_caller():
+    from richbuild.cli import _parser
+
+    namespace = _parser().parse_args(["doctor"])
+
+    assert getattr(namespace, "state_dir", None) is None
