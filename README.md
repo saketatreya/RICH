@@ -35,18 +35,32 @@ monorepo target pack. It includes:
 - a complete approved model/cost/time budget with crash-conservative recovery;
 - CAS-backed source write-ahead transactions that recover the apply/persist crash
   window without trusting unrecorded workspace bytes;
-- one exact OpenAI provider/model policy, with no silent fallback;
+- one exact trusted model policy (`anthropic/claude-sonnet-5`) reached by two
+  explicitly chosen routes -- an API key or an existing `claude` login -- which
+  are never fallbacks for one another;
 - exact Node 22.22.3 and pnpm 10.34.5 identity checks;
 - Bubblewrap isolation, network-off verification, bounded processes/heaps/output,
   and no unsafe local fallback;
-- independent lint, TypeScript, unit, production-build, and Playwright gates;
+- independent lint, TypeScript, unit, contract-obligation, production-build, and
+  Playwright gates;
+- proof obligations declared by a contract compiled into a runnable property
+  suite against a pinned operations interface, so a claim is executed rather
+  than merely stated;
+- generation memoized by the exact request, so an unchanged task is not re-paid
+  for -- and a single node can be marked stale and rebuilt without redoing its
+  siblings;
+- gate output fed back into the next attempt, redacted to what the failing task
+  is allowed to read;
+- cooperative durable cancellation, observable from any surface;
 - an immutable full-source ZIP tied to the acceptance evidence; and
 - digest-bound, separately approved Neon/Vercel previews, immutable uploads,
   trusted SQL-only migrations, and teardown.
 
 The generated source cannot modify its verifier, tests, dependency graph, or
 toolchain. A successful model response is never evidence. Only independently
-observed command results can publish task/run success.
+observed command results can publish task/run success. Evidence may flow the
+other way -- a failed gate's output informs the retry -- but never back again:
+evidence may inform generation, generation may never become evidence.
 
 This is a working generalized-development **kernel**, not yet a claim that arbitrary
 software is solved. The compiler/target-pack boundary is designed for more languages
