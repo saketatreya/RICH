@@ -46,6 +46,8 @@ npm --prefix web run dev         # hot-reload dev; Vite proxies /api → :8765
 
 # v2 CLI
 python -m rich_v2.cli doctor     # host checks (also installed as `rich-v2`)
+python -m rich_v2.cli rebuild-node --project P --node domain   # forget one node's memo
+python -m rich_v2.cli cancel-run RUN_ID                        # stop at next checkpoint
 ```
 
 `tests/run_tests.py` is a standalone, destructive, OpenRouter-backed phase runner that writes into `build/` — it is deliberately not part of the pytest suite.
@@ -73,7 +75,9 @@ The Canvas (`canvas.py` + `web/`, React + Vite + React Flow) is the product surf
 Read `docs/v2-architecture.md` before changing v2 — it is the operating contract. The non-negotiable invariants:
 
 - **Everything fails closed.** A transition proceeds only when identity, approval, ownership, budget, lease, sandbox, evidence, and digest checks all pass. Never add a permissive fallback (no unsandboxed execution path, no alternate model/provider fallback, no clipping a budget overage).
-- **Model output is never evidence.** Only independently observed command results (via the trusted runner, in Bubblewrap, network off) can publish task/run success, and the protected Playwright reporter must return the exact passed scenario-ID set bound to run/task/attempt nonce.
+- **Model output is never evidence.** Only independently observed command results (via the trusted runner, in Bubblewrap, network off) can publish task/run success, and the protected Playwright reporter must return the exact passed scenario-ID set bound to run/task/attempt nonce. Evidence may flow the other way — a failed gate's redacted output is fed into the next attempt's prompt (`redact_diagnostics`) — but generation may never become evidence.
+- **Obligations are run.** A contract's proof obligations are scaffolded as a vitest suite against the pinned `packages/contracts/src/operations.ts` interface and executed as a distinct PROPERTY gate; the domain node must export `operations` from `packages/domain/src/operations.ts`. No suite scaffolded means no gate — a property run over an empty directory would pass without checking anything.
+- **Generation is memoized, verification never is.** `generation_cache_key` hashes the exact request (both prompts, provider, model, response schema); a hit replays the bundle through the same parser, transaction and gates. `rebuild-node` forgets one node's memos.
 - **Approvals bind exact revisions**; revisions are append-only; approving one revision never authorizes a later one.
 - **Generated source is confined to approved owned paths.** Package manifests, lockfiles, tests, configs, and RICH metadata are protected generation inputs the model cannot touch.
 - **One fenced owner mutates a run**: SQLite leases with fencing tokens checked in the same transaction as every authoritative write; source writes go through CAS-backed write-ahead transactions. Coding is single-worker by design — parallelism requires worktrees + reverification, not racing one directory.

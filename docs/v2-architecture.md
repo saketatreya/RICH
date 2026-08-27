@@ -286,8 +286,10 @@ evidence. The root release task requires all of:
 1. ESLint with zero warnings;
 2. TypeScript with no emit and no incremental cache write;
 3. Vitest requirement tests;
-4. a production Next.js build; and
-5. Playwright scenarios executing every approved data-only browser oracle.
+4. the proof obligations every approved contract declares, when any were
+   scaffolded (see below);
+5. a production Next.js build; and
+6. Playwright scenarios executing every approved data-only browser oracle.
 
 Command, exit status, timeout, bounded stdout/stderr, duration, task attempt, and
 requirement/scenario coverage become content-addressed evidence artifacts. An exit code
@@ -298,6 +300,27 @@ Missing, stale, forged, skipped, duplicated, unknown, or partial coverage fails 
 The run cannot publish success merely because a handler returns success. The scheduler
 checks required evidence kinds, blocking status, artifact roles, and exact acceptance
 coverage before committing task and run status.
+
+### 7b. Obligations are executed, not merely declared
+
+A contract's proof obligations are compiled into a vitest suite against a pinned
+`Operations` interface and run as their own gate, separate from the unit gate so the
+evidence says which claim held. Suites, generator, and interface are all protected
+generation inputs: they are compiled from the approved contract, so a worker able to edit
+them could edit the claim it is being held to.
+
+The interface lives at `packages/contracts/src/operations.ts` — inside the domain node's
+ownership, because that is where it must be importable from. That makes it the one
+protected input a worker could otherwise legally rewrite, so it carries an explicit path
+rule. Being protected also scopes it out of `current_files`, so it is handed directly to
+the task that must implement it and to no other: a worker told to satisfy a surface it
+cannot see fails the typecheck for a reason it was never given.
+
+The gate is skipped when no suite was scaffolded. Vitest passes over an empty directory,
+and a passing check that checked nothing is the precise failure this design exists to
+avoid — the same reason `ContractV2` refuses a contract whose only claims are unanchored,
+and the same reason the obligation compiler refuses a `PROOF`-tier claim it can only
+sample.
 
 ### 7a. Evidence flows forward into the retry
 
