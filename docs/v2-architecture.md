@@ -94,6 +94,40 @@ tasks and their paths cannot authorize generated source. The Next.js target pack
 missing ownership, traversal, globs, ambiguous coverage, and source outside an approved
 non-resource owner.
 
+### 2a. The architect is asked only what it can get right
+
+Architecture may be authored by a model (`architect.py`) or by the deterministic layer
+planner (`planner.py`). The model's proposal is the *input* to the compiler, never a
+decision: `compile_decomposition` and `ContractV2.validate` still check the whole graph
+before anything is emitted. What changed is the division of labour between what the model
+is asked for and what the system derives.
+
+Measured over six first attempts on one fixed spec, asking the model for everything
+assembled 0/6. Five of six rejections were a value failing to inhabit a type the same
+model had invented a few thousand tokens earlier — not one was a design mistake. The
+architect had become the only component in RICH that judged correctness at admission time
+rather than by execution, which is the inverse of the thesis everything else follows.
+
+Three rules follow, and together they moved that number to 6/6:
+
+- **The architect always has a valid answer.** `propose_architecture` never raises. When
+  no proposal assembles, it returns the deterministic planner's layer shape tagged
+  `source: "planner-fallback"`, carrying the rejections as risks. The human sees a
+  baseline design and what went wrong, not an error. This is v1's `{"is_leaf": true}`:
+  a degraded answer that is always structurally valid.
+- **Evidence beats declaration.** Character sets and length bounds are *derived* from the
+  declared example values (`ValueType.fitted_to`), not asked for. A model's example is
+  stronger evidence of its intent than its guess at a bound, and derivation makes
+  "example violates its own bound" unrepresentable rather than rejectable.
+- **A claim that cannot be expressed is dropped, not fatal.** Obligations that fail to
+  typecheck against the fitted operations are removed and recorded in the architecture
+  metadata as `dropped_obligations`; EXAMPLE obligations are never dropped, so the
+  anti-vacuity rule still binds. Losing one claim is a smaller loss than losing the design.
+
+None of this weakens what is checked. Anti-vacuity, endomorphism, predicate typing, and
+example inhabitation all still hold on the assembled architecture, and every surviving
+obligation must still compile to a runnable check.
+
 ### 3. The scaffold freezes the verifier
 
 The target pack emits:
