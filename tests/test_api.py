@@ -1079,3 +1079,30 @@ def test_the_interview_reports_what_it_still_needs_and_adapts_to_the_answers(
     assert "roles" not in anonymous_ids, "a page with no sign-in is not asked"
     for question in empty.body["questions"]:
         assert question["rationale"], "a question that cannot say why it asks"
+
+
+def test_projects_can_be_listed_most_recently_touched_first(tmp_path):
+    """The control plane offered to "create or select a project" and could only
+    do the first: a second project was reachable only by remembering its id."""
+
+    store = RichStore(tmp_path / "state")
+    application = Application(store, workspace_root=tmp_path / "workspaces")
+
+    empty = application.handle("GET", "/v1/projects", headers={})
+    store.create_project("First", project_id="project.first")
+    store.create_project("Second", project_id="project.second")
+    store.save_revision(
+        "project.first",
+        kind="product_spec",
+        schema_version="2.0",
+        document={"schema_version": "2.0"},
+        expected_revision=0,
+    )
+    listed = application.handle("GET", "/v1/projects", headers={})
+
+    assert empty.status == 200
+    assert empty.body["projects"] == [], "an empty state is a fine first run"
+    ids = [item["id"] for item in listed.body["projects"]]
+    assert set(ids) == {"project.first", "project.second"}
+    assert ids[0] == "project.first", "the one just touched comes first"
+    assert listed.body["projects"][0]["current_revision"] == 1

@@ -900,3 +900,33 @@ button.v2-secondary:disabled { opacity: .55; cursor: default; }
 .v2-claims li { font-size: 12.5px; color: var(--ink); }
 .v2-claims li::marker { color: var(--verified); }
 .v2-claims small { color: var(--ink-faint); font-size: 11px; }
+
+/* Project list — "create or select" could only ever do the first. */
+.v2-project-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.v2-project-chip {
+  display: flex; flex-direction: column; gap: 2px;
+  text-align: left; font: inherit; cursor: pointer;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--ink-dim);
+}
+.v2-project-chip:hover:not(:disabled) { border-color: var(--accent); color: var(--ink); }
+.v2-project-chip:disabled { opacity: .6; cursor: default; }
+.v2-project-chip.selected {
+  border-color: var(--accent);
+  background: rgba(124, 108, 255, .1);
+  color: var(--ink);
+}
+.v2-project-chip b { font-size: 13px; }
+.v2-project-chip small {
+  font-size: 11px; color: var(--ink-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-project-chip code { font-family: var(--mono); font-size: 10.5px; }

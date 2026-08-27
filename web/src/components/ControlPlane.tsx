@@ -125,6 +125,7 @@ export default function ControlPlane() {
   const [spec, setSpec] = useState<SpecSubmission | null>(restored.spec)
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
   const [interviewNeeds, setInterviewNeeds] = useState<InterviewNeeds | null>(null)
+  const [projects, setProjects] = useState<Project[]>([])
   const [runTasks, setRunTasks] = useState<DurableTask[]>([])
   const [architecture, setArchitecture] = useState<ArchitectureSubmission | null>(
     restored.architecture,
@@ -184,6 +185,11 @@ export default function ControlPlane() {
 
   useEffect(() => {
     checkHealth()
+    api
+      .listProjects()
+      .then(setProjects)
+      // The banner owns connection errors; an empty list is a fine first run.
+      .catch(() => setProjects([]))
   }, [])
 
   useEffect(() => {
@@ -243,9 +249,9 @@ export default function ControlPlane() {
       setNotice(`Created ${result.id}. Intent compilation is ready.`)
     })
 
-  const loadProject = () =>
+  const loadProject = (id?: string) =>
     runAction('load-project', async () => {
-      const result = await api.getProject(projectId.trim())
+      const result = await api.getProject((id ?? projectId).trim())
       if (project?.id === result.id) {
         setProject(result)
         persist({ project: result })
@@ -643,6 +649,28 @@ export default function ControlPlane() {
               </div>
             )}
           </div>
+          {projects.length > 0 && (
+            <div className="v2-project-list">
+              {projects.map((item) => (
+                <button
+                  type="button"
+                  key={item.id}
+                  className={`v2-project-chip${project?.id === item.id ? ' selected' : ''}`}
+                  disabled={!!busy}
+                  onClick={() => {
+                    setProjectId(item.id)
+                    setProjectName(item.name)
+                    loadProject(item.id)
+                  }}
+                >
+                  <b>{item.name}</b>
+                  <small>
+                    <code>{item.id}</code> · rev {item.current_revision}
+                  </small>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="v2-project-form">
             <label>
               <span>Stable project id</span>
@@ -671,7 +699,7 @@ export default function ControlPlane() {
               </button>
               <button
                 disabled={!!busy || !projectId.trim()}
-                onClick={loadProject}
+                onClick={() => loadProject()}
               >
                 {busy === 'load-project' ? 'Loading…' : 'Load existing'}
               </button>

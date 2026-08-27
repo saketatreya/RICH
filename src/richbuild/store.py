@@ -526,6 +526,27 @@ class RichStore:
             raise NotFoundError(f"project {project_id!r} does not exist")
         return dict(row)
 
+    def list_projects(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Every project in this state directory, most recently touched first.
+
+        The control plane offered to "create or select a project" and could
+        only do the first, because nothing could enumerate them: a second
+        project was reachable only by remembering its id.
+        """
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM projects
+                ORDER BY updated_at DESC, id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def save_revision(
         self,
         project_id: str,

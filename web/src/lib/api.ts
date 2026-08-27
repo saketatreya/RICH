@@ -522,6 +522,9 @@ export const api = {
       `/v1/projects/${encodeURIComponent(projectId)}`,
     )).project,
 
+  listProjects: async (): Promise<Project[]> =>
+    (await request<{ projects: Project[] }>('/v1/projects')).projects,
+
   createProject: async (projectId: string, name: string): Promise<Project> =>
     (await post<{ project: Project }>('/v1/projects', {
       project_id: projectId,

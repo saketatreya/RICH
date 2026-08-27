@@ -290,6 +290,10 @@ class Application:
                     )
                 },
             )
+        if len(parts) == 2 and parts == ["v1", "projects"] and method == "GET":
+            return ApiResponse(
+                200, {"projects": self.store.list_projects()}
+            )
         if (
             len(parts) == 4
             and parts[:2] == ["v1", "projects"]
