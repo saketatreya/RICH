@@ -825,3 +825,49 @@ button.v2-secondary:disabled { opacity: .55; cursor: default; }
   border-radius: var(--r-sm);
   padding: 8px 11px;
 }
+
+/* Assurance — the view the product is for. What was asked for, and what the
+   harness observed about it. */
+.v2-assurance { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.v2-proof {
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--unplanned);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.v2-proof.proven { border-left-color: var(--verified); }
+.v2-proof.partial { border-left-color: var(--building); }
+.v2-proof.failed  { border-left-color: var(--failed); }
+.v2-proof header { display: flex; align-items: flex-start; gap: 14px; }
+.v2-proof header > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.v2-proof header b { font-size: 13.5px; }
+.v2-proof header small { font-size: 12px; color: var(--ink-dim); line-height: 1.5; }
+.v2-proof header .chip { margin-left: auto; flex: none; }
+.v2-proof-scenarios {
+  margin: 0; padding-left: 18px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.v2-proof-scenarios li { font-size: 12px; color: var(--ink-dim); }
+.v2-proof-gates { display: flex; flex-wrap: wrap; gap: 6px; }
+.v2-proof-empty { margin: 0; font-size: 12px; color: var(--ink-faint); }
+
+/* Source is available for audit, not for work. */
+.v2-audit {
+  margin-top: 20px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.v2-audit > summary {
+  cursor: pointer;
+  display: flex; flex-direction: column; gap: 2px;
+  list-style: none;
+}
+.v2-audit > summary::-webkit-details-marker { display: none; }
+.v2-audit > summary b { font-size: 12.5px; color: var(--ink-dim); }
+.v2-audit > summary b::before { content: '▸ '; color: var(--ink-faint); }
+.v2-audit[open] > summary b::before { content: '▾ '; }
+.v2-audit > summary small { font-size: 11.5px; color: var(--ink-faint); padding-left: 14px; }
+.v2-audit > summary:hover b { color: var(--ink); }
+.v2-owns { display: flex; flex-wrap: wrap; gap: 6px; }

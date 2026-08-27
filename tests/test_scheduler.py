@@ -896,3 +896,38 @@ def test_plan_mismatch_fails_before_mutating_run(tmp_path):
     else:
         raise AssertionError("project mismatch was accepted")
     assert store.get_run(run["id"])["status"] == "ready"
+
+
+def test_evidence_events_carry_the_requirements_they_speak_for(tmp_path):
+    """The control plane answers "is this requirement proven, and by what?"
+    from the event stream. Without these ids that needs one artifact fetch per
+    piece of evidence, and the question stops getting asked."""
+
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.trace")
+    run = store.create_run(
+        project["id"],
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        status="running",
+    )
+    store.append_event(
+        run["id"],
+        "evidence.recorded",
+        {
+            "kind": "acceptance",
+            "status": "passed",
+            "summary": "acceptance command passed",
+            "requirement_ids": ["req.checklist"],
+            "acceptance_scenario_ids": ["scenario.checklist"],
+        },
+    )
+
+    (event,) = [
+        item
+        for item in store.list_events(run["id"])
+        if item["event_type"] == "evidence.recorded"
+    ]
+
+    assert event["payload"]["requirement_ids"] == ["req.checklist"]
+    assert event["payload"]["acceptance_scenario_ids"] == ["scenario.checklist"]

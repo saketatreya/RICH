@@ -15,6 +15,7 @@ import {
   type InterviewNeeds,
 } from '../lib/api'
 import ApprovalGate from './ApprovalGate'
+import Assurance from './Assurance'
 import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
 import PreviewPanel from './PreviewPanel'
@@ -528,6 +529,14 @@ export default function ControlPlane() {
         : architecture?.approval.status === 'approved'
           ? 'active'
           : 'blocked',
+    },
+    {
+      id: 'stage-assurance',
+      label: 'Assurance',
+      detail: prepared
+        ? 'What is proven, and by what'
+        : 'Needs a run',
+      state: prepared ? 'active' : 'blocked',
     },
     {
       id: 'stage-preview',
@@ -1075,6 +1084,14 @@ export default function ControlPlane() {
           </section>
         )}
 
+        {prepared && spec && (
+          <Assurance
+            requirements={spec.spec.requirements}
+            scenarios={spec.spec.acceptance_scenarios}
+            events={events}
+          />
+        )}
+
         {prepared && (
           <div id="stage-preview">
           <PreviewPanel
@@ -1091,6 +1108,7 @@ export default function ControlPlane() {
             runId={prepared.run.id}
             events={events}
             projectId={project?.id}
+            nodes={architecture?.architecture.nodes}
             selectedNode={selectedNode}
             onSelectNode={setSelectedNode}
           />

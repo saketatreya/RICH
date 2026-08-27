@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import CodeBlock, { langForPath } from './CodeBlock'
 import {
   api,
+  type ArchitectureNode,
   type DurableTask,
   type GeneratedSource,
   type RunArtifact,
@@ -24,6 +25,8 @@ interface Props {
   events: RunEvent[]
   /** Set when the caller knows the project, which rebuilding a node needs. */
   projectId?: string
+  /** The approved graph, so a node can be described by what it owns. */
+  nodes?: ArchitectureNode[]
   /** Selection shared with the architecture graph, so both read as one view. */
   selectedNode?: string | null
   onSelectNode?: (nodeId: string | null) => void
@@ -98,6 +101,7 @@ export default function Inspector({
   runId,
   events,
   projectId,
+  nodes = [],
   selectedNode = null,
   onSelectNode,
 }: Props) {
@@ -145,6 +149,13 @@ export default function Inspector({
       tasks.find((task) => task.node_id === selectedNode) ??
       null,
     [tasks, selected, selectedNode],
+  )
+
+  const ownedRequirements = useMemo(
+    () =>
+      nodes.find((node) => node.id === selectedTask?.node_id)?.requirement_ids ??
+      [],
+    [nodes, selectedTask],
   )
 
   const sourceArtifact = useMemo(
@@ -299,6 +310,17 @@ export default function Inspector({
           </div>
           {rebuilt && <p className="v2-note">{rebuilt}</p>}
 
+          <h4>Responsible for</h4>
+          <div className="v2-owns">
+            {ownedRequirements.length ? (
+              ownedRequirements.map((id) => (
+                <span className="chip" key={id}>{id}</span>
+              ))
+            ) : (
+              <span className="muted">No requirements allocated to this node.</span>
+            )}
+          </div>
+
           <h4>Evidence</h4>
           <div className="v2-evidence">
             {evidenceFor(events, selectedTask.id).map((record) => (
@@ -316,12 +338,19 @@ export default function Inspector({
             )}
           </div>
 
-          <h4>Generated source</h4>
-          {loading && <p className="muted">Reading artifact…</p>}
-          {!loading && !source && (
-            <p className="muted">This node produced no source artifact.</p>
-          )}
-          {source && (
+          <details className="v2-audit">
+            <summary>
+              <b>Read the source this node wrote</b>
+              <small>
+                For audit. Nothing here needs your approval — the gates already
+                decided whether it holds.
+              </small>
+            </summary>
+            {loading && <p className="muted">Reading artifact…</p>}
+            {!loading && !source && (
+              <p className="muted">This node produced no source artifact.</p>
+            )}
+            {source && (
             <>
               <p className="muted">{source.summary}</p>
               {source.files.map((file) => {
@@ -348,7 +377,8 @@ export default function Inspector({
                 )
               })}
             </>
-          )}
+            )}
+          </details>
         </div>
       )}
     </section>

@@ -1372,6 +1372,14 @@ class DagScheduler:
                 "result_digest": result_artifact.digest,
                 "status": evidence.status,
                 "summary": evidence.summary,
+                # Carried on the event, not left in the result artifact alone,
+                # so a reader can answer "is this requirement proven, and by
+                # what?" from the event stream instead of fetching one artifact
+                # per piece of evidence.
+                "requirement_ids": list(requirement_ids),
+                "acceptance_scenario_ids": list(
+                    evidence.acceptance_scenario_ids
+                ),
             },
             task_id=durable_id,
         )
