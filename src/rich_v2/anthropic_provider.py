@@ -15,7 +15,6 @@ guarantees silently applies to the other.
 from __future__ import annotations
 
 import json
-import re
 import socket
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -24,7 +23,14 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib import error, parse, request as urllib_request
 
 from .budget import Usage
-from .providers import ModelRequest, ModelResponse, ProviderFailure
+from .providers import (
+    ModelRequest,
+    ModelResponse,
+    ProviderFailure,
+    canonical_request_bytes as _canonical_request_bytes,
+    non_negative_int as _non_negative_int,
+    safe_request_id,
+)
 
 
 _ONE_MILLION = Decimal(1_000_000)
@@ -40,7 +46,6 @@ ANTHROPIC_INPUT_FRAMING_TOKEN_ALLOWANCE = 1_024
 # fully determined by this module rather than by a server-side default.
 ANTHROPIC_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 DEFAULT_EFFORT = "high"
-_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # 409 (conflict) and 429 (rate limit) are documented as retryable; 500, 504 and
 # 529 are covered by the >= 500 rule at the call site.  408 and 425 are not
 # emitted by the API itself but can be injected by an intermediary proxy.
@@ -615,32 +620,7 @@ def _bounded_read(response: Any) -> bytes:
     return body
 
 
-def _non_negative_int(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError
-    return value
+def _safe_request_id(value, headers):
+    """This API answers with 'request-id'; everything else is shared."""
 
-
-def _canonical_request_bytes(payload: Mapping[str, Any]) -> bytes:
-    """Serialize the exact request envelope used for the input upper bound."""
-
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
-def _safe_request_id(value: Any, headers: Mapping[str, str]) -> str | None:
-    candidates = [value]
-    candidates.extend(
-        header_value
-        for header_name, header_value in headers.items()
-        if header_name.lower() == "request-id"
-    )
-    for candidate in candidates:
-        if isinstance(candidate, str) and _SAFE_REQUEST_ID.fullmatch(candidate):
-            return candidate
-    return None
+    return safe_request_id(value, headers, header_name="request-id")

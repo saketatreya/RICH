@@ -281,3 +281,37 @@ def test_persisted_overage_survives_terminal_sink_failpoint():
 
     assert ledger.usage == reported
     assert recover_model_usage(events) == reported
+
+
+def test_shared_provider_helpers_refuse_what_each_copy_used_to():
+    from rich_v2.providers import (
+        canonical_request_bytes,
+        non_negative_int,
+    )
+
+    assert non_negative_int(0) == 0
+    for bad in (True, False, -1, 1.0, "1", None):
+        with pytest.raises(ValueError):
+            non_negative_int(bad)
+
+    assert canonical_request_bytes({"b": 1, "a": 2}) == b'{"a":2,"b":1}'
+    with pytest.raises(ValueError):
+        canonical_request_bytes({"a": float("nan")})
+
+
+def test_the_request_id_reader_differs_only_in_which_header_it_trusts():
+    """That difference is per-API and correct; the boilerplate around it was
+    duplicated verbatim."""
+
+    from rich_v2.providers import safe_request_id
+
+    headers = {"Request-Id": "anthropic-1", "X-Request-Id": "openai-1"}
+
+    assert safe_request_id(None, headers, header_name="request-id") == "anthropic-1"
+    assert safe_request_id(None, headers, header_name="x-request-id") == "openai-1"
+    assert safe_request_id("body-id", headers, header_name="request-id") == "body-id"
+    assert safe_request_id(None, {}, header_name="request-id") is None
+    assert (
+        safe_request_id("has spaces", {}, header_name="request-id") is None
+    ), "an unsafe id is dropped rather than recorded"
+    assert safe_request_id("a" * 129, {}, header_name="request-id") is None

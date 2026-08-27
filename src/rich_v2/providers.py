@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import Enum
+import re
 from typing import Any, Callable, Iterable, Mapping, Protocol
 from uuid import uuid4
 
 from .budget import BudgetLedger, ReservationExceeded, RunBudget, Usage
+from .canonical import canonical_json_text
 
 
 MODEL_ATTEMPT_EVENT_SCHEMA = "rich.model-attempt/v1"
@@ -568,3 +570,43 @@ def _usage_within(actual: Usage, maximum: Usage) -> bool:
         and actual.cost_usd <= maximum.cost_usd
         and actual.execution_seconds <= maximum.execution_seconds
     )
+
+
+# ── Shared provider-adapter helpers ──────────────────────────────────
+# Each adapter is its own trust boundary and keeps its own parsing, but these
+# three were byte-identical copies doing nothing vendor-specific. The only real
+# difference between the request-id readers was which header the API answers
+# with, so that is the parameter rather than a second function.
+
+SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def non_negative_int(value: Any) -> int:
+    """Return a genuine non-negative int, refusing bools and everything else."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("value must be a non-negative integer")
+    return value
+
+
+def canonical_request_bytes(payload: Mapping[str, Any]) -> bytes:
+    """Serialize the exact request envelope used for the input upper bound."""
+
+    return canonical_json_text(payload).encode("utf-8")
+
+
+def safe_request_id(
+    value: Any, headers: Mapping[str, str], *, header_name: str
+) -> str | None:
+    """Return a provider request id safe to record, from the body or a header."""
+
+    candidates = [value]
+    candidates.extend(
+        header_value
+        for candidate_name, header_value in headers.items()
+        if candidate_name.lower() == header_name
+    )
+    for candidate in candidates:
+        if isinstance(candidate, str) and SAFE_REQUEST_ID.fullmatch(candidate):
+            return candidate
+    return None

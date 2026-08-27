@@ -44,7 +44,12 @@ from time import monotonic
 from typing import Any, Mapping
 
 from .budget import Usage
-from .providers import ModelRequest, ModelResponse, ProviderFailure
+from .providers import (
+    ModelRequest,
+    ModelResponse,
+    ProviderFailure,
+    non_negative_int as _non_negative_int,
+)
 
 
 CLAUDE_CODE_PROVIDER = "anthropic-claude-code"
@@ -529,12 +534,6 @@ def _structured_text(value: Any, usage: Usage) -> str:
 
 def _status_suffix(status: Any) -> str:
     return f" (HTTP {status})" if isinstance(status, int) else ""
-
-
-def _non_negative_int(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError
-    return value
 
 
 def _safe_session_id(value: Any) -> str | None:

@@ -13,7 +13,6 @@ tests, so it is not a fallback: it is the second implementation that keeps the
 from __future__ import annotations
 
 import json
-import re
 import socket
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -22,7 +21,14 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib import error, parse, request as urllib_request
 
 from .budget import Usage
-from .providers import ModelRequest, ModelResponse, ProviderFailure
+from .providers import (
+    ModelRequest,
+    ModelResponse,
+    ProviderFailure,
+    canonical_request_bytes as _canonical_request_bytes,
+    non_negative_int as _non_negative_int,
+    safe_request_id,
+)
 
 
 _ONE_MILLION = Decimal(1_000_000)
@@ -32,7 +38,6 @@ _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 # canonical HTTP request envelope by UTF-8 byte count (a conservative upper
 # bound for text tokens), then reserve this additional framing margin.
 OPENAI_INPUT_FRAMING_TOKEN_ALLOWANCE = 1_024
-_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429})
 _RETRYABLE_ERROR_CODES = frozenset(
     {
@@ -529,32 +534,7 @@ def _bounded_read(response: Any) -> bytes:
     return body
 
 
-def _non_negative_int(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError
-    return value
+def _safe_request_id(value, headers):
+    """This API answers with 'x-request-id'; everything else is shared."""
 
-
-def _canonical_request_bytes(payload: Mapping[str, Any]) -> bytes:
-    """Serialize the exact request envelope used for the input upper bound."""
-
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
-def _safe_request_id(value: Any, headers: Mapping[str, str]) -> str | None:
-    candidates = [value]
-    candidates.extend(
-        header_value
-        for header_name, header_value in headers.items()
-        if header_name.lower() == "x-request-id"
-    )
-    for candidate in candidates:
-        if isinstance(candidate, str) and _SAFE_REQUEST_ID.fullmatch(candidate):
-            return candidate
-    return None
+    return safe_request_id(value, headers, header_name="x-request-id")
