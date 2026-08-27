@@ -65,12 +65,19 @@ class ModelRequest:
             isinstance(self.max_cost_usd, bool)
             or not isinstance(self.max_cost_usd, Decimal)
             or not self.max_cost_usd.is_finite()
-            or self.max_cost_usd < 0
-            or isinstance(self.timeout_seconds, bool)
+            # Strictly positive: a zero ceiling authorizes a call that can only
+            # ever exceed it, so the request is incoherent before it is unsafe.
+            # This once read `< 0` while the message said "positive", and the
+            # message was the one telling the truth about the intent.
+            or self.max_cost_usd <= 0
+        ):
+            raise ValueError("cost reservation must be positive")
+        if (
+            isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))
             or self.timeout_seconds <= 0
         ):
-            raise ValueError("cost and timeout reservations must be positive")
+            raise ValueError("timeout reservation must be positive")
         if self.prompt_bytes > self.max_input_tokens:
             raise ValueError(
                 "prompt UTF-8 byte upper bound exceeds input token reservation"
