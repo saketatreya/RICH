@@ -242,12 +242,14 @@ def _prepare(
     }
 
 
-def _execute(state):
+def _execute(state, events=None):
     """Run one prepared build with the pinned model over the CLI route."""
 
     store = state["store"]
+    sink = events if events is not None else []
     runtime = default_run_runtime(
         store.get_run(state["run"]["id"])["budget"],
+        event_sink=lambda kind, payload: sink.append((kind, dict(payload))),
         route=CLAUDE_CODE_ROUTE,
     )
     engine = RunEngine(
