@@ -1106,3 +1106,81 @@ def test_projects_can_be_listed_most_recently_touched_first(tmp_path):
     assert set(ids) == {"project.first", "project.second"}
     assert ids[0] == "project.first", "the one just touched comes first"
     assert listed.body["projects"][0]["current_revision"] == 1
+
+
+def test_change_plans_read_and_change_applications_decide(tmp_path):
+    """Two routes, one distinction: a plan is for looking at, an application
+    withdraws permission to replay."""
+
+    store = RichStore(tmp_path / "state")
+    application = Application(store, workspace_root=tmp_path / "workspaces")
+    project = store.create_project("Demo", project_id="project.change.api")
+    spec_document = {
+        "schema_version": "2.0",
+        "id": project["id"],
+        "name": "Demo",
+        "goal": "Ship a reviewed checklist.",
+        "audiences": ["founders"],
+        "requirements": [
+            {
+                "id": "req.one",
+                "title": "One",
+                "statement": "A founder reviews the checklist.",
+                "kind": "functional",
+                "priority": "must",
+                "source": "user",
+            }
+        ],
+        "acceptance_scenarios": [
+            {
+                "id": "scenario.one",
+                "title": "It holds",
+                "given": ["The application is available."],
+                "when": ["A founder opens it."],
+                "then": ["The checklist is visible."],
+                "requirement_ids": ["req.one"],
+                "oracle": [
+                    {"action": "open_requirement"},
+                    {
+                        "action": "assert_visible",
+                        "locator": {"kind": "text", "value": "A founder reviews the checklist."},
+                    },
+                ],
+            }
+        ],
+        "constraints": [],
+        "revision": 1,
+    }
+    from richbuild.models import ProjectSpec
+    from richbuild.planner import plan_nextjs_architecture
+
+    spec = ProjectSpec.from_dict(spec_document)
+    architecture = plan_nextjs_architecture(spec).architecture
+    spec_revision = store.save_revision(
+        project["id"], kind="product_spec", schema_version="2.0",
+        document=spec.to_dict(), expected_revision=0,
+    )
+    architecture_revision = store.save_revision(
+        project["id"], kind="architecture", schema_version=architecture.schema_version,
+        document=architecture.to_dict(), expected_revision=1,
+    )
+    body = {
+        "from_spec_revision_id": spec_revision.id,
+        "to_spec_revision_id": spec_revision.id,
+        "from_architecture_revision_id": architecture_revision.id,
+        "to_architecture_revision_id": architecture_revision.id,
+    }
+
+    planned = application.handle(
+        "POST", f"/v1/projects/{project['id']}/change-plans",
+        body=body, headers=_headers("plan-1"),
+    )
+    applied = application.handle(
+        "POST", f"/v1/projects/{project['id']}/change-applications",
+        body=body, headers=_headers("apply-1"),
+    )
+
+    assert planned.status == 200 and applied.status == 200
+    assert planned.body["change"]["stale"] == [], "nothing changed"
+    assert "forgotten" not in planned.body
+    assert applied.body["forgotten"] == {}, "and so nothing was forgotten"

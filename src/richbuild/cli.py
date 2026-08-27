@@ -151,6 +151,17 @@ def _parser() -> argparse.ArgumentParser:
     cancel.add_argument("run_id")
     cancel.add_argument("--reason", default="canceled by operator")
 
+    for name, help_text in (
+        ("plan-change", "compute what moving between two approved revisions costs"),
+        ("apply-change", "mark exactly the stale components stale, and nothing else"),
+    ):
+        change = add_parser(name, help=help_text)
+        change.add_argument("--project", required=True)
+        change.add_argument("--from-spec", required=True)
+        change.add_argument("--to-spec", required=True)
+        change.add_argument("--from-architecture", required=True)
+        change.add_argument("--to-architecture", required=True)
+
     logs = add_parser(
         "logs", help="watch a run as a readable timeline of its durable events"
     )
@@ -334,6 +345,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "cancel-run":
             _print_json(
                 control_plane.cancel_run(run_id=args.run_id, reason=args.reason)
+            )
+        elif args.command in {"plan-change", "apply-change"}:
+            action = (
+                control_plane.plan_change
+                if args.command == "plan-change"
+                else control_plane.apply_change
+            )
+            _print_json(
+                action(
+                    project_id=args.project,
+                    from_spec_revision_id=args.from_spec,
+                    to_spec_revision_id=args.to_spec,
+                    from_architecture_revision_id=args.from_architecture,
+                    to_architecture_revision_id=args.to_architecture,
+                )
             )
         elif args.command == "logs":
             for line in follow_run(

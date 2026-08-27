@@ -417,6 +417,33 @@ class Application:
         if (
             len(parts) == 4
             and parts[:2] == ["v1", "projects"]
+            and parts[3] in {"change-plans", "change-applications"}
+            and method == "POST"
+        ):
+            action = (
+                self.control_plane.plan_change
+                if parts[3] == "change-plans"
+                else self.control_plane.apply_change
+            )
+            # 200 for both: a plan creates nothing, and applying withdraws
+            # permission to replay rather than creating a resource.
+            return ApiResponse(
+                200,
+                action(
+                    project_id=parts[2],
+                    from_spec_revision_id=_required(body, "from_spec_revision_id"),
+                    to_spec_revision_id=_required(body, "to_spec_revision_id"),
+                    from_architecture_revision_id=_required(
+                        body, "from_architecture_revision_id"
+                    ),
+                    to_architecture_revision_id=_required(
+                        body, "to_architecture_revision_id"
+                    ),
+                ),
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v1", "projects"]
             and parts[3] == "node-rebuilds"
             and method == "POST"
         ):
