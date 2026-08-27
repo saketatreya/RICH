@@ -14,8 +14,10 @@ import {
   type SpecSubmission,
   V2ApiError,
   v2Api,
+  type DurableTask,
 } from '../lib/v2Api'
 import ArchitectureDraftReview from './ArchitectureDraftReview'
+import ArchitectureGraph from './ArchitectureGraph'
 import V2Inspector from './V2Inspector'
 
 type RequirementDraft = {
@@ -442,6 +444,8 @@ export default function V2ControlPlane() {
   const [connectionError, setConnectionError] = useState('')
   const [project, setProject] = useState<Project | null>(restored.project)
   const [spec, setSpec] = useState<SpecSubmission | null>(restored.spec)
+  const [selectedNode, setSelectedNode] = useState<string | null>(null)
+  const [runTasks, setRunTasks] = useState<DurableTask[]>([])
   const [architecture, setArchitecture] = useState<ArchitectureSubmission | null>(
     restored.architecture,
   )
@@ -507,14 +511,18 @@ export default function V2ControlPlane() {
     let cancelled = false
     const refresh = async () => {
       try {
-        const [nextEvents, nextRun, nextExecution] = await Promise.all([
+        const [nextEvents, nextRun, nextExecution, nextTasks] = await Promise.all([
           v2Api.events(prepared.run.id),
           v2Api.getRun(prepared.run.id),
           v2Api.execution(prepared.run.id),
+          // Fed to the architecture graph, so the shape a human approved is
+          // the same picture that shows where the work currently is.
+          v2Api.tasks(prepared.run.id),
         ])
         if (!cancelled) {
           setEvents(nextEvents)
           setExecution(nextExecution)
+          setRunTasks(nextTasks)
           setPrepared((current) =>
             current ? { ...current, run: nextRun } : current,
           )
@@ -1073,9 +1081,20 @@ export default function V2ControlPlane() {
                 </div>
                 <span className="chip">{architecture.architecture.nodes.length} nodes</span>
               </div>
+              <ArchitectureGraph
+                architecture={architecture.architecture}
+                tasks={runTasks}
+                selected={selectedNode}
+                onSelect={(nodeId) =>
+                  setSelectedNode(nodeId === selectedNode ? null : nodeId)
+                }
+              />
               <div className="v2-architecture-grid">
                 {architecture.architecture.nodes.map((node) => (
-                  <article className="v2-node-card" key={node.id}>
+                  <article
+                    className={`v2-node-card${selectedNode === node.id ? ' selected' : ''}`}
+                    key={node.id}
+                  >
                     <div><code>{node.id}</code><span>{node.kind}</span></div>
                     <p>{node.name}</p>
                     <small>{node.owned_paths?.join(' · ') || 'No owned paths'}</small>
@@ -1269,6 +1288,8 @@ export default function V2ControlPlane() {
             runId={prepared.run.id}
             events={events}
             projectId={project?.id}
+            selectedNode={selectedNode}
+            onSelectNode={setSelectedNode}
           />
         )}
 

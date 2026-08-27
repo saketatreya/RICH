@@ -24,6 +24,9 @@ interface Props {
   events: RunEvent[]
   /** Set when the caller knows the project, which rebuilding a node needs. */
   projectId?: string
+  /** Selection shared with the architecture graph, so both read as one view. */
+  selectedNode?: string | null
+  onSelectNode?: (nodeId: string | null) => void
 }
 
 type DiffLine = { kind: ' ' | '-' | '+'; text: string }
@@ -91,7 +94,13 @@ function evidenceFor(events: RunEvent[], taskId: string) {
     }))
 }
 
-export default function V2Inspector({ runId, events, projectId }: Props) {
+export default function V2Inspector({
+  runId,
+  events,
+  projectId,
+  selectedNode = null,
+  onSelectNode,
+}: Props) {
   const [tasks, setTasks] = useState<DurableTask[]>([])
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([])
   const [transactions, setTransactions] = useState<SourceTransaction[]>([])
@@ -127,9 +136,15 @@ export default function V2Inspector({ runId, events, projectId }: Props) {
     // Re-read whenever the run produces something new.
   }, [runId, events.length])
 
+  // The graph selects by node, this panel by durable task; either can drive
+  // the other, and a click in one has to land in the other or they read as two
+  // unrelated views of the same run.
   const selectedTask = useMemo(
-    () => tasks.find((task) => task.id === selected) ?? null,
-    [tasks, selected],
+    () =>
+      tasks.find((task) => task.id === selected) ??
+      tasks.find((task) => task.node_id === selectedNode) ??
+      null,
+    [tasks, selected, selectedNode],
   )
 
   const sourceArtifact = useMemo(
@@ -229,8 +244,12 @@ export default function V2Inspector({ runId, events, projectId }: Props) {
         {tasks.map((task) => (
           <button
             key={task.id}
-            className={`v2-node-card${selected === task.id ? ' selected' : ''}`}
-            onClick={() => setSelected(selected === task.id ? null : task.id)}
+            className={`v2-node-card${selectedTask?.id === task.id ? ' selected' : ''}`}
+            onClick={() => {
+              const next = selectedTask?.id === task.id ? null : task.id
+              setSelected(next)
+              onSelectNode?.(next === null ? null : task.node_id)
+            }}
           >
             <b>{task.node_id}</b>
             <span className={`chip ${task.status}`}>{task.status}</span>

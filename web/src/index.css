@@ -731,3 +731,35 @@ button.v2-secondary:disabled { opacity: .55; cursor: default; }
   border-radius: var(--r-sm);
   padding: 8px 11px;
 }
+
+/* The approved architecture as a graph — v2 inherits the canvas that only
+   ever drew v1's tree. Read-only: an edge here is an approved fact, not a
+   suggestion to drag around. */
+.v2-graph {
+  height: 380px;
+  margin: 4px 0 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background:
+    radial-gradient(620px 320px at 50% -20%, rgba(124, 108, 255, .07), transparent 70%),
+    var(--surface);
+  overflow: hidden;
+}
+.v2-graph .react-flow__controls button {
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--ink-dim);
+  fill: currentColor;
+}
+.v2-graph .react-flow__controls button:hover { background: var(--surface-3); color: var(--ink); }
+.v2-graph .react-flow__edge-text { fill: var(--ink-faint); font-size: 9.5px; }
+.v2-graph .react-flow__edge-textbg { fill: var(--surface); }
+.v2-graph .react-flow__edge-path { stroke: var(--border-2); stroke-width: 1.4; }
+.v2-graph .rf-edge.kind-data .react-flow__edge-path { stroke: var(--df); }
+.v2-graph .rf-edge.kind-call .react-flow__edge-path { stroke: var(--uses); }
+.v2-graph .rf-edge.kind-resource .react-flow__edge-path { stroke: var(--unplanned); }
+.v2-graph .react-flow__node { cursor: pointer; }
+.v2-node-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-glow);
+}
