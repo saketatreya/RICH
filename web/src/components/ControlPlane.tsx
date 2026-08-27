@@ -16,6 +16,7 @@ import {
 } from '../lib/api'
 import ApprovalGate from './ApprovalGate'
 import Assurance from './Assurance'
+import type { ContractDoc } from './Behaviour'
 import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
 import PreviewPanel from './PreviewPanel'
@@ -1109,6 +1110,9 @@ export default function ControlPlane() {
             events={events}
             projectId={project?.id}
             nodes={architecture?.architecture.nodes}
+            contracts={
+              architecture?.architecture.contracts as unknown as ContractDoc[]
+            }
             selectedNode={selectedNode}
             onSelectNode={setSelectedNode}
           />

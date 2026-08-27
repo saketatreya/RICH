@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 
+import Behaviour, { type ContractDoc } from './Behaviour'
 import CodeBlock, { langForPath } from './CodeBlock'
 import {
   api,
@@ -27,6 +28,8 @@ interface Props {
   projectId?: string
   /** The approved graph, so a node can be described by what it owns. */
   nodes?: ArchitectureNode[]
+  /** The contracts, so a node can be described by what it promises. */
+  contracts?: ContractDoc[]
   /** Selection shared with the architecture graph, so both read as one view. */
   selectedNode?: string | null
   onSelectNode?: (nodeId: string | null) => void
@@ -102,6 +105,7 @@ export default function Inspector({
   events,
   projectId,
   nodes = [],
+  contracts = [],
   selectedNode = null,
   onSelectNode,
 }: Props) {
@@ -157,6 +161,12 @@ export default function Inspector({
       [],
     [nodes, selectedTask],
   )
+
+  const contract = useMemo(() => {
+    const node = nodes.find((item) => item.id === selectedTask?.node_id)
+    if (!node?.contract_id) return null
+    return contracts.find((item) => item.id === node.contract_id) ?? null
+  }, [nodes, contracts, selectedTask])
 
   const sourceArtifact = useMemo(
     () =>
@@ -320,6 +330,8 @@ export default function Inspector({
               <span className="muted">No requirements allocated to this node.</span>
             )}
           </div>
+
+          {contract && <Behaviour contract={contract} />}
 
           <h4>Evidence</h4>
           <div className="v2-evidence">
