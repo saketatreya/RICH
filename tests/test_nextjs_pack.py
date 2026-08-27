@@ -581,11 +581,19 @@ def test_a_contract_with_obligations_scaffolds_a_runnable_property_gate(tmp_path
     paths = {item.path for item in manifest.files}
 
     assert "tests/properties/rich-value-generator.ts" in paths
-    assert "packages/contracts/src/operations.ts" in paths
+    # One interface per component, beside its own source.
+    interfaces = {p for p in paths if p.endswith("operations-contract.ts")}
+    assert interfaces, "each component with claims gets its own pinned surface"
+    assert "packages/contracts/src/operations.ts" not in paths, (
+        "no single shared module: that made every node's implementation depend "
+        "on every other node's contract"
+    )
     suites = [p for p in paths if p.startswith("tests/properties/") and p.endswith(".test.ts")]
     assert suites, "the declared obligation must become a suite"
 
-    interface = (tmp_path / "workspace/packages/contracts/src/operations.ts").read_text()
+    domain_interface = "packages/contracts/src/operations-contract.ts"
+    assert domain_interface in interfaces
+    interface = (tmp_path / "workspace" / domain_interface).read_text()
     assert "export interface Operations" in interface
     assert "normalizeTitle" in interface
     domain = (tmp_path / "workspace/tests/properties/contract-domain.test.ts").read_text()
@@ -619,4 +627,5 @@ def test_an_architecture_that_claims_nothing_scaffolds_no_property_gate(tmp_path
 
     paths = {item.path for item in manifest.files}
     assert not [p for p in paths if p.startswith("tests/properties/")]
+    assert not [p for p in paths if p.endswith("operations-contract.ts")]
     assert "packages/contracts/src/operations.ts" not in paths

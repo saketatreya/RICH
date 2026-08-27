@@ -26,13 +26,12 @@ from ..models import (
     ArchitectureSpec,
     BrowserLocator,
     BrowserLocatorKind,
-    Contract,
     NodeKind,
     ProjectSpec,
 )
 from .typescript_obligations import (
     GENERATOR_PATH,
-    OPERATIONS_INTERFACE_PATH,
+    operations_interface_path,
     ObligationCompileError,
     VALUE_GENERATOR_SOURCE,
     compile_obligation_suite,
@@ -730,18 +729,24 @@ def _property_files(architecture: ArchitectureSpec) -> dict[str, str]:
     Everything here is a protected input: the suites are compiled from the
     approved contract, so a worker that could edit them could edit the claim it
     is being held to.
+
+    One interface and one implementation per component. A shared module would
+    make every node's code depend on every other node's contract, and change
+    locality computed over contracts would mean nothing.
     """
 
-    contracts = [
-        contract for contract in architecture.contracts if contract.obligations
-    ]
-    if not contracts:
-        return {}
+    owned = {node.id: node.owned_paths for node in architecture.nodes}
+    files: dict[str, str] = {}
     suites: dict[str, str] = {}
-    compiled: list[Contract] = []
-    for contract in contracts:
+    for contract in architecture.contracts:
+        if not contract.obligations:
+            continue
+        paths = owned.get(contract.node_id, ())
+        if not paths:
+            continue
         try:
-            source = compile_obligation_suite(contract)
+            source = compile_obligation_suite(contract, paths)
+            interface = compile_operations_interface([contract], paths)
         except ObligationCompileError:
             # A contract whose claims cannot be rendered runs no property gate.
             # The architect drops unexpressible obligations before this point;
@@ -749,18 +754,10 @@ def _property_files(architecture: ArchitectureSpec) -> dict[str, str]:
             # scaffold that is otherwise sound.
             continue
         suites[f"tests/properties/{_slug(contract.id)}.test.ts"] = source
-        compiled.append(contract)
+        files[operations_interface_path(paths)] = interface
     if not suites:
         return {}
-    try:
-        interface = compile_operations_interface(compiled)
-    except ObligationCompileError:
-        return {}
-    return {
-        GENERATOR_PATH: VALUE_GENERATOR_SOURCE,
-        OPERATIONS_INTERFACE_PATH: interface,
-        **suites,
-    }
+    return {GENERATOR_PATH: VALUE_GENERATOR_SOURCE, **files, **suites}
 
 
 def _slug(value: str) -> str:

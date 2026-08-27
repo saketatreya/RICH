@@ -695,7 +695,7 @@ def is_protected_generation_path(path: PurePosixPath) -> bool:
     # because that is where it has to be importable from. Without this it would
     # be the one protected input a worker could legally rewrite -- editing the
     # shape it is being held to instead of implementing it.
-    if path.parts == ("packages", "contracts", "src", "operations.ts"):
+    if path.name == "operations-contract.ts":
         return True
     # Compiled from approved intent, exactly like the tests and the operations
     # interface. A worker able to rewrite these could change what the
@@ -1352,14 +1352,19 @@ def _read_current_files(
 
 
 
-OPERATIONS_INTERFACE_PATH = "packages/contracts/src/operations.ts"
-OPERATIONS_IMPLEMENTATION_PATH = "packages/domain/src/operations.ts"
+def _operations_paths(owned_paths: Sequence[str]) -> tuple[str, str] | None:
+    """This component's implementation module and its pinned interface."""
+
+    if not owned_paths:
+        return None
+    root = sorted(owned_paths)[0]
+    return f"{root}/src/operations.ts", f"{root}/src/operations-contract.ts"
 
 
 def _pinned_operations(
     root: Path, task: CompiledTask, limits: CodingLimits
-) -> str | None:
-    """Return the operations interface, but only to the task that implements it.
+) -> tuple[str, str] | None:
+    """Return this task's operations interface, and where to implement it.
 
     The interface is a protected input the worker cannot write and, being
     scoped out of current_files, could not otherwise read. A task told to
@@ -1367,10 +1372,11 @@ def _pinned_operations(
     fail the typecheck for a reason it was never given.
     """
 
-    implementation = PurePosixPath(OPERATIONS_IMPLEMENTATION_PATH)
-    if not _is_owned(implementation, task.owned_paths):
+    paths = _operations_paths(task.owned_paths)
+    if paths is None:
         return None
-    source = root / OPERATIONS_INTERFACE_PATH
+    implementation, interface = paths
+    source = root / interface
     try:
         if not source.is_file():
             return None
@@ -1380,7 +1386,7 @@ def _pinned_operations(
     if len(content) > limits.max_current_file_bytes:
         return None
     try:
-        return content.decode("utf-8")
+        return content.decode("utf-8"), implementation
     except UnicodeError:
         return None
 
@@ -1446,7 +1452,8 @@ def build_task_prompt(
 
     root = _assert_workspace(Path(workspace))
     current_files, _ = _read_current_files(root, task.owned_paths, limits)
-    obligation_surface = _pinned_operations(root, task, limits)
+    pinned = _pinned_operations(root, task, limits)
+    obligation_surface = pinned[0] if pinned else None
     requirement_ids = set(task.requirement_ids)
     relevant_node_ids = {
         task.node_id,
@@ -1544,7 +1551,7 @@ def build_task_prompt(
         else (
             "This task owns the module that implements the pinned operations "
             "interface. Export a const named `operations` from "
-            f"{OPERATIONS_IMPLEMENTATION_PATH!r} that satisfies the interface "
+            f"{pinned[1]!r} that satisfies the interface "
             "given under pinned_operations_interface exactly. The proof "
             "obligations your contract declares are executed against it, so a "
             "missing or mis-shaped export fails the build before any of them "

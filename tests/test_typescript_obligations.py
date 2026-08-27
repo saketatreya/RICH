@@ -20,7 +20,6 @@ from richbuild.models import (
 )
 from richbuild.target_packs.typescript_obligations import (
     GENERATOR_PATH,
-    OPERATIONS_MODULE,
     VALUE_GENERATOR_SOURCE,
     ObligationCompileError,
     compile_obligation_suite,
@@ -376,7 +375,7 @@ def test_the_pinned_surface_renders_every_type_kind():
         '"red" | "green" | "blue";' in rendered
     )
     assert "listing(input: Array<number>): boolean;" in rendered
-    assert OPERATIONS_MODULE in rendered
+    assert "Operations" in rendered and "implement" in rendered.lower()
 
 
 # --------------------------------------------------------------------------

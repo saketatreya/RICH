@@ -1060,7 +1060,8 @@ def test_the_pinned_interface_is_shown_only_to_the_task_that_implements_it(
     satisfy it would otherwise fail typecheck for a reason it was never given."""
 
     project, architecture, plan, approval = _fixture()
-    interface = tmp_path / "packages/contracts/src/operations.ts"
+    # Beside the component's own source: one interface per component.
+    interface = tmp_path / "packages/domain/src/operations-contract.ts"
     interface.parent.mkdir(parents=True)
     interface.write_text("export interface Operations {\n  getNote(input: string): string;\n}\n")
 
@@ -1082,7 +1083,9 @@ def test_the_pinned_interface_is_shown_only_to_the_task_that_implements_it(
 
     assert "pinned_operations_interface" not in web.user_prompt
     assert "export interface Operations" in domain.user_prompt
-    assert "packages/domain/src/operations.ts" in domain.user_prompt
+    assert "packages/domain/src/operations.ts" in domain.user_prompt, (
+        "it is told where to implement, which is beside its own interface"
+    )
     assert "export a const named" in domain.user_prompt.lower()
 
 
@@ -1092,10 +1095,13 @@ def test_the_pinned_interface_cannot_be_rewritten_by_the_worker():
     protected input a worker could legally edit."""
 
     assert coding.is_protected_generation_path(
-        PurePosixPath("packages/contracts/src/operations.ts")
+        PurePosixPath("packages/contracts/src/operations-contract.ts")
     )
+    assert coding.is_protected_generation_path(
+        PurePosixPath("apps/web/src/operations-contract.ts")
+    ), "every component's interface, not one blessed path"
     assert not coding.is_protected_generation_path(
-        PurePosixPath("packages/domain/src/operations.ts")
+        PurePosixPath("packages/contracts/src/operations.ts")
     ), "the implementation is the worker's to write"
 
 
