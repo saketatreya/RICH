@@ -19,6 +19,7 @@ import {
 } from '../lib/v2Api'
 import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
+import PreviewPanel from './PreviewPanel'
 import V2Inspector from './V2Inspector'
 
 type RequirementDraft = {
@@ -1331,6 +1332,14 @@ export default function V2ControlPlane() {
               ))}
             </div>
           </section>
+        )}
+
+        {prepared && (
+          <PreviewPanel
+            run={prepared.run}
+            destination={destination}
+            actor={actor}
+          />
         )}
 
         {prepared && (

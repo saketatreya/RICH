@@ -780,3 +780,35 @@ button.v2-secondary:disabled { opacity: .55; cursor: default; }
 .v2-needs li small { font-size: 11.5px; color: var(--ink-faint); }
 .v2-needs-done { margin: 0; font-size: 13px; color: var(--verified); }
 .v2-submit-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* Preview: the last step, and the one where a digest stops being bookkeeping. */
+.v2-preview-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+.v2-preview-form label { display: flex; flex-direction: column; gap: 5px; }
+.v2-preview-form label span { font-size: 11.5px; color: var(--ink-dim); }
+.v2-preview-list { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.v2-preview-list article {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+.v2-preview-list article > div { display: flex; align-items: center; gap: 10px; }
+.v2-preview-list small { color: var(--ink-faint); font-size: 11.5px; }
+.v2-preview-list a { color: var(--accent-2); font-size: 12.5px; word-break: break-all; }
+.v2-note-warn {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--building);
+  background: rgba(240, 180, 41, .09);
+  border: 1px solid rgba(240, 180, 41, .3);
+  border-radius: var(--r-sm);
+  padding: 8px 11px;
+}

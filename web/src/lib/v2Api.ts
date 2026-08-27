@@ -301,6 +301,33 @@ export interface ScaffoldResult {
   manifest_artifact_digest: string
 }
 
+export interface Preview {
+  id: string
+  run_id: string
+  status: string
+  source_digest: string
+  neon_project_id: string
+  created_at: string
+  updated_at: string
+  progress?: Record<string, JsonValue>
+  result?: Record<string, JsonValue> | null
+  [key: string]: JsonValue | undefined
+}
+
+export interface PreviewSubmission {
+  preview: Preview
+  approval: Approval
+}
+
+export interface PreviewRequestInput {
+  sourceDir: string
+  neonProjectId: string
+  expiresAt: string
+  neonBranchName?: string
+  vercelProjectId?: string
+  vercelTeamId?: string
+}
+
 export interface InterviewQuestion {
   id: string
   prompt: string
@@ -562,6 +589,58 @@ export const v2Api = {
         risks,
       },
     ),
+
+  /**
+   * Request a preview. The approval this returns binds the exact source digest
+   * that was verified, so a later change cannot ride an earlier decision.
+   */
+  requestPreview: async (
+    runId: string,
+    input: PreviewRequestInput,
+  ): Promise<PreviewSubmission> =>
+    post<PreviewSubmission>(
+      `/v2/runs/${encodeURIComponent(runId)}/preview-requests`,
+      {
+        source_dir: input.sourceDir,
+        neon_project_id: input.neonProjectId,
+        expires_at: input.expiresAt,
+        ...(input.neonBranchName ? { neon_branch_name: input.neonBranchName } : {}),
+        ...(input.vercelProjectId
+          ? { vercel_project_id: input.vercelProjectId }
+          : {}),
+        ...(input.vercelTeamId ? { vercel_team_id: input.vercelTeamId } : {}),
+      },
+    ),
+
+  previews: async (runId: string): Promise<Preview[]> =>
+    (
+      await request<{ previews: Preview[] }>(
+        `/v2/runs/${encodeURIComponent(runId)}/previews`,
+      )
+    ).previews,
+
+  getPreview: async (previewId: string): Promise<Preview> =>
+    (
+      await request<{ preview: Preview }>(
+        `/v2/previews/${encodeURIComponent(previewId)}`,
+      )
+    ).preview,
+
+  deployPreview: async (previewId: string, approvalId: string): Promise<Preview> =>
+    (
+      await post<{ preview: Preview }>(
+        `/v2/previews/${encodeURIComponent(previewId)}/deployments`,
+        { approval_id: approvalId },
+      )
+    ).preview,
+
+  destroyPreview: async (previewId: string): Promise<Preview> =>
+    (
+      await post<{ preview: Preview }>(
+        `/v2/previews/${encodeURIComponent(previewId)}/destroy`,
+        {},
+      )
+    ).preview,
 
   /**
    * Ask what still needs answering, given what has been said so far. Reads and
