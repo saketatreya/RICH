@@ -15,6 +15,7 @@ import {
   V2ApiError,
   v2Api,
   type DurableTask,
+  type InterviewNeeds,
 } from '../lib/v2Api'
 import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
@@ -445,6 +446,7 @@ export default function V2ControlPlane() {
   const [project, setProject] = useState<Project | null>(restored.project)
   const [spec, setSpec] = useState<SpecSubmission | null>(restored.spec)
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
+  const [interviewNeeds, setInterviewNeeds] = useState<InterviewNeeds | null>(null)
   const [runTasks, setRunTasks] = useState<DurableTask[]>([])
   const [architecture, setArchitecture] = useState<ArchitectureSubmission | null>(
     restored.architecture,
@@ -1003,14 +1005,62 @@ export default function V2ControlPlane() {
                 ))}
               </div>
             </details>
+            {interviewNeeds && (
+              <div className="v2-needs">
+                {interviewNeeds.complete ? (
+                  <p className="v2-needs-done">
+                    Nothing outstanding — every question this project raises has an answer.
+                  </p>
+                ) : (
+                  <>
+                    <b>Still needed for this project</b>
+                    <ul>
+                      {interviewNeeds.questions.map((question) => (
+                        <li key={question.id}>
+                          <span>{question.prompt}</span>
+                          <small>{question.rationale}</small>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </div>
+            )}
             <div className="v2-submit-row">
               <div>
                 <b>{draft.capabilities.length + draft.qualityConstraints.length} requirements</b>
                 <span>{draft.scenarios.length} acceptance scenarios</span>
               </div>
-              <button className="primary" disabled={!!busy} onClick={submitSpec}>
-                {busy === 'submit-spec' ? 'Compiling intent…' : 'Compile product specification →'}
-              </button>
+              <div className="v2-submit-actions">
+                <button
+                  className="v2-secondary"
+                  disabled={!!busy || !project}
+                  onClick={async () => {
+                    if (!project) return
+                    setBusy('interview-needs')
+                    try {
+                      setInterviewNeeds(
+                        await v2Api.interviewNeeds(
+                          project.id,
+                          project.name,
+                          answers(),
+                        ),
+                      )
+                    } catch (cause) {
+                      setError(
+                        cause instanceof Error ? cause.message : String(cause),
+                      )
+                    } finally {
+                      setBusy('')
+                    }
+                  }}
+                >
+                  {busy === 'interview-needs' ? 'Checking…' : 'What else do you need?'}
+                </button>
+                <button className="primary" disabled={!!busy} onClick={submitSpec}>
+                  {busy === 'submit-spec' ? 'Compiling intent…' : 'Compile product specification →'}
+                </button>
+              </div>
             </div>
           </section>
         )}

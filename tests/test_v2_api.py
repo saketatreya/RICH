@@ -1027,3 +1027,55 @@ def test_a_run_can_be_cancelled_durably_from_any_surface(tmp_path):
     assert store.run_cancellation(run["id"])["reason"] == (
         "operator changed their mind"
     )
+
+
+def test_the_interview_reports_what_it_still_needs_and_adapts_to_the_answers(
+    tmp_path,
+):
+    """AdaptiveInterview was always adaptive and nothing called it before
+    compile(), so the interview behaved like a fixed form."""
+
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.interview")
+    application = V2Application(store, workspace_root=tmp_path / "workspaces")
+
+    def ask(answers, key="ask"):
+        return application.handle(
+            "POST",
+            f"/v2/projects/{project['id']}/interview-questions",
+            body={
+                "project_name": "Demo",
+                "answers": answers,
+                "limit": 10,
+            },
+            headers=_headers(key),
+        )
+
+    empty = ask({})
+    identity = ask(
+        {
+            "goal": "A todo app where each user signs in to see their own tasks",
+            "audiences": ["operators"],
+            "capabilities": [{"id": "req.a", "title": "T", "statement": "S."}],
+        },
+        key="ask-identity",
+    )
+    anonymous = ask(
+        {
+            "goal": "A static page listing published recipes for anyone to read",
+            "audiences": ["visitors"],
+            "capabilities": [{"id": "req.a", "title": "T", "statement": "S."}],
+        },
+        key="ask-anon",
+    )
+
+    assert empty.status == 200, "nothing is stored; it reads and reports"
+    assert empty.body["complete"] is False
+    assert "goal" in {item["id"] for item in empty.body["questions"]}
+
+    identity_ids = {item["id"] for item in identity.body["questions"]}
+    anonymous_ids = {item["id"] for item in anonymous.body["questions"]}
+    assert "roles" in identity_ids, "signing in implies who may do what"
+    assert "roles" not in anonymous_ids, "a page with no sign-in is not asked"
+    for question in empty.body["questions"]:
+        assert question["rationale"], "a question that cannot say why it asks"

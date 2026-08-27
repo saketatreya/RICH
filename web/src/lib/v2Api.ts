@@ -301,6 +301,19 @@ export interface ScaffoldResult {
   manifest_artifact_digest: string
 }
 
+export interface InterviewQuestion {
+  id: string
+  prompt: string
+  answer_kind: string
+  rationale: string
+}
+
+export interface InterviewNeeds {
+  project_id: string
+  questions: InterviewQuestion[]
+  complete: boolean
+}
+
 export interface NodeRebuild {
   project_id: string
   node_id: string
@@ -548,6 +561,21 @@ export const v2Api = {
         decisions,
         risks,
       },
+    ),
+
+  /**
+   * Ask what still needs answering, given what has been said so far. Reads and
+   * reports; the spec is only created by submitSpec.
+   */
+  interviewNeeds: async (
+    projectId: string,
+    projectName: string,
+    answers: Partial<InterviewAnswers>,
+    limit = 10,
+  ): Promise<InterviewNeeds> =>
+    post<InterviewNeeds>(
+      `/v2/projects/${encodeURIComponent(projectId)}/interview-questions`,
+      { project_name: projectName, answers, limit },
     ),
 
   /**

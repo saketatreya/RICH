@@ -217,6 +217,50 @@ class ControlPlane:
             "forgotten_generations": forgotten,
         }
 
+    def interview_questions(
+        self,
+        *,
+        project_id: str,
+        project_name: str,
+        answers: Mapping[str, Any],
+        limit: int = 3,
+    ) -> dict[str, Any]:
+        """Ask what still needs answering, given what has been said so far.
+
+        AdaptiveInterview has always been adaptive -- it asks about roles only
+        once identity is mentioned, about a data policy only once persistence
+        is -- and nothing ever called it before compile(). So the interview
+        behaved like a fixed form that rejected incomplete submissions, and a
+        human had to guess which questions their project actually needed.
+
+        Reads nothing and writes nothing; it exists so the next question can
+        depend on the last answer.
+        """
+
+        interview = AdaptiveInterview(
+            InterviewState(
+                project_id=project_id,
+                project_name=project_name,
+                answers=dict(answers),
+                revision=len(self.store.list_revisions(project_id, kind="product_spec"))
+                + 1,
+            )
+        )
+        outstanding = interview.next_questions(limit=limit)
+        return {
+            "project_id": project_id,
+            "questions": [
+                {
+                    "id": question.id,
+                    "prompt": question.prompt,
+                    "answer_kind": question.answer_kind,
+                    "rationale": question.rationale,
+                }
+                for question in outstanding
+            ],
+            "complete": not outstanding,
+        }
+
     def submit_interview(
         self,
         *,

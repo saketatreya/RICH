@@ -293,6 +293,27 @@ class V2Application:
         if (
             len(parts) == 4
             and parts[:2] == ["v2", "projects"]
+            and parts[3] == "interview-questions"
+            and method == "POST"
+        ):
+            answers = body.get("answers")
+            if not isinstance(answers, Mapping):
+                raise ValueError("answers document is required")
+            # 200: this reads what has been said and reports what is still
+            # needed. Nothing is stored -- the spec is created by
+            # spec-submissions, and only once a human is ready.
+            return ApiResponse(
+                200,
+                self.control_plane.interview_questions(
+                    project_id=parts[2],
+                    project_name=_required(body, "project_name"),
+                    answers=answers,
+                    limit=_optional_int(body, "limit") or 3,
+                ),
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v2", "projects"]
             and parts[3] == "spec-submissions"
             and method == "POST"
         ):
@@ -856,6 +877,15 @@ def _required_int(body: Mapping[str, Any], key: str) -> int:
     value = body.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{key} must be a non-negative integer")
+    return value
+
+
+def _optional_int(body: Mapping[str, Any], key: str) -> int | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{key} must be a positive integer")
     return value
 
 
