@@ -116,30 +116,48 @@ def _project():
     ).compile()
 
 
-def _prepare(tmp_path):
-    """Bring a run to the exact state RunEngine.execute expects to resume."""
+def _prepare(
+    tmp_path,
+    *,
+    project=None,
+    architecture=None,
+    narrow=None,
+    run_id="run.closed-loop",
+):
+    """Bring a run to the exact state RunEngine.execute expects to resume.
 
-    project = _project()
-    architecture = plan_nextjs_architecture(project).architecture
+    Parameterised so a second run can be prepared against an amended spec --
+    which is what change locality has to be measured on.
+    """
+
+    project = project or _project()
+    architecture = architecture or plan_nextjs_architecture(project).architecture
+    if narrow is not None:
+        architecture = narrow(architecture)
     architecture.validate_against_project(project)
     plan = compile_architecture(architecture, project)
 
+    tmp_path = Path(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
     store = RichStore(tmp_path / "state")
-    record = store.create_project(project.name, project_id=project.id)
-    assert record["id"] == project.id
+    try:
+        record = store.create_project(project.name, project_id=project.id)
+        assert record["id"] == project.id
+    except Exception:
+        record = store.get_project(project.id)
     spec_revision = store.save_revision(
         project.id,
         kind="product_spec",
         schema_version=project.schema_version,
         document=project.to_dict(),
-        expected_revision=0,
+        expected_revision=store.get_project(project.id)["current_revision"],
     )
     architecture_revision = store.save_revision(
         project.id,
         kind="architecture",
         schema_version=architecture.schema_version,
         document=architecture.to_dict(),
-        expected_revision=1,
+        expected_revision=store.get_project(project.id)["current_revision"],
     )
     approval = store.decide_approval(
         store.request_approval(
@@ -159,7 +177,7 @@ def _prepare(tmp_path):
         project.id,
         spec_revision_id=spec_revision.id,
         architecture_revision_id=architecture_revision.id,
-        run_id="run.closed-loop",
+        run_id=run_id,
         status="ready",
         budget={
             "max_model_attempts": 12,
@@ -219,7 +237,42 @@ def _prepare(tmp_path):
         "plan": plan,
         "workspace": workspace,
         "approval": approval,
+        "project": project,
+        "architecture": architecture,
     }
+
+
+def _execute(state):
+    """Run one prepared build with the pinned model over the CLI route."""
+
+    store = state["store"]
+    runtime = default_run_runtime(
+        store.get_run(state["run"]["id"])["budget"],
+        route=CLAUDE_CODE_ROUTE,
+    )
+    engine = RunEngine(
+        store,
+        gateway=runtime.gateway,
+        command_runner=BubblewrapCommandRunner(runtime.executor, timeout_seconds=900),
+        provider=runtime.provider_name,
+        model=runtime.model,
+        workspace_preparer=runtime.bootstrapper,
+        config=RunEngineConfig(
+            max_task_attempts=2,
+            task_timeout_seconds=1_800,
+            coding_limits=runtime.coding_limits,
+            lint_argv=runtime.commands.lint_argv,
+            static_argv=runtime.commands.static_argv,
+            unit_argv=runtime.commands.unit_argv,
+            build_argv=runtime.commands.build_argv,
+            acceptance_argv=runtime.commands.acceptance_argv,
+        ),
+    )
+    return engine.execute(
+        run_id=state["run"]["id"],
+        workspace=state["workspace"],
+        architecture_approval_id=state["approval"]["id"],
+    )
 
 
 def _require_login():
