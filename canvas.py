@@ -71,7 +71,11 @@ _SRC_ROOT = HERE / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from rich_v2.api import MAX_BODY_BYTES, V2Application  # noqa: E402
+from rich_v2.api import (  # noqa: E402
+    MAX_BODY_BYTES,
+    V2Application,
+    validate_local_request,
+)
 from rich_v2.runtime import default_architect  # noqa: E402
 from rich_v2.store import RichStore  # noqa: E402
 
@@ -1327,9 +1331,21 @@ def read_node_artifacts(node_id: str) -> dict:
     """Read what a build produced for one module so the canvas can show it inline:
     status + reason, the persisted test report, and the generated src/ + tests/ files.
     Read-only; returns empty sections when the node hasn't been built yet."""
-    node_dir = BUILD_ROOT / node_id
     out = {"id": node_id, "status": "unplanned", "reason": None,
-           "report": None, "src": {}, "tests": {}, "built": node_dir.exists()}
+           "report": None, "src": {}, "tests": {}, "built": False}
+    # node_id arrives straight off a query string.  Confine it to BUILD_ROOT the
+    # same way _serve_static confines WEB_DIST: without this, "../.." walks the
+    # reader out of build/ and turns this into a directory-existence oracle plus
+    # a src/*.py reader for any project on disk.
+    root = BUILD_ROOT.resolve()
+    try:
+        node_dir = (root / node_id).resolve()
+        node_dir.relative_to(root)
+    except (ValueError, OSError):
+        return out
+    if node_dir == root:
+        return out
+    out["built"] = node_dir.exists()
     try:
         st = json.loads((node_dir / "status.json").read_text())
         out["status"] = st.get("status", "unplanned")
@@ -1550,6 +1566,25 @@ class Handler(BaseHTTPRequestHandler):
         ctype = self._CTYPES.get(target.suffix, "application/octet-stream")
         return self._send(200, target.read_bytes(), ctype)
 
+    def _reject_untrusted(self, method: str) -> bool:
+        """Apply the v2 surface's loopback checks to the v1 /api/* surface too.
+
+        Without this the two APIs on this one port disagree: /v2/* refuses a
+        non-loopback Host (the DNS-rebinding case, where a hostile page's domain
+        resolves to 127.0.0.1 and the browser treats us as same-origin, so CORS
+        never applies) while /api/* accepted anything and would drive builds and
+        read artifacts for whoever asked."""
+
+        response = validate_local_request(
+            method,
+            {key.lower(): value for key, value in self.headers.items()},
+            require_host=True,
+        )
+        if response is None:
+            return False
+        self._json(response.status, response.body)
+        return True
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -1561,6 +1596,8 @@ class Handler(BaseHTTPRequestHandler):
                 query=parse_qs(parsed.query),
             )
             return self._json(response.status, response.body)
+        if path.startswith("/api/") and self._reject_untrusted("GET"):
+            return None
         if path == "/api/job":
             qs = parse_qs(urlparse(self.path).query)
             jid = (qs.get("id") or [""])[0]
@@ -1597,6 +1634,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/") and self._reject_untrusted("POST"):
+            return None
         try:
             body = self._read_body()
         except Exception as e:
