@@ -1006,6 +1006,13 @@ class _VerifiedCodingHandler:
                 for evidence in verification_evidence
             ]
 
+        if all_passed:
+            # The gates accepted it, so it is now worth replaying. The worker
+            # staged this and deliberately cannot commit it itself.
+            commit = getattr(self.model_worker, "commit_memo", None)
+            if callable(commit):
+                commit()
+
         summary = (
             f"{generated.summary}; independent verification passed"
             if all_passed

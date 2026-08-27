@@ -1740,6 +1740,7 @@ class CodingWorker:
             raise TypeError("prior_failures must be callable")
         self.prior_failures = prior_failures
         self.memo = memo
+        self._pending_memo: dict[str, Any] | None = None
         self.limits = limits
         self.max_attempts = max_attempts
         self.commit_sink = commit_sink
@@ -1932,39 +1933,38 @@ class CodingWorker:
                 )
 
         if self.memo is not None and not reused:
-            # Recorded only now, because a bundle that never applied is not an
-            # answer worth replaying. A memo write must never be able to fail
-            # the task that earned it.
-            try:
-                self.memo.put(
-                    cache_key,
-                    document={
-                        "schema": "rich.generation-memo/v1",
-                        "provider": generation.provider,
-                        "model": generation.model,
-                        "bundle": {
-                            "summary": bundle.summary,
-                            "files": [
-                                {
-                                    "path": item.path,
-                                    "operation": item.operation,
-                                    # Text on the way in, so text on the
-                                    # way out; the parser decodes it again.
-                                    "content": item.content.decode("utf-8"),
-                                }
-                                for item in bundle.files
-                            ],
-                        },
+            # Staged, not written. A generation is only worth replaying once
+            # the independent gates have accepted it -- otherwise a later run
+            # could replay a known-bad answer into a fresh workspace. The
+            # worker cannot know that verdict, and must not: the handler that
+            # runs the gates commits this.
+            self._pending_memo = {
+                "cache_key": cache_key,
+                "document": {
+                    "schema": "rich.generation-memo/v1",
+                    "provider": generation.provider,
+                    "model": generation.model,
+                    "bundle": {
+                        "summary": bundle.summary,
+                        "files": [
+                            {
+                                "path": item.path,
+                                "operation": item.operation,
+                                # Text on the way in, so text on the way out;
+                                # the parser decodes it again.
+                                "content": item.content.decode("utf-8"),
+                            }
+                            for item in bundle.files
+                        ],
                     },
-                    project_id=self.project.id,
-                    node_id=task.node_id,
-                    provider=generation.provider,
-                    model=generation.model,
-                    run_id=run_id,
-                    task_id=durable_task_id,
-                )
-            except Exception:
-                pass
+                },
+                "project_id": self.project.id,
+                "node_id": task.node_id,
+                "provider": generation.provider,
+                "model": generation.model,
+                "run_id": run_id,
+                "task_id": durable_task_id,
+            }
 
         artifact = ProducedArtifact(
             content=generated_source_artifact_bytes(bundle, commit),
@@ -2019,6 +2019,32 @@ class CodingWorker:
             evidence=(evidence,),
             artifacts=(artifact,),
         )
+
+    def commit_memo(self) -> bool:
+        """Record the staged generation, now that the gates have accepted it.
+
+        Called by whatever ran the gates, never by this worker: a worker that
+        decided its own answer was worth remembering would be grading itself.
+        A memo write must never be able to fail the task that earned it.
+        """
+
+        pending, self._pending_memo = self._pending_memo, None
+        if self.memo is None or pending is None:
+            return False
+        try:
+            self.memo.put(
+                pending["cache_key"],
+                document=pending["document"],
+                project_id=pending["project_id"],
+                node_id=pending["node_id"],
+                provider=pending["provider"],
+                model=pending["model"],
+                run_id=pending["run_id"],
+                task_id=pending["task_id"],
+            )
+        except Exception:
+            return False
+        return True
 
     def _require_mutation_authority(
         self,

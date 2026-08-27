@@ -831,13 +831,22 @@ def _workspace(tmp_path, name):
     return root
 
 
-def _run(worker, task, *, run_id="run.memo", attempt=1):
-    return worker.run_task(
+def _run(worker, task, *, run_id="run.memo", attempt=1, verified=True):
+    """Run one task, then stand in for the gates accepting it.
+
+    A worker stages its memo and cannot commit it: only whatever ran the
+    independent gates may decide an answer is worth replaying.
+    """
+
+    result = worker.run_task(
         run_id=run_id,
         durable_task_id=f"{run_id}:implement:web",
         attempt=attempt,
         task=task,
     )
+    if verified:
+        worker.commit_memo()
+    return result
 
 
 def test_an_identical_request_reuses_the_bundle_without_calling_the_model(tmp_path):
@@ -1065,3 +1074,59 @@ def test_a_protected_input_is_not_offered_as_one_of_your_current_files(tmp_path)
         "a compiled-from-intent module is context, not workspace"
     )
     assert prompt.current_file_count == 1
+
+
+def test_a_generation_the_gates_rejected_is_never_remembered(tmp_path):
+    """Otherwise a later run replays a known-bad answer into a fresh
+    workspace, and pays the gates to reject it a second time."""
+
+    project, architecture, plan, approval = _fixture()
+    memo = _Memo()
+    task = plan.task_index["web"]
+
+    _run(
+        CodingWorker(
+            _gateway(RecordingProvider(_valid_bundle())),
+            workspace=_workspace(tmp_path, "rejected"),
+            project=project,
+            architecture=architecture,
+            approval=approval,
+            provider="fake",
+            model="test-model",
+            dependency_summaries={"domain": "Domain generation completed."},
+            memo=memo,
+        ),
+        task,
+        verified=False,
+    )
+
+    assert memo.entries == {}, "nothing was verified, so nothing is replayable"
+
+
+def test_the_worker_cannot_decide_its_own_answer_is_worth_keeping(tmp_path):
+    project, architecture, plan, approval = _fixture()
+    memo = _Memo()
+    worker = CodingWorker(
+        _gateway(RecordingProvider(_valid_bundle())),
+        workspace=_workspace(tmp_path, "staged"),
+        project=project,
+        architecture=architecture,
+        approval=approval,
+        provider="fake",
+        model="test-model",
+        dependency_summaries={"domain": "Domain generation completed."},
+        memo=memo,
+    )
+
+    worker.run_task(
+        run_id="run.staged",
+        durable_task_id="run.staged:implement:web",
+        attempt=1,
+        task=plan.task_index["web"],
+    )
+    staged = dict(memo.entries)
+    committed = worker.commit_memo()
+
+    assert staged == {}, "run_task must stage rather than write"
+    assert committed is True and memo.entries, "the gates' verdict commits it"
+    assert worker.commit_memo() is False, "and it commits exactly once"
