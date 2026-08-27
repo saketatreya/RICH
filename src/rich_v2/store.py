@@ -1595,6 +1595,29 @@ class RichStore:
             and _parsed_timestamp(row["lease_expires_at"]) > now
         )
 
+    def is_run_execution_leased(self, run_id: str) -> bool:
+        """Report whether any live owner holds this run, without naming it.
+
+        The owner token is the capability to write as that owner, so a
+        token-free question needs a token-free answer: callers that only want
+        to know whether a run is executing -- a status endpoint, say -- must
+        not have to hold, or be handed, the right to mutate it."""
+
+        now = datetime.now(timezone.utc)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT lease_expires_at
+                FROM run_execution_leases
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        return bool(
+            row is not None
+            and _parsed_timestamp(row["lease_expires_at"]) > now
+        )
+
     def release_run_execution(self, run_id: str, *, owner_token: str) -> bool:
         """Release only this owner; a stale owner cannot release its successor."""
 

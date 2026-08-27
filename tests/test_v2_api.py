@@ -915,3 +915,40 @@ def test_a_draft_that_does_not_validate_is_refused_before_a_human_sees_it(tmp_pa
     # proposal that could not be applied would waste their review.
     assert drafted.status == 400
     assert "req.a11y" in drafted.body["message"]
+
+
+def test_execution_status_reports_a_run_leased_by_another_process(tmp_path):
+    """The Canvas and `rich-v2 serve` are different processes over one state
+    directory; a run either of them started must not look idle to the other."""
+
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.leased")
+    run = store.create_run(
+        project["id"],
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        status="ready",
+    )
+    application = V2Application(store, workspace_root=tmp_path / "workspaces")
+
+    before = application.handle(
+        "GET", f"/v2/runs/{run['id']}/execution", headers={}
+    )
+    lease = store.claim_run_execution(run["id"], lease_seconds=60)
+    during = application.handle(
+        "GET", f"/v2/runs/{run['id']}/execution", headers={}
+    )
+    store.release_run_execution(run["id"], owner_token=lease.owner_token)
+    after = application.handle(
+        "GET", f"/v2/runs/{run['id']}/execution", headers={}
+    )
+
+    assert before.body["execution"]["active"] is False
+    assert during.body["execution"]["active"] is True
+    assert during.body["execution"]["owned_here"] is False, (
+        "this process holds no lease, so it must not claim to own the run"
+    )
+    assert after.body["execution"]["active"] is False
+    assert lease.owner_token not in json.dumps(during.body), (
+        "the owner token is the authority to write; a status read must not leak it"
+    )

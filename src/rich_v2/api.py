@@ -329,13 +329,22 @@ class V2Application:
             and method == "GET"
         ):
             run = self.store.get_run(parts[2])
+            # "active" has to mean the durable truth, not this process's memory
+            # of it.  The Canvas and `rich-v2 serve` are separate processes over
+            # one state directory, so a run started by either -- or by the CLI --
+            # is invisible to the other's in-memory set while its lease says
+            # plainly that it is running.  Reporting idle there invites a second
+            # operator to start the run the lease is about to refuse.
+            in_process = self.execution_manager.active(parts[2])
+            leased = self.store.is_run_execution_leased(parts[2])
             return ApiResponse(
                 200,
                 {
                     "execution": {
                         "run_id": parts[2],
                         "status": run["status"],
-                        "active": self.execution_manager.active(parts[2]),
+                        "active": in_process or leased,
+                        "owned_here": in_process,
                     }
                 },
             )

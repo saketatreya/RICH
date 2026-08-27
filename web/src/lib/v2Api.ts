@@ -304,7 +304,10 @@ export interface ScaffoldResult {
 export interface ExecutionStatus {
   run_id: string
   status: string
+  /** Executing anywhere, per the durable lease -- not merely in this server. */
   active: boolean
+  /** True only when this server process is the one running it. */
+  owned_here: boolean
 }
 
 export interface InterviewAnswers {
