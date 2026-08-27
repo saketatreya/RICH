@@ -327,6 +327,20 @@ Verification is a separate question with a separate answer: the gates are
 whole-application and always re-run. Reusing an answer is never reusing a verdict, and
 every plan says so in words.
 
+**Measured, on a model-authored architecture.** For a two-requirement project — a todo
+capability and a keyboard-accessibility constraint — the architect allocated
+`req.a11y` to `web` alone and `req.todo` to `data`, `domain` and `web`: 67% of a dense
+allocation, not 100%. Amending each in turn:
+
+| Amendment | Stale | Reusable |
+|---|---|---|
+| `req.a11y` (UI only) | `app`, `web` | `data`, `domain` |
+| `req.todo` (spans layers) | `app`, `data`, `domain`, `web` | — |
+
+The second is not a failure of the mechanism: that requirement really is served by every
+layer, so every layer really must be rebuilt. The first is the point — cost proportional
+to the change, on an architecture nobody hand-tuned for the demonstration.
+
 **The allocation is what decides the cost.** The deterministic planner gives every layer
 every requirement, which is honest for a layered baseline — a feature really does cut
 through UI, domain and data — and buys no change locality at all: every amendment stales
