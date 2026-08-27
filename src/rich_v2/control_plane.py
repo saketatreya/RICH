@@ -135,11 +135,40 @@ class ControlPlane:
         preview_orchestrator: PreviewOrchestrator | None = None,
         run_executor: RunExecutor | None = None,
         architect: ArchitectProposer | None = None,
+        workspace_root: str | Path | None = None,
     ):
         self.store = store
         self.preview_orchestrator = preview_orchestrator
         self.run_executor = run_executor
         self.architect = architect
+        # Confinement belongs to whoever built this control plane, because
+        # whether it is needed depends on who supplies the path. A network
+        # caller must never name a directory outside the root the operator
+        # chose; an operator at their own shell can already write anywhere,
+        # and pretending otherwise is friction rather than safety. Set it and
+        # every entry point through this instance inherits the boundary.
+        self.workspace_root = (
+            Path(workspace_root).resolve() if workspace_root is not None else None
+        )
+
+    def _confined(self, value: str | Path, *, label: str) -> Path:
+        candidate = Path(value)
+        if self.workspace_root is None:
+            return candidate
+        resolved = (
+            candidate
+            if candidate.is_absolute()
+            else self.workspace_root / candidate
+        ).resolve()
+        try:
+            relative = resolved.relative_to(self.workspace_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"{label} must remain inside the configured workspace root"
+            ) from exc
+        if not relative.parts:
+            raise ValueError(f"{label} cannot be the workspace root itself")
+        return resolved
 
     def create_project(self, *, project_id: str, name: str) -> dict[str, Any]:
         return self.store.create_project(name, project_id=project_id)
@@ -489,6 +518,7 @@ class ControlPlane:
         destination: str | Path,
         package_scope: str | None = None,
     ) -> ScaffoldResult:
+        destination = self._confined(destination, label="scaffold destination")
         run = self.store.get_run(run_id)
         if run["status"] != "ready":
             raise ValueError(f"run must be ready to scaffold, got {run['status']!r}")
@@ -557,6 +587,7 @@ class ControlPlane:
             raise RunExecutionUnavailable(
                 "no trusted run executor is configured"
             )
+        workspace = self._confined(workspace, label="run workspace")
         return self.run_executor.execute(
             run_id=run_id,
             workspace=workspace,

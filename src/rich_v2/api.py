@@ -149,6 +149,10 @@ class V2Application:
             ),
             run_executor=trusted_run_executor,
             architect=architect,
+            # The boundary belongs to the control plane, not to this dispatch
+            # table: an HTTP caller names a directory over the network, and
+            # every path into the engine has to refuse the same escapes.
+            workspace_root=self.workspace_root,
         )
         self.execution_manager = _ExecutionManager(
             store, self.control_plane

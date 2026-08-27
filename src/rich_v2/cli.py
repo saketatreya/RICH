@@ -162,6 +162,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         store = RichStore(args.state_dir)
+        # Deliberately unconfined. An operator at their own shell can
+        # already write anywhere this process can, so a workspace_root here
+        # would be friction wearing the costume of safety. The network surface
+        # sets one because a network caller cannot be trusted with a path.
         control_plane = ControlPlane(
             store,
             preview_orchestrator=default_preview_orchestrator(),

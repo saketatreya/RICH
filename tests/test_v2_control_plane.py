@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -387,3 +388,48 @@ def test_rebuilding_an_unknown_node_of_a_known_architecture_is_refused(tmp_path)
         node_id="web",
         architecture_revision_id=architecture.revision.id,
     )["node_id"] == "web"
+
+
+def test_the_workspace_boundary_belongs_to_the_control_plane(tmp_path):
+    """It used to live in the HTTP dispatch table, so every other caller --
+    the CLI, a future surface -- inherited nothing."""
+
+    store = RichStore(tmp_path / "state")
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    confined = ControlPlane(store, workspace_root=root)
+    unconfined = ControlPlane(store)
+
+    assert confined._confined("build", label="d") == (root / "build").resolve()
+    for escape in ("../outside", "/etc", str(tmp_path / "elsewhere")):
+        with pytest.raises(ValueError, match="inside the configured workspace root"):
+            confined._confined(escape, label="d")
+    with pytest.raises(ValueError, match="cannot be the workspace root"):
+        confined._confined(str(root), label="d")
+
+    # An operator at their own shell can already write anywhere this process
+    # can, so the CLI's control plane deliberately sets no root.
+    assert unconfined._confined("../outside", label="d") == Path("../outside")
+
+
+def test_scaffold_and_execute_both_refuse_an_escaping_destination(tmp_path):
+    store = RichStore(tmp_path / "state")
+    root = tmp_path / "workspaces"
+    root.mkdir()
+
+    class _Executor:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, *, run_id, workspace, architecture_approval_id=None):
+            self.calls.append(workspace)
+            return "ok"
+
+    executor = _Executor()
+    control_plane = ControlPlane(store, run_executor=executor, workspace_root=root)
+
+    with pytest.raises(ValueError, match="inside the configured workspace root"):
+        control_plane.scaffold_run(run_id="run.x", destination="../escape")
+    with pytest.raises(ValueError, match="inside the configured workspace root"):
+        control_plane.execute_run(run_id="run.x", workspace="../escape")
+    assert executor.calls == [], "the escape never reached the engine"
