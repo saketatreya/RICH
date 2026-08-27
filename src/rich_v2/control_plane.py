@@ -15,7 +15,7 @@ from uuid import uuid4
 from .budget import RunBudget
 from .compiler import CompiledArchitecture, compile_architecture
 from .interview import AdaptiveInterview, InterviewState
-from .models import ArchitectureSpecV2, ProjectSpecV2
+from .models import ApprovalGate, ArchitectureSpecV2, ProjectSpecV2
 from .planner import ArchitectureProposal, plan_nextjs_architecture
 from .preview import (
     PreviewOrchestrator,
@@ -171,7 +171,7 @@ class ControlPlane:
         )
         approval = self.store.request_approval(
             project_id,
-            gate="product_spec",
+            gate=ApprovalGate.PRODUCT_SPEC.value,
             request={
                 "revision_id": revision.id,
                 "spec_revision": spec.revision,
@@ -273,7 +273,7 @@ class ControlPlane:
     ) -> ProjectSpecV2:
         self._require_approval(
             spec_approval_id,
-            gate="product_spec",
+            gate=ApprovalGate.PRODUCT_SPEC.value,
             project_id=project_id,
             revision_id=spec_revision_id,
         )
@@ -352,7 +352,7 @@ class ControlPlane:
         )
         approval = self.store.request_approval(
             project_id,
-            gate="architecture",
+            gate=ApprovalGate.ARCHITECTURE.value,
             request={
                 "revision_id": revision.id,
                 "spec_revision_id": spec_revision_id,
@@ -372,7 +372,7 @@ class ControlPlane:
     ) -> PreparedRun:
         approved_budget = RunBudget.from_mapping(budget).to_mapping()
         approval = self._require_approval(
-            architecture_approval_id, gate="architecture"
+            architecture_approval_id, gate=ApprovalGate.ARCHITECTURE.value
         )
         request = approval["request"]
         architecture_revision = self.store.get_revision(request["revision_id"])
@@ -682,7 +682,7 @@ class ControlPlane:
             raise ApprovalRequired("approval belongs to a different preview")
         approval = self._require_approval(
             approval_id,
-            gate="preview_deployment",
+            gate=ApprovalGate.PREVIEW_DEPLOYMENT.value,
             project_id=self.store.get_run(preview["run_id"])["project_id"],
         )
         if approval["request"].get("preview_id") != preview_id:

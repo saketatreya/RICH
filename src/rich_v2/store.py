@@ -20,6 +20,7 @@ import tempfile
 from typing import Any
 
 from .canonical import canonical_json_text as _canonical_json
+from .models import ApprovalGate
 from uuid import uuid4
 
 
@@ -955,6 +956,18 @@ class RichStore:
         run_id: str | None = None,
         approval_id: str | None = None,
     ) -> dict[str, Any]:
+        # An approval is only authority if something later asks for it by the
+        # same name. A gate string that matches no known gate would record a
+        # decision at a gate nothing ever checks -- an approval that looks
+        # granted and authorizes nothing, in the one mechanism that must never
+        # fail open.
+        try:
+            gate = ApprovalGate(gate).value
+        except ValueError as exc:
+            raise ValueError(
+                f"unknown approval gate {gate!r}; expected one of "
+                f"{sorted(item.value for item in ApprovalGate)}"
+            ) from exc
         approval_id = approval_id or f"approval_{uuid4().hex}"
         with self._transaction(immediate=True) as conn:
             conn.execute(

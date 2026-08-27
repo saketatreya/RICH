@@ -434,3 +434,22 @@ def test_expired_idempotency_lease_is_recoverable_and_fences_old_owner(tmp_path)
             status_code=200,
             response={"stale": True},
         )
+
+
+def test_an_approval_cannot_be_opened_at_a_gate_nothing_checks(tmp_path):
+    """The gate names the authority. A misspelled one would record a decision
+    that looks granted and authorizes nothing."""
+
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.gates")
+
+    approval = store.request_approval(
+        project["id"], gate="architecture", request={"revision_id": "rev.1"}
+    )
+    assert approval["gate"] == "architecture"
+
+    for unknown in ("architecure", "ARCHITECTURE", "", "spec"):
+        with pytest.raises(ValueError, match="unknown approval gate"):
+            store.request_approval(
+                project["id"], gate=unknown, request={"revision_id": "rev.1"}
+            )
