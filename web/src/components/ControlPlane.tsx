@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  type AcceptanceScenario,
-  type Approval,
   type ArchitectureDraft,
   type ArchitectureSubmission,
   type ExecutionStatus,
@@ -12,43 +10,18 @@ import {
   type RunEvent,
   type ScaffoldResult,
   type SpecSubmission,
-  V2ApiError,
   api,
   type DurableTask,
   type InterviewNeeds,
 } from '../lib/api'
+import ApprovalGate from './ApprovalGate'
 import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
 import PreviewPanel from './PreviewPanel'
 import Inspector from './Inspector'
-
-type RequirementDraft = {
-  id: string
-  title: string
-  statement: string
-}
-
-type ScenarioDraft = {
-  id: string
-  title: string
-  requirementIds: string
-  given: string
-  when: string
-  then: string
-  oracle: string
-}
-
-type IntentDraft = {
-  goal: string
-  audiences: string
-  capabilities: RequirementDraft[]
-  qualityConstraints: RequirementDraft[]
-  scenarios: ScenarioDraft[]
-  roles: string
-  dataPolicy: string
-  integrationFailurePolicy: string
-  concurrencyPolicy: string
-}
+import { RequirementEditor, ScenarioEditor, ScenarioList } from './intent/Editors'
+import type { IntentDraft } from './intent/types'
+import { commaList, errorMessage, lines, shortId, statusClass } from '../lib/format'
 
 type SavedSession = {
   project: Project | null
@@ -140,304 +113,6 @@ function restoreSession(): SavedSession {
   } catch {
     return emptySession
   }
-}
-
-const lines = (value: string) =>
-  value
-    .split('\n')
-    .map((item) => item.trim())
-    .filter(Boolean)
-
-const commaList = (value: string) =>
-  value
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean)
-
-const errorMessage = (error: unknown) =>
-  error instanceof V2ApiError
-    ? `${error.kind}${error.status ? ` (${error.status})` : ''}: ${error.message}`
-    : error instanceof Error
-      ? error.message
-      : String(error)
-
-const shortId = (value: string | null | undefined) =>
-  value ? (value.length > 26 ? `${value.slice(0, 13)}…${value.slice(-8)}` : value) : '—'
-
-const statusClass = (status: string) => {
-  if (['ok', 'approved', 'ready', 'completed'].includes(status)) return 'ok'
-  if (['rejected', 'failed', 'offline'].includes(status)) return 'bad'
-  return 'warn'
-}
-
-function ApprovalGate({
-  title,
-  description,
-  approval,
-  actor,
-  busy,
-  onDecision,
-}: {
-  title: string
-  description: string
-  approval: Approval
-  actor: string
-  busy: boolean
-  onDecision: (approved: boolean) => void
-}) {
-  return (
-    <section className="v2-gate">
-      <div className="v2-gate-icon">{approval.status === 'approved' ? '✓' : '◆'}</div>
-      <div className="v2-gate-main">
-        <div className="v2-section-title">
-          <div>
-            <span className="v2-eyebrow">Human authority</span>
-            <h3>{title}</h3>
-          </div>
-          <span className={`chip ${statusClass(approval.status)}`}>{approval.status}</span>
-        </div>
-        <p>{description}</p>
-        <div className="v2-idline" title={approval.id}>
-          <span>Approval</span>
-          <code>{shortId(approval.id)}</code>
-        </div>
-        {approval.decision && (
-          <div className="v2-decision">
-            Decided by <b>{String(approval.decision.actor || 'unknown')}</b>
-            {approval.decision.reason ? ` · ${String(approval.decision.reason)}` : ''}
-          </div>
-        )}
-        {approval.status === 'requested' && (
-          <div className="v2-actions">
-            <button
-              className="primary"
-              disabled={busy || !actor.trim()}
-              onClick={() => onDecision(true)}
-            >
-              Approve gate
-            </button>
-            <button
-              className="danger"
-              disabled={busy || !actor.trim()}
-              onClick={() => onDecision(false)}
-            >
-              Reject
-            </button>
-          </div>
-        )}
-      </div>
-    </section>
-  )
-}
-
-function RequirementEditor({
-  title,
-  note,
-  items,
-  onChange,
-}: {
-  title: string
-  note: string
-  items: RequirementDraft[]
-  onChange: (items: RequirementDraft[]) => void
-}) {
-  const update = (index: number, patch: Partial<RequirementDraft>) =>
-    onChange(items.map((item, i) => (i === index ? { ...item, ...patch } : item)))
-
-  return (
-    <div className="v2-form-section">
-      <div className="v2-form-section-head">
-        <div>
-          <h4>{title}</h4>
-          <p>{note}</p>
-        </div>
-        <button
-          className="tiny ghost"
-          onClick={() =>
-            onChange([
-              ...items,
-              { id: `req.${items.length + 1}`, title: '', statement: '' },
-            ])
-          }
-        >
-          + Add
-        </button>
-      </div>
-      <div className="v2-editor-list">
-        {items.map((item, index) => (
-          <div className="v2-editor-card" key={`${item.id}-${index}`}>
-            <input
-              aria-label={`${title} ${index + 1} id`}
-              className="mono"
-              value={item.id}
-              onChange={(event) => update(index, { id: event.target.value })}
-              placeholder="req.stable-id"
-            />
-            <input
-              aria-label={`${title} ${index + 1} title`}
-              value={item.title}
-              onChange={(event) => update(index, { title: event.target.value })}
-              placeholder="Observable capability"
-            />
-            <textarea
-              aria-label={`${title} ${index + 1} statement`}
-              value={item.statement}
-              onChange={(event) => update(index, { statement: event.target.value })}
-              placeholder="Describe behavior a user or test can observe."
-            />
-            {items.length > 1 && (
-              <button
-                className="tiny ghost danger v2-remove"
-                aria-label={`Remove ${title} ${index + 1}`}
-                onClick={() => onChange(items.filter((_, i) => i !== index))}
-              >
-                Remove
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function ScenarioEditor({
-  items,
-  onChange,
-}: {
-  items: ScenarioDraft[]
-  onChange: (items: ScenarioDraft[]) => void
-}) {
-  const update = (index: number, patch: Partial<ScenarioDraft>) =>
-    onChange(items.map((item, i) => (i === index ? { ...item, ...patch } : item)))
-
-  return (
-    <div className="v2-form-section">
-      <div className="v2-form-section-head">
-        <div>
-          <h4>Acceptance scenarios</h4>
-          <p>Every requirement needs a Given/When/Then behavioral oracle.</p>
-        </div>
-        <button
-          className="tiny ghost"
-          onClick={() =>
-            onChange([
-              ...items,
-              {
-                id: `scenario.${items.length + 1}`,
-                title: '',
-                requirementIds: '',
-                given: '',
-                when: '',
-                then: '',
-                oracle: JSON.stringify([
-                  { action: 'navigate', value: '/' },
-                  {
-                    action: 'assert_visible',
-                    locator: { kind: 'role', value: 'heading' },
-                  },
-                ], null, 2),
-              },
-            ])
-          }
-        >
-          + Add
-        </button>
-      </div>
-      <div className="v2-editor-list">
-        {items.map((item, index) => (
-          <div className="v2-editor-card v2-scenario-card" key={`${item.id}-${index}`}>
-            <input
-              aria-label={`Scenario ${index + 1} id`}
-              className="mono"
-              value={item.id}
-              onChange={(event) => update(index, { id: event.target.value })}
-              placeholder="scenario.stable-id"
-            />
-            <input
-              aria-label={`Scenario ${index + 1} title`}
-              value={item.title}
-              onChange={(event) => update(index, { title: event.target.value })}
-              placeholder="Scenario title"
-            />
-            <input
-              aria-label={`Scenario ${index + 1} requirement ids`}
-              className="mono"
-              value={item.requirementIds}
-              onChange={(event) => update(index, { requirementIds: event.target.value })}
-              placeholder="req.one, req.two"
-            />
-            <div className="v2-gwt">
-              <label>
-                <span>Given</span>
-                <textarea
-                  value={item.given}
-                  onChange={(event) => update(index, { given: event.target.value })}
-                  placeholder="One condition per line"
-                />
-              </label>
-              <label>
-                <span>When</span>
-                <textarea
-                  value={item.when}
-                  onChange={(event) => update(index, { when: event.target.value })}
-                  placeholder="One action per line"
-                />
-              </label>
-              <label>
-                <span>Then</span>
-                <textarea
-                  value={item.then}
-                  onChange={(event) => update(index, { then: event.target.value })}
-                  placeholder="One observable result per line"
-                />
-              </label>
-            </div>
-            <label className="v2-oracle">
-              <span>Executable browser oracle · approved JSON steps</span>
-              <textarea
-                className="mono"
-                value={item.oracle}
-                onChange={(event) => update(index, { oracle: event.target.value })}
-                placeholder='[{"action":"navigate","value":"/"},{"action":"assert_visible","locator":{"kind":"role","value":"heading"}}]'
-              />
-            </label>
-            {items.length > 1 && (
-              <button
-                className="tiny ghost danger v2-remove"
-                aria-label={`Remove scenario ${index + 1}`}
-                onClick={() => onChange(items.filter((_, i) => i !== index))}
-              >
-                Remove
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function ScenarioList({ scenarios }: { scenarios: AcceptanceScenario[] }) {
-  return (
-    <div className="v2-evidence-grid">
-      {scenarios.map((scenario) => (
-        <article className="v2-evidence-card" key={scenario.id}>
-          <div className="v2-card-top">
-            <code>{scenario.id}</code>
-            <span>{scenario.requirement_ids.join(', ')}</span>
-          </div>
-          <h4>{scenario.title}</h4>
-          <div className="v2-gwt-read">
-            {!!scenario.given.length && <p><b>Given</b> {scenario.given.join(' · ')}</p>}
-            <p><b>When</b> {scenario.when.join(' · ')}</p>
-            <p><b>Then</b> {scenario.then.join(' · ')}</p>
-            <p><b>Oracle</b> {scenario.oracle.length} executable browser steps</p>
-          </div>
-        </article>
-      ))}
-    </div>
-  )
 }
 
 export default function ControlPlane() {
@@ -791,15 +466,80 @@ export default function ControlPlane() {
     setError('')
   }
 
-  const stage = prepared
-    ? 4
-    : architecture
-      ? 3
-      : spec
-        ? 2
-        : project
-          ? 1
-          : 0
+  // Derived from the durable objects rather than a step counter, so a reload
+  // or a resumed run lands on the truth instead of on wherever the session
+  // last was.
+  // Presence is not progress: a spec that exists but is unapproved is not a
+  // finished stage, and the old index-based counter could not say so.
+  const stages: Array<{
+    id: string
+    label: string
+    detail: string
+    state: 'done' | 'active' | 'blocked'
+  }> = [
+    {
+      id: 'stage-project',
+      label: 'Project',
+      detail: project ? project.name : 'Name the workspace',
+      state: project ? 'done' : 'active',
+    },
+    {
+      id: 'stage-intent',
+      label: 'Intent',
+      detail:
+        spec?.approval.status === 'approved'
+          ? 'Specification approved'
+          : spec
+            ? 'Awaiting your approval'
+            : 'Describe the outcomes',
+      state:
+        spec?.approval.status === 'approved'
+          ? 'done'
+          : project
+            ? 'active'
+            : 'blocked',
+    },
+    {
+      id: 'stage-architecture',
+      label: 'Architecture',
+      detail:
+        architecture?.approval.status === 'approved'
+          ? 'Graph approved'
+          : architecture
+            ? 'Review, revise, approve'
+            : 'Design the components',
+      state:
+        architecture?.approval.status === 'approved'
+          ? 'done'
+          : spec?.approval.status === 'approved'
+            ? 'active'
+            : 'blocked',
+    },
+    {
+      id: 'stage-run',
+      label: 'Run',
+      detail: prepared
+        ? `Run ${shortId(prepared.run.id)} · ${prepared.run.status}`
+        : 'Set a budget and prepare',
+      state: prepared
+        ? prepared.run.status === 'succeeded'
+          ? 'done'
+          : 'active'
+        : architecture?.approval.status === 'approved'
+          ? 'active'
+          : 'blocked',
+    },
+    {
+      id: 'stage-preview',
+      label: 'Preview',
+      detail:
+        prepared?.run.status === 'succeeded'
+          ? 'Deploy what was verified'
+          : 'Needs a verified run',
+      state:
+        prepared?.run.status === 'succeeded' ? 'active' : 'blocked',
+    },
+  ]
 
   return (
     <main className="v2-shell">
@@ -827,20 +567,21 @@ export default function ControlPlane() {
 
       <aside className="v2-rail">
         <div className="v2-rail-label">Compilation</div>
-        {[
-          ['01', 'Intent', 'Product truth'],
-          ['02', 'Specification', 'Behavioral oracle'],
-          ['03', 'Architecture', 'Owned boundaries'],
-          ['04', 'Build run', 'Durable execution'],
-          ['05', 'Evidence', 'Scaffold + events'],
-        ].map(([number, label, detail], index) => (
-          <div
-            className={`v2-stage ${stage === index ? 'active' : ''} ${stage > index ? 'done' : ''}`}
-            key={number}
+        {stages.map((item, index) => (
+          <button
+            type="button"
+            className={`v2-stage ${item.state}`}
+            key={item.id}
+            aria-current={item.state === 'active' ? 'step' : undefined}
+            onClick={() =>
+              document
+                .getElementById(item.id)
+                ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }
           >
-            <span>{stage > index ? '✓' : number}</span>
-            <div><b>{label}</b><small>{detail}</small></div>
-          </div>
+            <span>{item.state === 'done' ? '✓' : `0${index + 1}`}</span>
+            <div><b>{item.label}</b><small>{item.detail}</small></div>
+          </button>
         ))}
         <div className="v2-rail-principle">
           <span>Principle</span>
@@ -871,7 +612,7 @@ export default function ControlPlane() {
         )}
 
         <section className="v2-hero">
-          <span className="v2-eyebrow">RICH v2 · local-first control plane</span>
+          <span className="v2-eyebrow">RICH · local-first</span>
           <h1>Compile intent into<br /><em>evidence-backed software.</em></h1>
           <p>
             Define observable outcomes, approve the behavioral contract, inspect the
@@ -879,7 +620,7 @@ export default function ControlPlane() {
           </p>
         </section>
 
-        <section className="v2-panel">
+        <section className="v2-panel" id="stage-project">
           <div className="v2-section-title">
             <div>
               <span className="v2-eyebrow">Workspace</span>
@@ -937,7 +678,7 @@ export default function ControlPlane() {
         </section>
 
         {project && (
-          <section className="v2-panel">
+          <section className="v2-panel" id="stage-intent">
             <div className="v2-section-title">
               <div>
                 <span className="v2-eyebrow">Intent · revision {project.current_revision + 1}</span>
@@ -1124,7 +865,7 @@ export default function ControlPlane() {
 
         {architecture && (
           <>
-            <section className="v2-panel">
+            <section className="v2-panel" id="stage-architecture">
               <div className="v2-section-title">
                 <div>
                   <span className="v2-eyebrow">Architecture · {architecture.architecture.target_pack}</span>
@@ -1194,7 +935,7 @@ export default function ControlPlane() {
               onDecision={decideArchitecture}
             />
             {architecture.approval.status === 'approved' && !prepared && (
-              <section className="v2-panel">
+              <section className="v2-panel" id="stage-run">
                 <div className="v2-section-title">
                   <div>
                     <span className="v2-eyebrow">Budget boundary</span>
@@ -1335,11 +1076,14 @@ export default function ControlPlane() {
         )}
 
         {prepared && (
+          <div id="stage-preview">
           <PreviewPanel
+            key="preview"
             run={prepared.run}
             destination={destination}
             actor={actor}
           />
+          </div>
         )}
 
         {prepared && (

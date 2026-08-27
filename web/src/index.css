@@ -377,15 +377,28 @@ label { font-size: 12px; color: var(--ink-dim); }
   text-transform: uppercase; letter-spacing: .13em;
 }
 .v2-rail-label { margin: 0 0 16px 8px; }
+/* Each stage is now a button that jumps to its section, and its state comes
+   from the durable objects rather than a counter -- so a stage that exists but
+   is unapproved reads as still waiting on you. */
 .v2-stage {
   display: flex; gap: 11px; align-items: center; position: relative;
   min-height: 57px; color: var(--ink-faint);
+  width: 100%; text-align: left; font: inherit;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.v2-stage:hover b { color: var(--ink); }
+.v2-stage.blocked { opacity: .5; cursor: default; }
+.v2-stage.blocked:hover b { color: var(--ink-dim); }
+.v2-stage small {
+  max-width: 168px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
 }
 .v2-stage::after {
   content: ''; position: absolute; top: 39px; bottom: -8px; left: 13px;
   width: 1px; background: var(--border);
 }
-.v2-stage:nth-of-type(6)::after { display: none; }
+.v2-stage:last-of-type::after { display: none; }
 .v2-stage > span {
   display: grid; place-items: center; flex: none; width: 27px; height: 27px;
   border: 1px solid var(--border); border-radius: 50%; background: var(--surface);
