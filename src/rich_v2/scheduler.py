@@ -22,6 +22,7 @@ import threading
 import time
 from typing import Any
 
+from .canonical import canonical_json_bytes as _canonical_json
 from .compiler import CompiledArchitecture, CompiledTask
 from .models import (
     ArchitectureSpecV2,
@@ -329,17 +330,6 @@ class _WorkerResult:
     error_message: str | None = None
 
 
-def _canonical_json(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
 
 
 def _validated_strings(

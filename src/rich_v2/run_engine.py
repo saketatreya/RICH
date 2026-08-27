@@ -49,6 +49,7 @@ from .coding import (
     redact_diagnostics,
     source_transaction_lock,
 )
+from .canonical import canonical_json_bytes
 from .budget import RunBudget
 from .compiler import CompiledArchitecture, CompiledTask, compile_architecture
 from .executor import (
@@ -2634,16 +2635,10 @@ def _is_owned(path: PurePosixPath, owned_paths: Sequence[PurePosixPath]) -> bool
 
 
 def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(
-            dict(value),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
+    # Coerced here rather than in the shared encoder: json.dumps serializes only
+    # dict, and widening the shared form to accept any Mapping would quietly
+    # change what it does with everything else.
+    return canonical_json_bytes(dict(value))
 
 
 def _validated_execution_result(

@@ -18,6 +18,8 @@ from pathlib import Path
 import sqlite3
 import tempfile
 from typing import Any
+
+from .canonical import canonical_json_text as _canonical_json
 from uuid import uuid4
 
 
@@ -144,8 +146,6 @@ def _parsed_timestamp(value: object) -> datetime:
     return timestamp
 
 
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _decode_json(value: str | None) -> Any:

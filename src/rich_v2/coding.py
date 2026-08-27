@@ -27,6 +27,7 @@ import threading
 import time
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 
+from .canonical import canonical_json_text as _canonical_json
 from .compiler import CompiledTask, compile_architecture
 from .models import ArchitectureSpecV2, ProjectSpecV2
 from .providers import GenerationRole, ModelGateway, ModelRequest, ModelResponse
@@ -1205,14 +1206,6 @@ class AtomicSourceWriter:
         )
 
 
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
 
 
 def _read_current_files(
