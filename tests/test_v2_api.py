@@ -793,8 +793,12 @@ class RecordingArchitect:
     def propose(self, spec, *, target_pack, repair=None):
         from rich_v2.planner import plan_nextjs_architecture
 
+        from dataclasses import replace
+
         self.calls.append({"spec": spec.id, "target_pack": target_pack, "repair": repair})
-        proposal = plan_nextjs_architecture(spec)
+        # Stands in for a model, so it reports itself as one; the baseline's own
+        # source is what a fallback looks like and must stay distinguishable.
+        proposal = replace(plan_nextjs_architecture(spec), source="model")
         if self.transform is None:
             return proposal
         return self.transform(proposal)

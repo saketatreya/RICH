@@ -15,7 +15,12 @@ from rich_v2.architect import (
 )
 from rich_v2.compiler import compile_architecture
 from rich_v2.interview import AdaptiveInterview, InterviewState
-from rich_v2.models import ValueType, value_type_from_request, value_type_request_schema
+from rich_v2.models import (
+    ValueType,
+    ValueTypeKind,
+    value_type_from_request,
+    value_type_request_schema,
+)
 from rich_v2.target_packs.typescript_obligations import compile_obligation_suite
 
 
@@ -354,7 +359,7 @@ def test_a_property_with_no_example_to_anchor_it_is_refused():
         assemble(_project(), proposal, target_pack=TARGET_PACK)
 
 
-def test_an_unbounded_type_cannot_back_a_sampled_claim():
+def test_an_unbounded_type_is_fitted_rather_than_refused():
     unbounded = _type(kind="list", element=TASK)
     proposal = copy.deepcopy(_proposal())
     for component in proposal["components"]:
@@ -364,8 +369,50 @@ def test_an_unbounded_type_cannot_back_a_sampled_claim():
                 if operation["name"] == "normalizeTasks":
                     operation["output_type"] = unbounded
 
-    with pytest.raises(ArchitectProposalError, match="no generator can draw from"):
-        assemble(_project(), proposal, target_pack=TARGET_PACK)
+    architecture = assemble(_project(), proposal, target_pack=TARGET_PACK)
+
+    # An unbounded domain is one no property gate can draw from, so it is still
+    # unacceptable -- but the answer is to supply the bound, not to discard the
+    # design. A bound exists for sampling; any finite one serves.
+    for operation in architecture.contract_index["contract:domain"].operations:
+        assert operation.input_type.is_finitely_sampleable
+        assert operation.output_type.is_finitely_sampleable
+    compile_obligation_suite(architecture.contract_index["contract:domain"])
+
+
+def test_a_bound_never_refuses_the_example_that_illustrates_it():
+    # The measured failure, four times in six live proposals: an id typed as
+    # ascii_identifier and then written "task-1", which that set excludes.
+    proposal = copy.deepcopy(_proposal())
+    for component in proposal["components"]:
+        if component["layer"] == "domain":
+            for operation in component["operations"]:
+                operation["input_type"] = _type(
+                    kind="string", min_length=36, max_length=36,
+                    char_set="ascii_identifier",
+                )
+            component["operations"][0]["output_type"] = _type(
+                kind="string", min_length=36, max_length=36,
+                char_set="ascii_identifier",
+            )
+            component["obligations"] = [
+                _obligation(
+                    "example", "normalizeTasks", argument="task-1", result="task-1"
+                ),
+                _obligation("example", "isNormalized", argument="task-1", result=True),
+                _obligation("idempotent", "normalizeTasks", sample_size=32),
+            ]
+
+    architecture = assemble(_project(), proposal, target_pack=TARGET_PACK)
+
+    normalize = architecture.contract_index["contract:domain"].operation_index[
+        "operation:domain:normalizeTasks"
+    ]
+    assert normalize.input_type.accepts("task-1")
+    # And the derived set is the narrowest that admits it, not simply the widest
+    # available -- evidence should tighten a type, not dissolve it.
+    assert normalize.input_type.char_set is not None
+    assert normalize.input_type.char_set.value == "ascii_slug"
 
 
 def test_an_example_that_does_not_inhabit_its_type_is_refused():
@@ -385,8 +432,17 @@ def test_a_predicate_that_does_not_return_a_boolean_is_refused():
             component["operations"][1]["output_type"] = TITLE
             component["obligations"][1]["result"] = "b"
 
-    with pytest.raises(ArchitectProposalError, match="return a boolean"):
-        assemble(_project(), proposal, target_pack=TARGET_PACK)
+    architecture = assemble(_project(), proposal, target_pack=TARGET_PACK)
+
+    # The claim is dropped, not the decomposition. An unexpressible property
+    # weakens the specification -- a claim not made -- and never the guarantee.
+    relations = {
+        obligation.relation.value
+        for obligation in architecture.contract_index["contract:domain"].obligations
+    }
+    assert "establishes" not in relations
+    dropped = architecture.metadata["dropped_obligations"]
+    assert any("return a boolean" in item for item in dropped)
 
 
 def test_an_obligation_naming_an_operation_that_does_not_exist_is_refused():
@@ -410,8 +466,17 @@ def test_totality_over_an_operation_that_declares_no_errors_is_refused():
                 _obligation("total", "normalizeTasks", sample_size=32)
             )
 
-    with pytest.raises(ArchitectProposalError, match="vacuously true"):
-        assemble(_project(), proposal, target_pack=TARGET_PACK)
+    architecture = assemble(_project(), proposal, target_pack=TARGET_PACK)
+
+    relations = {
+        obligation.relation.value
+        for obligation in architecture.contract_index["contract:domain"].obligations
+    }
+    assert "total" not in relations
+    assert any(
+        "vacuously true" in item
+        for item in architecture.metadata["dropped_obligations"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -695,3 +760,318 @@ def test_a_real_model_decomposes_a_product_into_checkable_contracts():
     }
     assert "example" in relations
     assert outcome.usage.cost_usd > Decimal("0")
+
+
+# --------------------------------------------------------------------------
+# The architect must always have an answer. v1's PLAN returns
+# `{"is_leaf": true}` on every failure path because that answer is always
+# structurally valid and always buildable, so a bad plan costs one node rather
+# than the run. This is the architect's equivalent.
+# --------------------------------------------------------------------------
+
+
+class _RefusingProvider:
+    """A provider whose every answer fails assembly, for any reason at all."""
+
+    name = "anthropic-claude-code"
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = 0
+
+    def generate(self, request):
+        from decimal import Decimal
+
+        from rich_v2.budget import Usage
+        from rich_v2.providers import ModelResponse
+
+        self.calls += 1
+        return ModelResponse(
+            text=json.dumps(self.payload),
+            parsed=self.payload,
+            provider=self.name,
+            model=request.model,
+            usage=Usage(
+                model_attempts=1,
+                input_tokens=10,
+                output_tokens=10,
+                cost_usd=Decimal("0.01"),
+                execution_seconds=0.1,
+            ),
+        )
+
+
+def _gateway_for(provider):
+    from decimal import Decimal
+
+    from rich_v2.budget import BudgetLedger, RunBudget
+    from rich_v2.providers import ModelGateway
+
+    return ModelGateway(
+        [provider],
+        BudgetLedger(
+            RunBudget(
+                max_model_attempts=8,
+                max_input_tokens=400_000,
+                max_output_tokens=200_000,
+                max_cost_usd=Decimal("5"),
+                max_execution_seconds=3_600,
+            )
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "because"),
+    [
+        ({"components": []}, "no components at all"),
+        ({"rationale": "x"}, "no components key"),
+        (
+            {
+                "rationale": "x",
+                "components": [
+                    {
+                        "layer": "domain",
+                        "purpose": "p",
+                        "requirement_ids": ["req.todo"],
+                        "operations": [
+                            _operation("normalizeTasks", TASK_LIST, TASK_LIST)
+                        ],
+                        "obligations": [],
+                    }
+                ],
+            },
+            "a missing required layer",
+        ),
+    ],
+)
+def test_an_unassemblable_answer_degrades_to_the_baseline_instead_of_raising(
+    payload, because
+):
+    from decimal import Decimal
+
+    from rich_v2.architect import FALLBACK_SOURCE, propose_architecture
+
+    project = _project()
+    provider = _RefusingProvider(payload)
+
+    outcome = propose_architecture(
+        project,
+        gateway=_gateway_for(provider),
+        provider=provider.name,
+        model="claude-sonnet-5",
+        target_pack=TARGET_PACK,
+        run_id="run.fallback",
+        task_id="run.fallback:t",
+        correlation_id="fallback",
+        max_cost_usd=Decimal("1"),
+        max_attempts=2,
+    )
+
+    # Never an exception: a surface whose whole purpose is to give a human
+    # something to react to cannot answer a mechanical slip with a stack trace.
+    assert outcome.source == FALLBACK_SOURCE, because
+    outcome.architecture.validate_against_project(project)
+    compile_architecture(outcome.architecture, project)
+    # And it is legible: the reviewer gets the baseline *and* what went wrong.
+    assert outcome.rejections
+    assert outcome.attempts == 2
+    assert provider.calls == 2
+
+
+def test_a_fallback_reaches_the_draft_labelled_as_one():
+    from decimal import Decimal
+
+    from rich_v2.architect import FALLBACK_SOURCE, ModelArchitect
+
+    provider = _RefusingProvider({"components": []})
+    architect = ModelArchitect(
+        gateway_factory=lambda: _gateway_for(provider),
+        provider=provider.name,
+        model="claude-sonnet-5",
+        max_cost_usd=Decimal("1"),
+    )
+
+    proposal = architect.propose(_project(), target_pack=TARGET_PACK)
+
+    assert proposal.source == FALLBACK_SOURCE
+    assert proposal.risks, "the rejections must survive as reviewer-visible risks"
+
+
+def test_a_successful_proposal_is_still_marked_as_the_model_s():
+    from rich_v2.architect import MODEL_SOURCE, assemble
+
+    architecture = assemble(_project(), _proposal(), target_pack=TARGET_PACK)
+
+    # assemble() is the pure path; provenance is attached by the caller that
+    # knows who answered.
+    assert architecture.metadata["source"] == "model_architect"
+    assert MODEL_SOURCE == "model"
+
+
+# --------------------------------------------------------------------------
+# The measured rejection census, turned into a regression suite. Each of these
+# aborted a real proposal; none was a design mistake.
+# --------------------------------------------------------------------------
+
+
+def test_an_operand_slot_the_relation_cannot_hold_is_nulled_not_refused():
+    proposal = copy.deepcopy(_proposal())
+    for component in proposal["components"]:
+        if component["layer"] == "domain":
+            # The schema requires witness/predicate/guard on every obligation,
+            # so filling one in on an `example` is answering the shape given.
+            component["obligations"][0]["predicate"] = "isNormalized"
+            component["obligations"][0]["guard"] = "isNormalized"
+            component["obligations"][2]["witness"] = "isNormalized"
+
+    architecture = assemble(_project(), proposal, target_pack=TARGET_PACK)
+
+    by_id = architecture.contract_index["contract:domain"].obligation_index
+    example = next(
+        item for item in by_id.values() if item.relation.value == "example"
+    )
+    idempotent = next(
+        item for item in by_id.values() if item.relation.value == "idempotent"
+    )
+    assert example.predicate_operation_id is None
+    assert example.guard_operation_id is None
+    assert idempotent.witness_operation_id is None
+
+
+def test_an_error_code_is_normalised_rather_than_refused():
+    proposal = copy.deepcopy(_proposal())
+    for component in proposal["components"]:
+        if component["layer"] == "domain":
+            component["operations"][0]["errors"] = [
+                {"code": "NOT FOUND", "description": "Missing."},
+                {"code": "NOT FOUND", "description": "Also missing."},
+                {"code": "", "description": "Unnamed."},
+            ]
+
+    architecture = assemble(_project(), proposal, target_pack=TARGET_PACK)
+
+    codes = [
+        error.code
+        for error in architecture.contract_index["contract:domain"]
+        .operation_index["operation:domain:normalizeTasks"]
+        .errors
+    ]
+    # A spelling difference, not a design one -- and duplicates get an index
+    # rather than discarding the whole proposal.
+    assert codes[0] == "NOT_FOUND"
+    assert len(set(codes)) == 3
+
+
+def test_a_slot_the_kind_cannot_carry_is_dropped():
+    from rich_v2.models import value_type_from_request
+
+    # A bound on a boolean is a bookkeeping slip; refusing the proposal over it
+    # buys nothing, and the slot carries no meaning for that kind anyway.
+    value_type = value_type_from_request(
+        {"kind": "boolean", "minimum": 0, "max_length": 12, "members": ["a"]}
+    )
+
+    assert value_type == ValueType(kind=ValueTypeKind.BOOLEAN)
+
+
+def test_an_inverted_range_is_transposed():
+    from rich_v2.models import value_type_from_request
+
+    value_type = value_type_from_request(
+        {"kind": "integer", "minimum": 9, "maximum": 0}
+    )
+
+    assert (value_type.minimum, value_type.maximum) == (0, 9)
+
+
+def test_an_oversized_bound_is_clamped_rather_than_refused():
+    from rich_v2.models import MAX_VALUE_LENGTH, value_type_from_request
+
+    value_type = value_type_from_request(
+        {"kind": "string", "max_length": MAX_VALUE_LENGTH * 10}
+    )
+
+    assert value_type.max_length == MAX_VALUE_LENGTH
+
+
+def test_a_malformed_record_fields_value_does_not_crash_the_architect():
+    from rich_v2.models import ModelValidationError, value_type_from_request
+
+    # This raised TypeError before, which the repair loop does not catch, so a
+    # bookkeeping slip aborted the run instead of being fed back.
+    with pytest.raises(ModelValidationError):
+        value_type_from_request({"kind": "record", "record_fields": 5})
+
+
+def test_the_schema_makes_an_unknown_requirement_id_unrepresentable():
+    project = _project()
+
+    schema = architect_response_schema(project)
+
+    ids = schema["properties"]["components"]["items"]["properties"][
+        "requirement_ids"
+    ]
+    assert ids["items"]["enum"] == ["req.a11y", "req.todo"]
+    assert ids["minItems"] == 1
+
+
+def test_the_schema_constrains_operand_slots_to_operation_names():
+    schema = architect_response_schema()
+    obligation = schema["properties"]["components"]["items"]["properties"][
+        "obligations"
+    ]["items"]["properties"]
+
+    # A live proposal put a prose sentence in the guard slot. A bare string
+    # type invites exactly that.
+    for slot in ("witness", "predicate", "guard"):
+        assert "pattern" in obligation[slot]["anyOf"][0]
+    assert "pattern" in obligation["operation"]
+
+
+def test_the_schema_no_longer_asks_for_anything_derivable():
+    from rich_v2.models import value_type_request_schema
+
+    slots = value_type_request_schema(3)["properties"]
+
+    # Five of six measured failures were a declared bound refusing its own
+    # example. The slots are still on ValueType; they are simply not asked for.
+    for derivable in ("minimum", "maximum", "min_length", "max_length", "char_set"):
+        assert derivable not in slots
+    assert "kind" in slots and "members" in slots
+
+
+def test_every_surviving_obligation_is_still_fully_checked():
+    """Dropping weakens the spec, never the guarantee."""
+
+    proposal = copy.deepcopy(_proposal())
+    for component in proposal["components"]:
+        if component["layer"] == "domain":
+            # One good claim, one the vocabulary cannot express.
+            component["operations"].append(
+                _operation("summarise", TASK_LIST, MARKUP)
+            )
+            component["obligations"].extend(
+                [
+                    _obligation("example", "summarise", argument=[], result=""),
+                    _obligation(
+                        "establishes",
+                        "summarise",
+                        predicate="isNormalized",
+                        sample_size=16,
+                    ),
+                ]
+            )
+
+    architecture = assemble(_project(), proposal, target_pack=TARGET_PACK)
+    contract = architecture.contract_index["contract:domain"]
+
+    # The unexpressible one is gone; the sound one survives untouched, and the
+    # contract still passes every validator including anti-vacuity.
+    assert architecture.metadata["dropped_obligations"]
+    assert any(
+        obligation.relation.value == "establishes"
+        and obligation.subject_operation_id.endswith("normalizeTasks")
+        for obligation in contract.obligations
+    )
+    compile_obligation_suite(contract)

@@ -48,6 +48,7 @@ from .models import (
     ModelValidationError,
     NodeKind,
     ObligationExample,
+    OBLIGATION_SLOTS,
     ObligationRelation,
     ObligationTier,
     OperationContract,
@@ -60,7 +61,7 @@ from .models import (
     value_type_from_request,
     value_type_request_schema,
 )
-from .planner import ArchitectureProposal
+from .planner import ArchitectureProposal, plan_nextjs_architecture
 from .providers import GenerationRole, ModelGateway, ModelRequest
 
 
@@ -114,6 +115,10 @@ _MAX_OPERATIONS_PER_COMPONENT = 12
 _MAX_COMPONENTS = len(LAYER_NODE_IDS)
 _VALUE_TYPE_DEPTH = 3
 _DEFAULT_SAMPLE_SIZE = 64
+MODEL_SOURCE = "model"
+# The baseline standing in for a model attempt that could not be assembled.
+# Named, because a reviewer must never have to guess which one answered.
+FALLBACK_SOURCE = "planner-fallback"
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,14 +164,21 @@ class DecompositionProposal:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def architect_response_schema() -> dict[str, Any]:
-    """The exact shape a model must answer in."""
+def architect_response_schema(
+    project: ProjectSpecV2 | None = None,
+) -> dict[str, Any]:
+    """The exact shape a model must answer in.
+
+    Given the project, requirement ids become an enum, so naming one that does
+    not exist stops being a rejection and becomes unrepresentable. Everything
+    else here is the same idea applied where a decoder can carry it.
+    """
 
     value_type = value_type_request_schema(_VALUE_TYPE_DEPTH)
     operation = {
         "type": "object",
         "properties": {
-            "name": {"type": "string"},
+            "name": {"type": "string", "pattern": _OPERATION_NAME.pattern},
             "description": {"type": "string"},
             "input_type": value_type,
             "output_type": value_type,
@@ -193,17 +205,25 @@ def architect_response_schema() -> dict[str, Any]:
                 "type": "string",
                 "enum": [member.value for member in ObligationRelation],
             },
-            "operation": {"type": "string"},
-            "witness": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-            "predicate": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-            "guard": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            # Operation names, not free text. A live proposal put a whole
+            # prose sentence in the guard slot, which a string type invites and
+            # an operand slot should never accept.
+            "operation": {"type": "string", "pattern": _OPERATION_NAME.pattern},
+            "witness": _nullable_name(),
+            "predicate": _nullable_name(),
+            "guard": _nullable_name(),
             # An example's argument and result are arbitrary JSON, which no
             # schema here can constrain -- the operation's own declared type is
             # what decides whether they inhabit it, and that check happens in
             # the contract constructor rather than the decoder.
             "argument": {},
             "result": {},
-            "sample_size": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+            "sample_size": {
+                "anyOf": [
+                    {"type": "integer", "minimum": 1, "maximum": MAX_SAMPLE_SIZE},
+                    {"type": "null"},
+                ]
+            },
         },
         "required": [
             "relation",
@@ -223,6 +243,8 @@ def architect_response_schema() -> dict[str, Any]:
             "rationale": {"type": "string"},
             "components": {
                 "type": "array",
+                "minItems": 1,
+                "maxItems": _MAX_COMPONENTS,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -233,9 +255,15 @@ def architect_response_schema() -> dict[str, Any]:
                         "purpose": {"type": "string"},
                         "requirement_ids": {
                             "type": "array",
-                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "items": _requirement_id_schema(project),
                         },
-                        "operations": {"type": "array", "items": operation},
+                        "operations": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": _MAX_OPERATIONS_PER_COMPONENT,
+                            "items": operation,
+                        },
                         "obligations": {"type": "array", "items": obligation},
                     },
                     "required": [
@@ -252,6 +280,21 @@ def architect_response_schema() -> dict[str, Any]:
         "required": ["rationale", "components"],
         "additionalProperties": False,
     }
+
+
+def _nullable_name() -> dict[str, Any]:
+    return {
+        "anyOf": [
+            {"type": "string", "pattern": _OPERATION_NAME.pattern},
+            {"type": "null"},
+        ]
+    }
+
+
+def _requirement_id_schema(project: ProjectSpecV2 | None) -> dict[str, Any]:
+    if project is None:
+        return {"type": "string"}
+    return {"type": "string", "enum": sorted(project.requirement_index)}
 
 
 def decode_proposal(document: Mapping[str, Any]) -> DecompositionProposal:
@@ -439,8 +482,11 @@ def compile_decomposition(
     layers = sorted(by_layer, key=ordering.index)
     # Contracts first: a port describes what crosses a boundary, so the
     # provider's entry type has to exist before the consumer's port can name it.
+    skipped: list[str] = []
     contracts_by_layer = {
-        layer: _component_contract(project, by_layer[layer], LAYER_NODE_IDS[layer])
+        layer: _component_contract(
+            project, by_layer[layer], LAYER_NODE_IDS[layer], skipped
+        )
         for layer in layers
     }
     dependencies = tuple(
@@ -546,6 +592,9 @@ def compile_decomposition(
         metadata={
             "source": "model_architect",
             "rationale": proposal.rationale,
+            # What the vocabulary could not express, kept where a reviewer will
+            # see it rather than silently discarded.
+            "dropped_obligations": list(skipped),
         },
     )
     architecture.validate_against_project(project)
@@ -607,29 +656,32 @@ def _root_contract(project: ProjectSpecV2) -> ContractV2:
 
 
 def _component_contract(
-    project: ProjectSpecV2, component: ComponentProposal, node_id: str
+    project: ProjectSpecV2,
+    component: ComponentProposal,
+    node_id: str,
+    skipped: list[str] | None = None,
 ) -> ContractV2:
+    skipped = skipped if skipped is not None else []
     operations: list[OperationContract] = []
     by_name: dict[str, OperationContract] = {}
     requirement_ids = tuple(sorted(set(component.requirement_ids)))
+    # Fit each operation's types to the examples this component declares for it,
+    # before the contract is built. The declared bound and the declared example
+    # are two guesses at one intent; the example is the one that carries it.
+    arguments, results = _example_values(component)
     for proposed in component.operations:
+        input_type = proposed.input_type.fitted_to(arguments.get(proposed.name, ()))
+        output_type = proposed.output_type.fitted_to(results.get(proposed.name, ()))
         operation = OperationContract(
             id=f"operation:{node_id}:{proposed.name}",
             name=proposed.name,
             description=proposed.description or proposed.name,
-            input_schema=proposed.input_type.json_schema(),
-            output_schema=proposed.output_type.json_schema(),
+            input_schema=input_type.json_schema(),
+            output_schema=output_type.json_schema(),
             requirement_ids=requirement_ids,
-            input_type=proposed.input_type,
-            output_type=proposed.output_type,
-            errors=tuple(
-                ErrorContract(
-                    id=f"error:{node_id}:{proposed.name}:{index}",
-                    code=error.code or f"ERROR_{index}",
-                    description=error.description or "Unspecified failure.",
-                )
-                for index, error in enumerate(proposed.errors)
-            ),
+            input_type=input_type,
+            output_type=output_type,
+            errors=_error_contracts(node_id, proposed),
         )
         operations.append(operation)
         by_name[proposed.name] = operation
@@ -638,6 +690,10 @@ def _component_contract(
         _obligation(proposed, by_name, node_id, requirement_ids, index)
         for index, proposed in enumerate(component.obligations)
     ]
+    obligations, dropped = _typeable_obligations(
+        node_id, tuple(operations), tuple(obligations)
+    )
+    skipped.extend(dropped)
     invariants = tuple(
         Invariant(
             id=f"invariant:{node_id}:{_fragment(requirement_id)}",
@@ -656,6 +712,101 @@ def _component_contract(
         obligations=tuple(obligations),
         metadata={"purpose": component.purpose} if component.purpose else {},
     )
+
+
+def _typeable_obligations(
+    node_id: str,
+    operations: tuple[OperationContract, ...],
+    obligations: tuple[ProofObligation, ...],
+) -> tuple[list[ProofObligation], list[str]]:
+    """Keep the claims that type-check; report the ones that do not.
+
+    Some claims a model wants to make are simply outside this vocabulary. It
+    reaches for "the title of the created task is valid" and the relations only
+    offer "the whole output is valid", so the predicate cannot accept what it
+    judges. That is a limit of the language, not an error in the design, and
+    discarding a whole decomposition over one unexpressible property trades
+    something valuable for something that was never going to work.
+
+    Dropping weakens the specification and never the guarantee: an obligation
+    that is not recorded is a claim not made, every obligation that survives is
+    fully checked, and anti-vacuity only gets easier as constrained operations
+    are removed. The drops are returned so a reviewer sees what was lost.
+    """
+
+    kept = list(obligations)
+    dropped: list[str] = []
+    # Bounded by the obligation count: each pass removes at most one, and the
+    # real validator -- not a copy of its rules -- decides.
+    for _ in range(len(obligations) + 1):
+        try:
+            ContractV2(id=f"contract:{node_id}", node_id=node_id,
+                       operations=operations, obligations=tuple(kept))
+        except ModelValidationError as exc:
+            message = str(exc)
+            culprit = next(
+                (
+                    item
+                    for item in kept
+                    if item.relation is not ObligationRelation.EXAMPLE
+                    and item.id in message
+                ),
+                None,
+            )
+            if culprit is None:
+                # Nothing identifiable to drop; let the caller's own
+                # construction raise with the real message.
+                return kept, dropped
+            kept.remove(culprit)
+            dropped.append(
+                f"dropped {culprit.relation.value} on "
+                f"{culprit.subject_operation_id.split(':')[-1]}: {message}"
+            )
+            continue
+        break
+    return kept, dropped
+
+
+def _example_values(
+    component: ComponentProposal,
+) -> tuple[dict[str, list[Any]], dict[str, list[Any]]]:
+    """Group a component's example arguments and results by operation name."""
+
+    arguments: dict[str, list[Any]] = {}
+    results: dict[str, list[Any]] = {}
+    for proposed in component.obligations:
+        if proposed.relation is not ObligationRelation.EXAMPLE:
+            continue
+        arguments.setdefault(proposed.operation, []).append(proposed.argument)
+        results.setdefault(proposed.operation, []).append(proposed.result)
+    return arguments, results
+
+
+def _error_contracts(
+    node_id: str, proposed: OperationProposal
+) -> tuple[ErrorContract, ...]:
+    """Normalise error codes rather than refusing them.
+
+    ``ErrorContract`` wants a stable identifier, and a model writes
+    ``"NOT FOUND"``. That is a spelling difference, not a design one, and the
+    same normalisation already exists for requirement fragments.
+    """
+
+    contracts: list[ErrorContract] = []
+    seen: set[str] = set()
+    for index, error in enumerate(proposed.errors):
+        code = re.sub(r"[^A-Za-z0-9._:/-]+", "_", error.code).strip("_").upper()
+        if not code or code in seen:
+            code = f"{code or 'ERROR'}_{index}"
+        seen.add(code)
+        contracts.append(
+            ErrorContract(
+                id=f"error:{node_id}:{proposed.name}:{index}",
+                code=code[:128],
+                description=error.description or "Unspecified failure.",
+            )
+        )
+    return tuple(contracts)
 
 
 def _obligation(
@@ -677,10 +828,11 @@ def _obligation(
         return operation.id
 
     subject = resolve(proposed.operation, "subject")
-    if subject is None:
-        raise ArchitectProposalError(
-            f"obligation on {node_id!r} does not name an operation"
-        )
+    # Which operand slots a relation may carry is a fixed table, not a design
+    # decision -- and the schema requires all three keys on every obligation, so
+    # a model that fills one in on an `example` was answering the shape it was
+    # given. Null the ones this relation cannot hold rather than refusing it.
+    allowed = OBLIGATION_SLOTS[proposed.relation]
     is_example = proposed.relation is ObligationRelation.EXAMPLE
     return ProofObligation(
         id=f"obligation:{node_id}:{proposed.operation}:{proposed.relation.value}:{index}",
@@ -688,9 +840,21 @@ def _obligation(
         subject_operation_id=subject,
         requirement_ids=requirement_ids,
         tier=ObligationTier.SAMPLE,
-        witness_operation_id=resolve(proposed.witness, "witness"),
-        predicate_operation_id=resolve(proposed.predicate, "predicate"),
-        guard_operation_id=resolve(proposed.guard, "guard"),
+        witness_operation_id=(
+            resolve(proposed.witness, "witness")
+            if "witness_operation_id" in allowed
+            else None
+        ),
+        predicate_operation_id=(
+            resolve(proposed.predicate, "predicate")
+            if "predicate_operation_id" in allowed
+            else None
+        ),
+        guard_operation_id=(
+            resolve(proposed.guard, "guard")
+            if "guard_operation_id" in allowed
+            else None
+        ),
         example=(
             ObligationExample(argument=proposed.argument, result=proposed.result)
             if is_example
@@ -864,6 +1028,7 @@ class ArchitectOutcome:
     attempts: int
     rejections: tuple[str, ...]
     usage: Usage
+    source: str = MODEL_SOURCE
 
 
 # The prompt carries the whole approved spec and the response schema carries
@@ -925,7 +1090,7 @@ def propose_architecture(
                 model=model,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                response_schema=architect_response_schema(),
+                response_schema=architect_response_schema(project),
                 max_input_tokens=max_input_tokens,
                 max_output_tokens=max_output_tokens,
                 max_cost_usd=max_cost_usd,
@@ -954,11 +1119,23 @@ def propose_architecture(
             attempts=attempt,
             rejections=tuple(rejections),
             usage=gateway.usage,
+            source=MODEL_SOURCE,
         )
 
-    raise ArchitectProposalError(
-        f"architect produced no valid architecture in {max_attempts} attempts; "
-        f"last rejection: {rejections[-1] if rejections else 'none recorded'}"
+    # No exception. v1's PLAN answers `{"is_leaf": true}` on every failure path
+    # -- parse error, validation error, missing credentials -- because that
+    # answer is always structurally valid and always buildable, so a bad plan
+    # costs one node rather than the run. The architect's equivalent is the
+    # deterministic baseline, which validates by construction. Raising here
+    # made a mechanical slip fatal to a surface whose whole purpose is to give
+    # a human something to react to.
+    return ArchitectOutcome(
+        architecture=plan_nextjs_architecture(project).architecture,
+        rationale="",
+        attempts=max_attempts,
+        rejections=tuple(rejections),
+        usage=gateway.usage,
+        source=FALLBACK_SOURCE,
     )
 
 
@@ -1020,5 +1197,8 @@ class ModelArchitect:
             decisions=(
                 (outcome.rationale,) if outcome.rationale else ()
             ),
+            # The rejections travel as risks so a fallback is legible: the
+            # reviewer sees the baseline *and* what the model got wrong.
             risks=outcome.rejections,
+            source=outcome.source,
         )

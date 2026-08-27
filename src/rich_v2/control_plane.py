@@ -261,7 +261,10 @@ class ControlPlane:
             architecture=architecture,
             decisions=tuple(proposal.decisions),
             risks=tuple(proposal.risks),
-            source="model",
+            # Reported, not assumed. An architect that could not assemble a
+            # design hands back the baseline, and calling that "model" would
+            # be the one lie this surface cannot afford.
+            source=proposal.source,
             rationale=str(architecture.metadata.get("rationale", "")),
         )
 

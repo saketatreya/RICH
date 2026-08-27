@@ -92,6 +92,10 @@ class ArchitectureProposal:
     decisions: tuple[str, ...]
     risks: tuple[str, ...]
     requires_approval: bool = True
+    # Who actually produced this. A template and a model are not
+    # interchangeable, and when a model attempt fails and the baseline stands in
+    # for it, the reviewer has to be told rather than left to guess.
+    source: str = "planner"
 
 
 def plan_nextjs_architecture(project: ProjectSpecV2) -> ArchitectureProposal:

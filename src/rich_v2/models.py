@@ -14,7 +14,7 @@ import json
 import math
 from pathlib import PurePosixPath
 import re
-from typing import Any, Iterable, Mapping, TypeVar
+from typing import Any, Iterable, Mapping, Sequence, TypeVar
 
 
 SCHEMA_VERSION = "2.0"
@@ -1006,6 +1006,12 @@ MAX_VALUE_LENGTH = 65_536
 # question: no gate enumerates a domain that large, and computing the exact
 # integer costs more than the answer is worth.
 _MAX_CARDINALITY_BOUND = 1 << 32
+# Applied when a derived type is still unbounded. Bounds exist so a generator
+# has somewhere to draw from; any finite value serves, and these are wide
+# enough not to distort what the type means.
+DEFAULT_SAMPLED_LENGTH = 256
+DEFAULT_SAMPLED_ITEMS = 8
+DEFAULT_SAMPLED_INTEGER = 1_000_000
 # The intersection of what a JSON object key, a TypeScript property and a Lean
 # structure field all accept without quoting.
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
@@ -1370,6 +1376,103 @@ class ValueType:
                 return reason
         return None
 
+    def fitted_to(self, values: Iterable[Any]) -> "ValueType":
+        """Return a type that admits every one of these values and is sampleable.
+
+        A declared bound and a declared example are two guesses at the same
+        intent, made minutes apart, and when they disagree it is the example
+        that carries the meaning -- the author was showing what the field looks
+        like. Measured over six live proposals, five failed because a bound or
+        character set refused an example the same answer supplied: ids written
+        ``"task-1"`` against a set with no hyphen, a uuid one character under a
+        declared minimum. None was a design mistake.
+
+        So bounds are derived here rather than demanded up front. Widening is
+        the only direction taken -- a type never becomes narrower than declared
+        -- and anything still unbounded afterwards gets a sampling default,
+        because an unbounded domain is one no property gate can draw from.
+        """
+
+        samples = [value for value in values]
+        kind = self.kind
+        if kind is ValueTypeKind.INTEGER:
+            numbers = [
+                value
+                for value in samples
+                if isinstance(value, int) and not isinstance(value, bool)
+            ]
+            low = min([*numbers, self.minimum if self.minimum is not None else 0])
+            high = max([*numbers, self.maximum if self.maximum is not None else 0])
+            return replace(
+                self,
+                minimum=min(low, -DEFAULT_SAMPLED_INTEGER)
+                if self.minimum is None
+                else min(low, self.minimum),
+                maximum=max(high, DEFAULT_SAMPLED_INTEGER)
+                if self.maximum is None
+                else max(high, self.maximum),
+            )
+        if kind is ValueTypeKind.STRING:
+            texts = [value for value in samples if isinstance(value, str)]
+            longest = max([len(text) for text in texts] + [0])
+            shortest = min([len(text) for text in texts] + [longest])
+            max_length = max(
+                longest, self.max_length or 0, DEFAULT_SAMPLED_LENGTH
+            )
+            min_length = (
+                min(self.min_length, shortest)
+                if self.min_length is not None
+                else None
+            )
+            return replace(
+                self,
+                min_length=min_length,
+                max_length=min(max_length, MAX_VALUE_LENGTH),
+                char_set=_narrowest_char_set(texts, self.char_set),
+            )
+        if kind is ValueTypeKind.LIST:
+            assert self.element is not None
+            lists = [value for value in samples if isinstance(value, list)]
+            longest = max([len(item) for item in lists] + [0])
+            items = [entry for item in lists for entry in item]
+            return replace(
+                self,
+                max_length=min(
+                    max(longest, self.max_length or 0, DEFAULT_SAMPLED_ITEMS),
+                    MAX_VALUE_LENGTH,
+                ),
+                element=self.element.fitted_to(items),
+            )
+        if kind is ValueTypeKind.OPTIONAL:
+            assert self.element is not None
+            return replace(
+                self,
+                element=self.element.fitted_to(
+                    [value for value in samples if value is not None]
+                ),
+            )
+        if kind is ValueTypeKind.RECORD:
+            return replace(
+                self,
+                record_fields=tuple(
+                    RecordField(
+                        name=record_field.name,
+                        value_type=record_field.value_type.fitted_to(
+                            [
+                                value[record_field.name]
+                                for value in samples
+                                if isinstance(value, Mapping)
+                                and record_field.name in value
+                            ]
+                        ),
+                    )
+                    for record_field in self.record_fields
+                ),
+            )
+        # boolean and enum carry no bounds; an enum's members are the author's
+        # own vocabulary and widening them would invent product meaning.
+        return self
+
     def json_schema(self) -> dict[str, Any]:
         """Project this type onto JSON Schema.
 
@@ -1481,6 +1584,39 @@ def _type_name(value: Any) -> str:
     }.get(type(value), type(value).__name__)
 
 
+# Narrowest first. A derived set should say as much as the evidence supports:
+# picking `ascii_printable` for a field whose every example is digits throws
+# away a constraint worth keeping.
+_CHAR_SET_PREFERENCE = (
+    CharSet.ASCII_DIGITS,
+    CharSet.ASCII_LETTERS,
+    CharSet.ASCII_ALPHANUMERIC,
+    CharSet.ASCII_IDENTIFIER,
+    CharSet.ASCII_SLUG,
+    CharSet.ASCII_PRINTABLE,
+    CharSet.UNICODE_SAMPLE,
+)
+
+
+def _narrowest_char_set(
+    texts: Sequence[str], declared: CharSet | None
+) -> CharSet | None:
+    """The tightest named set admitting every example, or None if none does.
+
+    ``None`` is a legitimate answer, not a failure: an unconstrained string is
+    still finitely sampleable once it has a length bound, and inventing a set
+    that excluded the author's own example is exactly the bug this replaces.
+    """
+
+    if not texts:
+        return declared
+    characters = set("".join(texts))
+    for candidate in _CHAR_SET_PREFERENCE:
+        if characters <= set(candidate.alphabet):
+            return candidate
+    return None
+
+
 def _bounded(total: int) -> int | None:
     return None if total > _MAX_CARDINALITY_BOUND else total
 
@@ -1521,22 +1657,25 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
 def _value_type_level(depth: int) -> dict[str, Any]:
     scalar_kinds = ["boolean", "integer", "string", "enum"]
     compound_kinds = ["list", "record", "optional"] if depth > 1 else []
+    # Deliberately absent: minimum, maximum, min_length, max_length, char_set.
+    # Every one is derived by ``ValueType.fitted_to`` from the examples the
+    # same answer supplies, because a declared bound and a declared example are
+    # two guesses at one intent and the example is the one carrying meaning.
+    # Five of six measured live failures were a bound refusing its own example.
     properties: dict[str, Any] = {
         "kind": {"type": "string", "enum": scalar_kinds + compound_kinds},
-        "minimum": _nullable({"type": "integer"}),
-        "maximum": _nullable({"type": "integer"}),
-        "min_length": _nullable({"type": "integer"}),
-        "max_length": _nullable({"type": "integer"}),
-        "char_set": _nullable(
-            {"type": "string", "enum": [member.value for member in CharSet]}
-        ),
-        "members": {"type": "array", "items": {"type": "string"}},
+        "members": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": MAX_ENUM_MEMBERS,
+        },
     }
     if depth > 1:
         inner = _value_type_level(depth - 1)
         properties["element"] = _nullable(inner)
         properties["record_fields"] = {
             "type": "array",
+            "maxItems": MAX_RECORD_FIELDS,
             "items": {
                 "type": "object",
                 "properties": {"name": {"type": "string"}, "value_type": inner},
@@ -1570,25 +1709,52 @@ def value_type_from_request(document: Mapping[str, Any]) -> ValueType:
 
     if not isinstance(document, Mapping):
         raise ModelValidationError("value type answer must be an object")
-    trimmed: dict[str, Any] = {}
+    kind = document.get("kind")
+    try:
+        resolved = ValueTypeKind(kind)
+    except (TypeError, ValueError):
+        raise ModelValidationError(
+            f"value type answer requires a known kind, got {kind!r}"
+        ) from None
+    # Slots this kind cannot carry are dropped rather than rejected. An answer
+    # that names a bound on a boolean has made a bookkeeping slip, not a design
+    # one, and refusing the whole proposal over it buys nothing.
+    allowed = _VALUE_TYPE_SLOTS[resolved]
+    trimmed: dict[str, Any] = {"kind": resolved}
     for name, value in document.items():
-        if value in (None, [], ()):
+        if name == "kind" or name not in allowed or value in (None, [], ()):
             continue
         if name == "element":
             trimmed[name] = value_type_from_request(value)
         elif name == "record_fields":
+            if isinstance(value, (str, bytes, Mapping)) or not isinstance(
+                value, Iterable
+            ):
+                continue
             trimmed[name] = tuple(
                 RecordField(
-                    name=str(entry.get("name")),
+                    name=str(entry.get("name", "")),
                     value_type=value_type_from_request(entry.get("value_type", {})),
                 )
                 for entry in value
                 if isinstance(entry, Mapping)
             )
+        elif name in ("min_length", "max_length") and isinstance(value, int):
+            trimmed[name] = max(0, min(int(value), MAX_VALUE_LENGTH))
         else:
             trimmed[name] = value
-    if "kind" not in trimmed:
-        raise ModelValidationError("value type answer requires a kind")
+    # An inverted range is a transposition, and swapping preserves the intent
+    # exactly; refusing it does not.
+    for low, high in (("minimum", "maximum"), ("min_length", "max_length")):
+        first, second = trimmed.get(low), trimmed.get(high)
+        if (
+            isinstance(first, int)
+            and isinstance(second, int)
+            and not isinstance(first, bool)
+            and not isinstance(second, bool)
+            and first > second
+        ):
+            trimmed[low], trimmed[high] = second, first
     return ValueType(**trimmed)
 
 
@@ -1735,7 +1901,7 @@ class ObligationExample:
 
 MAX_SAMPLE_SIZE = 4096
 # Which operand slots each relation may carry, and which it must.
-_OBLIGATION_SLOTS: dict[ObligationRelation, frozenset[str]] = {
+OBLIGATION_SLOTS: dict[ObligationRelation, frozenset[str]] = {
     ObligationRelation.EXAMPLE: frozenset({"example"}),
     ObligationRelation.TOTAL: frozenset({"guard_operation_id"}),
     ObligationRelation.ROUND_TRIP: frozenset({"witness_operation_id"}),
@@ -1817,7 +1983,7 @@ class ProofObligation:
                 "obligation.example must be an ObligationExample"
             )
 
-        allowed = _OBLIGATION_SLOTS[relation]
+        allowed = OBLIGATION_SLOTS[relation]
         for slot in (
             "witness_operation_id",
             "predicate_operation_id",
