@@ -1789,22 +1789,41 @@ class CodingWorker:
         earlier_failures: Sequence[PriorAttemptFailure] = ()
         if self.prior_failures is not None and attempt > 1:
             earlier_failures = tuple(self.prior_failures(task, attempt))
-        prompt = build_task_prompt(
+        # Keyed on the question, not on the coaching. A retry's prompt carries
+        # its predecessor's failures, so a memo recorded under that key could
+        # essentially never be reached again -- memoization would only ever
+        # help a task that succeeded first try, which is the one that needed it
+        # least. The answer that finally works is the answer for this task,
+        # however many attempts it took to find it.
+        canonical = build_task_prompt(
             workspace=self.workspace,
             project=self.project,
             architecture=self.architecture,
             task=task,
             approval=self.approval,
             dependency_summaries=dependency_summaries,
-            prior_failures=earlier_failures,
             limits=self.limits,
         )
         response_schema = file_bundle_schema(self.limits)
         cache_key = generation_cache_key(
-            prompt,
+            canonical,
             provider=self.provider,
             model=self.model,
             response_schema=response_schema,
+        )
+        prompt = (
+            canonical
+            if not earlier_failures
+            else build_task_prompt(
+                workspace=self.workspace,
+                project=self.project,
+                architecture=self.architecture,
+                task=task,
+                approval=self.approval,
+                dependency_summaries=dependency_summaries,
+                prior_failures=earlier_failures,
+                limits=self.limits,
+            )
         )
         remembered = None if self.memo is None else self.memo.get(cache_key)
         reused = remembered is not None

@@ -937,6 +937,57 @@ def test_a_reused_bundle_is_revalidated_not_trusted(tmp_path):
     assert not (tmp_path / "c/packages").exists(), "nothing was written"
 
 
+def test_a_retry_looks_up_the_same_memo_as_a_first_attempt(tmp_path):
+    """The memo answers "what source satisfies this task?". How many attempts
+    it took to find that answer is coaching, not part of the question -- and
+    keying on it would make a memo recorded on a retry unreachable forever."""
+
+    project, architecture, plan, approval = _fixture()
+    task = plan.task_index["web"]
+    asked = []
+
+    def prior_failures(_task, attempt):
+        asked.append(attempt)
+        return [
+            PriorAttemptFailure(
+                attempt=attempt - 1,
+                gate="unit",
+                summary="unit exited with 1",
+                diagnostics=("apps/web/note.tsx(1,1): boom",),
+            )
+        ]
+
+    memo = _Memo()
+    first = CodingWorker(
+        _gateway(RecordingProvider(_valid_bundle())),
+        workspace=_workspace(tmp_path, "one"),
+        project=project, architecture=architecture, approval=approval,
+        provider="fake", model="test-model",
+        dependency_summaries={"domain": "Domain generation completed."},
+        prior_failures=prior_failures, memo=memo,
+    )
+    # A second attempt succeeds and records its answer.
+    _run(first, task, run_id="run.k", attempt=2)
+    (recorded_key,) = memo.entries
+
+    second_provider = RecordingProvider(_valid_bundle())
+    second = CodingWorker(
+        _gateway(second_provider),
+        workspace=_workspace(tmp_path, "two"),
+        project=project, architecture=architecture, approval=approval,
+        provider="fake", model="test-model",
+        dependency_summaries={"domain": "Domain generation completed."},
+        prior_failures=prior_failures, memo=memo,
+    )
+    result = _run(second, task, run_id="run.k2", attempt=1)
+
+    assert asked == [2], "a first attempt has nothing to learn from"
+    assert len(second_provider.requests) == 0, (
+        f"a clean first attempt must find the retry's answer under {recorded_key[:8]}"
+    )
+    assert result.evidence[0].details["generation_reused"] is True
+
+
 def test_a_retry_never_replays_the_answer_that_just_failed(tmp_path):
     """The prompt carries the prior failure, so the key changes with it."""
 
