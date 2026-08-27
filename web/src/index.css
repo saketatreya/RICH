@@ -697,3 +697,37 @@ button.v2-node-card b { font-size: 13px; }
 }
 .v2-repair textarea { width: 100%; }
 .v2-draft-note { margin-top: 12px; font-size: 11px; }
+
+/* Rebuild-one-node: the Canvas's central gesture, finally wired to v2. */
+.v2-inspect-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.v2-inspect-head h3 { margin: 0; }
+button.v2-secondary {
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+button.v2-secondary:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+button.v2-secondary:disabled { opacity: .55; cursor: default; }
+.v2-note {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--verified);
+  background: rgba(47, 211, 160, .09);
+  border: 1px solid rgba(47, 211, 160, .3);
+  border-radius: var(--r-sm);
+  padding: 8px 11px;
+}

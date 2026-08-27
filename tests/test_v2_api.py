@@ -952,3 +952,37 @@ def test_execution_status_reports_a_run_leased_by_another_process(tmp_path):
     assert lease.owner_token not in json.dumps(during.body), (
         "the owner token is the authority to write; a status read must not leak it"
     )
+
+
+def test_node_rebuild_route_forgets_one_node(tmp_path):
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.api.rebuild")
+    store.put_generation_memo(
+        "d" * 64,
+        payload=b'{"schema":"rich.generation-memo/v1","bundle":{"summary":"s","files":[]}}',
+        project_id=project["id"],
+        node_id="web",
+        provider="anthropic",
+        model="claude-sonnet-5",
+        run_id="run.1",
+        task_id="run.1:implement:web",
+    )
+    application = V2Application(store, workspace_root=tmp_path / "workspaces")
+
+    response = application.handle(
+        "POST",
+        f"/v2/projects/{project['id']}/node-rebuilds",
+        body={"node_id": "web"},
+        headers=_headers("rebuild-web"),
+    )
+    missing_key = application.handle(
+        "POST",
+        f"/v2/projects/{project['id']}/node-rebuilds",
+        body={"node_id": "web"},
+        headers={},
+    )
+
+    assert response.status == 200, "nothing is created; permission is withdrawn"
+    assert response.body["rebuild"]["forgotten_generations"] == 1
+    assert store.get_generation_memo("d" * 64) is None
+    assert missing_key.status == 428, "it is a mutation like any other"

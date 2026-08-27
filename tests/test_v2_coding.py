@@ -811,7 +811,10 @@ class _Memo:
         self.reads += 1
         return self.entries.get(cache_key)
 
-    def put(self, cache_key, *, document, node_id, provider, model, run_id, task_id):
+    def put(
+        self, cache_key, *, document, project_id, node_id, provider, model,
+        run_id, task_id,
+    ):
         self.entries[cache_key] = {
             "bundle": document["bundle"],
             "provider": provider,

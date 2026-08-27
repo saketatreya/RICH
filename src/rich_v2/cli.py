@@ -130,6 +130,14 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("source", type=Path)
     migrate.add_argument("--name")
 
+    rebuild = commands.add_parser(
+        "rebuild-node",
+        help="forget one node's remembered generation so the next run redoes it",
+    )
+    rebuild.add_argument("--project", required=True)
+    rebuild.add_argument("--node", required=True)
+    rebuild.add_argument("--architecture-revision")
+
     events = commands.add_parser("events", help="read durable run events")
     events.add_argument("run_id")
     events.add_argument("--after", type=int, default=0)
@@ -297,6 +305,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "source_artifact_digest": imported.source_artifact.digest,
                     "draft": imported.draft.to_dict(),
                 }
+            )
+        elif args.command == "rebuild-node":
+            _print_json(
+                control_plane.rebuild_node(
+                    project_id=args.project,
+                    node_id=args.node,
+                    architecture_revision_id=args.architecture_revision,
+                )
             )
         elif args.command == "events":
             _print_json(

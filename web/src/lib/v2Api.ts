@@ -301,6 +301,13 @@ export interface ScaffoldResult {
   manifest_artifact_digest: string
 }
 
+export interface NodeRebuild {
+  project_id: string
+  node_id: string
+  /** How many remembered generations were dropped for that node. */
+  forgotten_generations: number
+}
+
 export interface ExecutionStatus {
   run_id: string
   status: string
@@ -542,6 +549,28 @@ export const v2Api = {
         risks,
       },
     ),
+
+  /**
+   * Forget one node's remembered generation so the next run recomputes it
+   * rather than replaying what it said last time. Verification is unaffected --
+   * it is never reused in the first place.
+   */
+  rebuildNode: async (
+    projectId: string,
+    nodeId: string,
+    architectureRevisionId?: string,
+  ): Promise<NodeRebuild> =>
+    (
+      await post<{ rebuild: NodeRebuild }>(
+        `/v2/projects/${encodeURIComponent(projectId)}/node-rebuilds`,
+        {
+          node_id: nodeId,
+          ...(architectureRevisionId
+            ? { architecture_revision_id: architectureRevisionId }
+            : {}),
+        },
+      )
+    ).rebuild,
 
   decideApproval: async (
     approvalId: string,

@@ -24,7 +24,7 @@ from .models import ApprovalGate
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _UNSET = object()
 
 _RUN_TRANSITIONS = {
@@ -467,6 +467,19 @@ class RichStore:
                         ON generation_memos(origin_run_id, created_at);
                     INSERT INTO schema_migrations(version, applied_at)
                     VALUES (9, CURRENT_TIMESTAMP);
+                    COMMIT;
+                    """
+                )
+            if 10 not in applied:
+                conn.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+                    ALTER TABLE generation_memos
+                    ADD COLUMN project_id TEXT NOT NULL DEFAULT '';
+                    CREATE INDEX generation_memos_node
+                        ON generation_memos(project_id, node_id);
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (10, CURRENT_TIMESTAMP);
                     COMMIT;
                     """
                 )
@@ -993,6 +1006,7 @@ class RichStore:
         return {
             "cache_key": row["cache_key"],
             "payload_digest": row["payload_digest"],
+            "project_id": row["project_id"],
             "node_id": row["node_id"],
             "provider": row["provider"],
             "model": row["model"],
@@ -1007,6 +1021,7 @@ class RichStore:
         cache_key: str,
         *,
         payload: bytes,
+        project_id: str,
         node_id: str,
         provider: str,
         model: str,
@@ -1024,20 +1039,25 @@ class RichStore:
         artifact = self.put_artifact(
             payload,
             media_type="application/vnd.rich.generation-memo+json",
-            metadata={"cache_key": cache_key, "node_id": node_id},
+            metadata={
+                "cache_key": cache_key,
+                "project_id": project_id,
+                "node_id": node_id,
+            },
         )
         with self._transaction(immediate=True) as conn:
             conn.execute(
                 """
                 INSERT INTO generation_memos(
-                    cache_key, payload_digest, node_id, provider, model,
-                    origin_run_id, origin_task_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    cache_key, payload_digest, project_id, node_id, provider,
+                    model, origin_run_id, origin_task_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cache_key) DO NOTHING
                 """,
                 (
                     cache_key,
                     artifact.digest,
+                    project_id,
                     node_id,
                     provider,
                     model,
@@ -1048,16 +1068,19 @@ class RichStore:
             )
         return artifact.digest
 
-    def forget_generation_memos(self, *, node_id: str) -> int:
-        """Drop every memo for one architecture node.
+    def forget_generation_memos(self, *, project_id: str, node_id: str) -> int:
+        """Drop every memo for one architecture node of one project.
 
         This is the whole of "rebuild this node and mean it": the next run
-        recomputes it rather than replaying what it said last time.
+        recomputes it and replays its siblings. Scoped by project because
+        every project's architecture uses the same layer node ids -- an
+        unscoped forget would silently re-buy every other project's work.
         """
 
         with self._transaction(immediate=True) as conn:
             cursor = conn.execute(
-                "DELETE FROM generation_memos WHERE node_id = ?", (node_id,)
+                "DELETE FROM generation_memos WHERE project_id = ? AND node_id = ?",
+                (project_id, node_id),
             )
         return cursor.rowcount
 

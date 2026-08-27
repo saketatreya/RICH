@@ -1244,7 +1244,11 @@ export default function V2ControlPlane() {
         )}
 
         {prepared && (
-          <V2Inspector runId={prepared.run.id} events={events} />
+          <V2Inspector
+            runId={prepared.run.id}
+            events={events}
+            projectId={project?.id}
+          />
         )}
 
         <section className="v2-authority">

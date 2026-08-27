@@ -388,6 +388,26 @@ class V2Application:
         if (
             len(parts) == 4
             and parts[:2] == ["v2", "projects"]
+            and parts[3] == "node-rebuilds"
+            and method == "POST"
+        ):
+            # 200, not 201: this creates nothing. It withdraws permission to
+            # replay one node's last answer, so the next run recomputes it.
+            return ApiResponse(
+                200,
+                {
+                    "rebuild": self.control_plane.rebuild_node(
+                        project_id=parts[2],
+                        node_id=_required(body, "node_id"),
+                        architecture_revision_id=_optional_string(
+                            body, "architecture_revision_id"
+                        ),
+                    )
+                },
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v2", "projects"]
             and parts[3] == "architecture-revisions"
             and method == "POST"
         ):

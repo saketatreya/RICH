@@ -22,6 +22,8 @@ import {
 interface Props {
   runId: string
   events: RunEvent[]
+  /** Set when the caller knows the project, which rebuilding a node needs. */
+  projectId?: string
 }
 
 type DiffLine = { kind: ' ' | '-' | '+'; text: string }
@@ -89,13 +91,15 @@ function evidenceFor(events: RunEvent[], taskId: string) {
     }))
 }
 
-export default function V2Inspector({ runId, events }: Props) {
+export default function V2Inspector({ runId, events, projectId }: Props) {
   const [tasks, setTasks] = useState<DurableTask[]>([])
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([])
   const [transactions, setTransactions] = useState<SourceTransaction[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [source, setSource] = useState<GeneratedSource | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [rebuilding, setRebuilding] = useState(false)
+  const [rebuilt, setRebuilt] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
@@ -241,7 +245,40 @@ export default function V2Inspector({ runId, events }: Props) {
 
       {selectedTask && (
         <div className="v2-inspect">
-          <h3>{selectedTask.node_id}</h3>
+          <div className="v2-inspect-head">
+            <h3>{selectedTask.node_id}</h3>
+            {projectId && (
+              <button
+                className="v2-secondary"
+                disabled={rebuilding}
+                onClick={async () => {
+                  setRebuilding(true)
+                  setRebuilt(null)
+                  setError(null)
+                  try {
+                    const result = await v2Api.rebuildNode(
+                      projectId,
+                      selectedTask.node_id,
+                    )
+                    setRebuilt(
+                      result.forgotten_generations === 0
+                        ? 'Nothing was remembered for this node; the next run writes it fresh.'
+                        : `Forgot ${result.forgotten_generations} remembered generation(s). The next run rewrites this node and replays the rest.`,
+                    )
+                  } catch (cause) {
+                    setError(
+                      cause instanceof Error ? cause.message : String(cause),
+                    )
+                  } finally {
+                    setRebuilding(false)
+                  }
+                }}
+              >
+                {rebuilding ? 'Marking…' : 'Rebuild this node'}
+              </button>
+            )}
+          </div>
+          {rebuilt && <p className="v2-note">{rebuilt}</p>}
 
           <h4>Evidence</h4>
           <div className="v2-evidence">

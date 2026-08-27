@@ -144,6 +144,50 @@ class ControlPlane:
     def create_project(self, *, project_id: str, name: str) -> dict[str, Any]:
         return self.store.create_project(name, project_id=project_id)
 
+    def rebuild_node(
+        self,
+        *,
+        project_id: str,
+        node_id: str,
+        architecture_revision_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Mark one architecture node stale so the next run regenerates it.
+
+        The Canvas is built around this operation and v2 had no equivalent: its
+        only granularity was the whole run, so correcting one component meant
+        re-paying for every component beside it.
+
+        Forgetting a memo is deliberately all this does. It cannot invalidate
+        evidence, because evidence is not reused in the first place -- every
+        run re-verifies from scratch. What it drops is permission to replay an
+        answer, which is the only thing that was ever carried forward.
+        """
+
+        if not isinstance(node_id, str) or not node_id.strip():
+            raise ValueError("node_id cannot be empty")
+        self.store.get_project(project_id)
+        if architecture_revision_id is not None:
+            revision = self.store.get_revision(architecture_revision_id)
+            if revision.project_id != project_id or revision.kind != "architecture":
+                raise ValueError(
+                    "architecture revision does not belong to the requested project"
+                )
+            architecture = ArchitectureSpecV2.from_dict(revision.document)
+            known = {node.id for node in architecture.nodes}
+            if node_id not in known:
+                raise ValueError(
+                    f"node {node_id!r} is not in that architecture; "
+                    f"expected one of {sorted(known)}"
+                )
+        forgotten = self.store.forget_generation_memos(
+            project_id=project_id, node_id=node_id
+        )
+        return {
+            "project_id": project_id,
+            "node_id": node_id,
+            "forgotten_generations": forgotten,
+        }
+
     def submit_interview(
         self,
         *,

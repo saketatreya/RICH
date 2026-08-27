@@ -334,3 +334,56 @@ def test_preview_request_rejects_source_changed_after_release_evidence(tmp_path)
             neon_project_id="neon-project-1",
             expires_at=datetime.now(timezone.utc) + timedelta(days=1),
         )
+
+
+def test_rebuilding_one_node_forgets_only_that_node(tmp_path):
+    """The Canvas is shaped around this operation; v2's only granularity used
+    to be the whole run."""
+
+    store = RichStore(tmp_path / "state")
+    control_plane = ControlPlane(store)
+    project = store.create_project("Demo", project_id="project.rebuild")
+    for index, node in enumerate(("web", "domain")):
+        store.put_generation_memo(
+            f"{index}" + "c" * 63,
+            payload=b'{"schema":"rich.generation-memo/v1","bundle":{"summary":"s","files":[]}}',
+            project_id=project["id"],
+            node_id=node,
+            provider="anthropic",
+            model="claude-sonnet-5",
+            run_id="run.1",
+            task_id=f"run.1:implement:{node}",
+        )
+
+    result = control_plane.rebuild_node(project_id=project["id"], node_id="web")
+
+    assert result["forgotten_generations"] == 1
+    assert result["node_id"] == "web"
+    assert store.get_generation_memo("0" + "c" * 63) is None
+    assert store.get_generation_memo("1" + "c" * 63) is not None, "sibling kept"
+
+
+def test_rebuilding_an_unknown_node_of_a_known_architecture_is_refused(tmp_path):
+    store = RichStore(tmp_path / "state")
+    control_plane = ControlPlane(store)
+    project, _, architecture = _approved_architecture(control_plane)
+
+    with pytest.raises(ValueError, match="not in that architecture"):
+        control_plane.rebuild_node(
+            project_id=project["id"],
+            node_id="nonexistent",
+            architecture_revision_id=architecture.revision.id,
+        )
+    # Without the architecture named, nothing is claimed about the node.
+    assert (
+        control_plane.rebuild_node(
+            project_id=project["id"], node_id="nonexistent"
+        )["forgotten_generations"]
+        == 0
+    )
+    # And a real node of that architecture is accepted.
+    assert control_plane.rebuild_node(
+        project_id=project["id"],
+        node_id="web",
+        architecture_revision_id=architecture.revision.id,
+    )["node_id"] == "web"

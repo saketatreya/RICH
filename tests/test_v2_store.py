@@ -471,6 +471,7 @@ def test_a_generation_memo_round_trips_and_is_keyed_by_the_request(tmp_path):
     store.put_generation_memo(
         key,
         payload=_memo_payload("first"),
+        project_id="project.demo",
         node_id="web",
         provider="anthropic",
         model="claude-sonnet-5",
@@ -489,6 +490,7 @@ def test_a_generation_memo_round_trips_and_is_keyed_by_the_request(tmp_path):
     store.put_generation_memo(
         key,
         payload=_memo_payload("second"),
+        project_id="project.demo",
         node_id="web",
         provider="anthropic",
         model="claude-sonnet-5",
@@ -507,6 +509,7 @@ def test_forgetting_one_node_leaves_its_siblings_memoized(tmp_path):
         store.put_generation_memo(
             f"{index}" + "0" * 63,
             payload=_memo_payload(node),
+            project_id="project.demo",
             node_id=node,
             provider="anthropic",
             model="claude-sonnet-5",
@@ -514,7 +517,7 @@ def test_forgetting_one_node_leaves_its_siblings_memoized(tmp_path):
             task_id=f"run.1:implement:{node}",
         )
 
-    dropped = store.forget_generation_memos(node_id="web")
+    dropped = store.forget_generation_memos(project_id="project.demo", node_id="web")
 
     assert dropped == 2
     assert store.get_generation_memo("0" + "0" * 63) is None
@@ -529,9 +532,34 @@ def test_a_malformed_cache_key_is_refused(tmp_path):
             store.put_generation_memo(
                 bad,
                 payload=_memo_payload("x"),
+                project_id="project.demo",
                 node_id="web",
                 provider="anthropic",
                 model="claude-sonnet-5",
                 run_id="run.1",
                 task_id="run.1:implement:web",
             )
+
+
+def test_forgetting_a_node_does_not_touch_another_project(tmp_path):
+    """Every project's architecture uses the same layer node ids, so an
+    unscoped forget would silently re-buy other projects' work."""
+
+    store = RichStore(tmp_path / "state")
+    for index, project_id in enumerate(("project.a", "project.b")):
+        store.put_generation_memo(
+            f"{index}" + "f" * 63,
+            payload=_memo_payload("web"),
+            project_id=project_id,
+            node_id="web",
+            provider="anthropic",
+            model="claude-sonnet-5",
+            run_id=f"run.{project_id}",
+            task_id=f"run.{project_id}:implement:web",
+        )
+
+    dropped = store.forget_generation_memos(project_id="project.a", node_id="web")
+
+    assert dropped == 1
+    assert store.get_generation_memo("0" + "f" * 63) is None
+    assert store.get_generation_memo("1" + "f" * 63) is not None

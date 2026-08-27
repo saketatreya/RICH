@@ -716,6 +716,7 @@ class _DurableGenerationMemo:
         cache_key: str,
         *,
         document: Mapping[str, Any],
+        project_id: str,
         node_id: str,
         provider: str,
         model: str,
@@ -725,6 +726,7 @@ class _DurableGenerationMemo:
         self.store.put_generation_memo(
             cache_key,
             payload=canonical_json_bytes(dict(document)),
+            project_id=project_id,
             node_id=node_id,
             provider=provider,
             model=model,
