@@ -211,6 +211,7 @@ class VerificationCommand:
             EvidenceKind.STATIC,
             EvidenceKind.LINT,
             EvidenceKind.UNIT,
+            EvidenceKind.PROPERTY,
             EvidenceKind.BUILD,
             EvidenceKind.ACCEPTANCE,
         }:
@@ -446,6 +447,7 @@ class RunEngineConfig:
     lint_argv: tuple[str, ...] = ("pnpm", "run", "lint")
     static_argv: tuple[str, ...] = ("pnpm", "run", "typecheck")
     unit_argv: tuple[str, ...] = ("pnpm", "run", "test")
+    property_argv: tuple[str, ...] = ("pnpm", "run", "test:properties")
     build_argv: tuple[str, ...] = ("pnpm", "run", "build")
     acceptance_argv: tuple[str, ...] = ("pnpm", "run", "test:e2e")
     max_verification_log_bytes: int = 256 * 1024
@@ -496,6 +498,7 @@ class RunEngineConfig:
             "lint_argv",
             "static_argv",
             "unit_argv",
+            "property_argv",
             "build_argv",
             "acceptance_argv",
         ):
@@ -869,6 +872,12 @@ class _VerifiedCodingHandler:
         self.project = project
         self.root_node_id = root_node_id
         self.config = config
+        # Gate the gate on the scaffold actually holding suites: a property run
+        # over an empty directory passes, and a passing check that checked
+        # nothing is the failure mode this whole design exists to avoid.
+        self._has_property_suite = any(
+            (workspace / "tests" / "properties").glob("*.test.ts")
+        ) if (workspace / "tests" / "properties").is_dir() else False
 
     def __call__(self, context: TaskContext) -> TaskResult:
         if context.is_cancelled:
@@ -901,6 +910,16 @@ class _VerifiedCodingHandler:
             VerificationCommand(EvidenceKind.STATIC.value, self.config.static_argv),
             VerificationCommand(EvidenceKind.UNIT.value, self.config.unit_argv),
         ]
+        # The obligations an approved contract declares, executed. Without this
+        # the architect emits claims that nothing ever checks, which reads like
+        # assurance and is not. Runs on every task, because a node's own
+        # contract is a node's own business.
+        if self._has_property_suite:
+            commands.append(
+                VerificationCommand(
+                    EvidenceKind.PROPERTY.value, self.config.property_argv
+                )
+            )
         if is_root:
             commands = [
                 VerificationCommand(

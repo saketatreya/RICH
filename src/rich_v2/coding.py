@@ -715,6 +715,12 @@ def is_protected_generation_path(path: PurePosixPath) -> bool:
         (".rich", "target-pack.json"),
     }:
         return True
+    # The pinned operations interface sits inside the domain node's ownership,
+    # because that is where it has to be importable from. Without this it would
+    # be the one protected input a worker could legally rewrite -- editing the
+    # shape it is being held to instead of implementing it.
+    if path.parts == ("packages", "contracts", "src", "operations.ts"):
+        return True
     lowered = path.name.lower()
     if (
         ".test." in lowered
@@ -1323,6 +1329,40 @@ def _read_current_files(
     return records, included_bytes
 
 
+
+OPERATIONS_INTERFACE_PATH = "packages/contracts/src/operations.ts"
+OPERATIONS_IMPLEMENTATION_PATH = "packages/domain/src/operations.ts"
+
+
+def _pinned_operations(
+    root: Path, task: CompiledTask, limits: CodingLimits
+) -> str | None:
+    """Return the operations interface, but only to the task that implements it.
+
+    The interface is a protected input the worker cannot write and, being
+    scoped out of current_files, could not otherwise read. A task told to
+    satisfy a contract without being shown the surface it must export would
+    fail the typecheck for a reason it was never given.
+    """
+
+    implementation = PurePosixPath(OPERATIONS_IMPLEMENTATION_PATH)
+    if not _is_owned(implementation, task.owned_paths):
+        return None
+    source = root / OPERATIONS_INTERFACE_PATH
+    try:
+        if not source.is_file():
+            return None
+        content = source.read_bytes()
+    except OSError:
+        return None
+    if len(content) > limits.max_current_file_bytes:
+        return None
+    try:
+        return content.decode("utf-8")
+    except UnicodeError:
+        return None
+
+
 def build_task_prompt(
     *,
     workspace: str | os.PathLike[str],
@@ -1384,6 +1424,7 @@ def build_task_prompt(
 
     root = _assert_workspace(Path(workspace))
     current_files, _ = _read_current_files(root, task.owned_paths, limits)
+    obligation_surface = _pinned_operations(root, task, limits)
     requirement_ids = set(task.requirement_ids)
     relevant_node_ids = {
         task.node_id,
@@ -1444,6 +1485,11 @@ def build_task_prompt(
             ],
         },
         "dependency_summaries": normalized_summaries,
+        **(
+            {"pinned_operations_interface": obligation_surface}
+            if obligation_surface
+            else {}
+        ),
         # Independently observed gate output from earlier attempts, redacted to
         # what this task may read.  Verification stays out of process and the
         # worker still cannot declare itself correct -- this only stops it from
@@ -1470,6 +1516,19 @@ def build_task_prompt(
         "or acceptance scenarios passed. Do not modify files merely to summarize "
         "work."
     )
+    surface_guidance = (
+        ""
+        if not obligation_surface
+        else (
+            "This task owns the module that implements the pinned operations "
+            "interface. Export a const named `operations` from "
+            f"{OPERATIONS_IMPLEMENTATION_PATH!r} that satisfies the interface "
+            "given under pinned_operations_interface exactly. The proof "
+            "obligations your contract declares are executed against it, so a "
+            "missing or mis-shaped export fails the build before any of them "
+            "run.\n"
+        )
+    )
     retry_guidance = (
         ""
         if not recent_failures
@@ -1486,6 +1545,7 @@ def build_task_prompt(
     user_prompt = (
         "Produce the smallest coherent source change for this task. The control "
         "plane will validate and apply it, and separate workers will verify it.\n"
+        + surface_guidance
         + retry_guidance
         + _canonical_json(context)
     )

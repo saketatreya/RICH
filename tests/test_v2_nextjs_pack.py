@@ -31,8 +31,8 @@ def _pack(
     )
 
 
-def _approved_pack(*, architecture=None) -> NextJsTargetPack:
-    project = ProjectSpecV2(
+def _approved_project() -> ProjectSpecV2:
+    return ProjectSpecV2(
         id="project.ownership",
         name="Owned application",
         goal="Persist approved records in a database.",
@@ -65,6 +65,10 @@ def _approved_pack(*, architecture=None) -> NextJsTargetPack:
             ),
         ),
     )
+
+
+def _approved_pack(*, architecture=None) -> NextJsTargetPack:
+    project = _approved_project()
     approved_architecture = (
         architecture or plan_nextjs_architecture(project).architecture
     )
@@ -500,3 +504,119 @@ def test_infrastructure_allowlist_is_exact_and_rejects_traversal(monkeypatch):
     monkeypatch.setattr(nextjs_target, "_intent_files", add_traversal)
     with pytest.raises(TargetPackError, match="escapes the scaffold"):
         _approved_pack().render_files()
+
+
+def _architecture_with_obligations():
+    """The planner's own architecture, plus one claim beyond a ground example.
+
+    Built by extension rather than replacement: the domain node's ports name
+    the planner's operations, so swapping its contract out would break the
+    architecture before the pack ever saw it.
+    """
+
+    from rich_v2.models import (
+        ObligationExample,
+        ObligationRelation,
+        ObligationTier,
+        OperationContract,
+        ProofObligation,
+        ValueType,
+        ValueTypeKind,
+    )
+
+    project = _approved_project()
+    base = plan_nextjs_architecture(project).architecture
+    text = ValueType(kind=ValueTypeKind.STRING, max_length=64)
+    normalize = OperationContract(
+        id="operation:domain:normalizeTitle",
+        name="normalizeTitle",
+        description="Normalize a record title.",
+        requirement_ids=("req.records",),
+        input_schema=text.json_schema(),
+        output_schema=text.json_schema(),
+        input_type=text,
+        output_type=text,
+    )
+    extra = (
+        ProofObligation(
+            id="obligation:domain:normalize:example",
+            subject_operation_id=normalize.id,
+            relation=ObligationRelation.EXAMPLE,
+            tier=ObligationTier.SAMPLE,
+            requirement_ids=("req.records",),
+            example=ObligationExample(argument="  Record  ", result="Record"),
+        ),
+        ProofObligation(
+            id="obligation:domain:normalize:idempotent",
+            subject_operation_id=normalize.id,
+            relation=ObligationRelation.IDEMPOTENT,
+            tier=ObligationTier.SAMPLE,
+            requirement_ids=("req.records",),
+            sample_size=16,
+        ),
+    )
+    contracts = tuple(
+        replace(
+            contract,
+            operations=contract.operations + (normalize,),
+            obligations=contract.obligations + extra,
+        )
+        if contract.node_id == "domain"
+        else contract
+        for contract in base.contracts
+    )
+    return project, replace(base, contracts=contracts)
+
+
+def test_a_contract_with_obligations_scaffolds_a_runnable_property_gate(tmp_path):
+    project, architecture = _architecture_with_obligations()
+    pack = NextJsTargetPack(
+        NextJsTargetPackConfig(
+            project_name="owned-application",
+            project_spec=project,
+            architecture=architecture,
+        )
+    )
+    manifest = pack.scaffold(tmp_path / "workspace")
+    paths = {item.path for item in manifest.files}
+
+    assert "tests/properties/rich-value-generator.ts" in paths
+    assert "packages/contracts/src/operations.ts" in paths
+    suites = [p for p in paths if p.startswith("tests/properties/") and p.endswith(".test.ts")]
+    assert suites, "the declared obligation must become a suite"
+
+    interface = (tmp_path / "workspace/packages/contracts/src/operations.ts").read_text()
+    assert "export interface Operations" in interface
+    assert "normalizeTitle" in interface
+    domain = (tmp_path / "workspace/tests/properties/contract-domain.test.ts").read_text()
+    assert "obligation:domain:normalize:idempotent" in domain
+    assert "casesFor(" in domain, "a sampled relation draws its own cases"
+    assert "operations.normalizeTitle" in domain
+
+    scripts = json.loads((tmp_path / "workspace/package.json").read_text())["scripts"]
+    assert "test:properties" in scripts
+
+
+def test_an_architecture_that_claims_nothing_scaffolds_no_property_gate(tmp_path):
+    """A property run over an empty directory passes, and a passing check that
+    checked nothing is the failure this design exists to avoid."""
+
+    project, architecture = _architecture_with_obligations()
+    silent = replace(
+        architecture,
+        contracts=tuple(
+            replace(contract, obligations=())
+            for contract in architecture.contracts
+        ),
+    )
+    manifest = NextJsTargetPack(
+        NextJsTargetPackConfig(
+            project_name="owned-application",
+            project_spec=project,
+            architecture=silent,
+        )
+    ).scaffold(tmp_path / "workspace")
+
+    paths = {item.path for item in manifest.files}
+    assert not [p for p in paths if p.startswith("tests/properties/")]
+    assert "packages/contracts/src/operations.ts" not in paths

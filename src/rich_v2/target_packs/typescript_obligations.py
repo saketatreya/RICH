@@ -48,6 +48,10 @@ SUITE_PATH = "tests/properties/obligations.test.ts"
 # operations and the source a worker writes, which is what lets a property test
 # call the implementation rather than describe it.
 OPERATIONS_MODULE = "packages/domain/src/operations"
+# Where the pinned interface lives. Protected, and separate from the
+# implementation above: the shape is the approved contract's to state, and
+# only the body is the worker's to write.
+OPERATIONS_INTERFACE_PATH = "packages/contracts/src/operations.ts"
 
 
 VALUE_GENERATOR_SOURCE = '''\

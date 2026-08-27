@@ -26,8 +26,17 @@ from ..models import (
     ArchitectureSpecV2,
     BrowserLocator,
     BrowserLocatorKind,
+    ContractV2,
     NodeKind,
     ProjectSpecV2,
+)
+from .typescript_obligations import (
+    GENERATOR_PATH,
+    OPERATIONS_INTERFACE_PATH,
+    ObligationCompileError,
+    VALUE_GENERATOR_SOURCE,
+    compile_obligation_suite,
+    compile_operations_interface,
 )
 
 
@@ -253,8 +262,15 @@ def _safe_generated_path(value: str) -> PurePosixPath:
     return path
 
 
-def _approved_infrastructure_paths(project: ProjectSpecV2) -> frozenset[str]:
+def _approved_infrastructure_paths(
+    project: ProjectSpecV2,
+    architecture: ArchitectureSpecV2 | None = None,
+) -> frozenset[str]:
     """Return the exact target-pack paths authorized by an approved project."""
+
+    _property_paths = (
+        tuple(_property_files(architecture)) if architecture is not None else ()
+    )
 
     requirement_routes = _route_segments(
         tuple(requirement.id for requirement in project.requirements)
@@ -273,7 +289,13 @@ def _approved_infrastructure_paths(project: ProjectSpecV2) -> frozenset[str]:
         f"tests/e2e/scenarios/{scenario_routes[scenario.id]}.spec.ts"
         for scenario in project.acceptance_scenarios
     )
-    return frozenset((*_TARGET_PACK_INFRASTRUCTURE_PATHS, *generated_tests))
+    return frozenset(
+        (
+            *_TARGET_PACK_INFRASTRUCTURE_PATHS,
+            *generated_tests,
+            *_property_paths,
+        )
+    )
 
 
 def _validate_rendered_path_ownership(
@@ -295,7 +317,7 @@ def _validate_rendered_path_ownership(
             if node.kind is not NodeKind.RESOURCE:
                 owned_roots.append(root)
 
-    infrastructure = _approved_infrastructure_paths(project)
+    infrastructure = _approved_infrastructure_paths(project, architecture)
     unauthorized: list[str] = []
     for value in paths:
         path = _safe_generated_path(value)
@@ -696,6 +718,58 @@ def _intent_files(
     return files
 
 
+
+def _property_files(architecture: ArchitectureSpecV2) -> dict[str, str]:
+    """Render the proof obligations an architecture declares as a runnable gate.
+
+    Emitted only when a contract actually declares obligations. An architecture
+    from the deterministic planner declares none, and a property gate over
+    nothing would pass without checking anything -- which is worse than not
+    having one, because it reads like assurance.
+
+    Everything here is a protected input: the suites are compiled from the
+    approved contract, so a worker that could edit them could edit the claim it
+    is being held to.
+    """
+
+    contracts = [
+        contract for contract in architecture.contracts if contract.obligations
+    ]
+    if not contracts:
+        return {}
+    suites: dict[str, str] = {}
+    compiled: list[ContractV2] = []
+    for contract in contracts:
+        try:
+            source = compile_obligation_suite(contract)
+        except ObligationCompileError:
+            # A contract whose claims cannot be rendered runs no property gate.
+            # The architect drops unexpressible obligations before this point;
+            # this is the belt to that suspenders, and it must not fail a
+            # scaffold that is otherwise sound.
+            continue
+        suites[f"tests/properties/{_slug(contract.id)}.test.ts"] = source
+        compiled.append(contract)
+    if not suites:
+        return {}
+    try:
+        interface = compile_operations_interface(compiled)
+    except ObligationCompileError:
+        return {}
+    return {
+        GENERATOR_PATH: VALUE_GENERATOR_SOURCE,
+        OPERATIONS_INTERFACE_PATH: interface,
+        **suites,
+    }
+
+
+def _slug(value: str) -> str:
+    cleaned = "".join(
+        character if character.isalnum() else "-" for character in value.lower()
+    )
+    return "-".join(part for part in cleaned.split("-") if part) or "contract"
+
+
 class NextJsTargetPack:
     """Render and atomically materialize the built-in web target pack."""
 
@@ -735,14 +809,19 @@ class NextJsTargetPack:
             "build": "pnpm -r --if-present build",
             "typecheck": "pnpm -r --if-present typecheck",
             "lint": "pnpm -r --if-present lint",
-            "test": "vitest run --configLoader runner",
+            "test": "vitest run --configLoader runner tests/unit",
+            "test:properties": (
+                "vitest run --configLoader runner tests/properties "
+                "--passWithNoTests"
+            ),
             "test:watch": "vitest --configLoader runner",
             "test:e2e": "playwright test",
             "audit": "pnpm audit --audit-level=moderate",
             "verify:manifest": "node .rich/verify-manifest.mjs",
             "ci": (
                 "pnpm run typecheck && pnpm run lint && pnpm run test "
-                "&& pnpm run build && pnpm run test:e2e"
+                "&& pnpm run test:properties && pnpm run build "
+                "&& pnpm run test:e2e"
             ),
         }
         if include_data:
@@ -1004,7 +1083,7 @@ class NextJsTargetPack:
                 'import { defineConfig } from "vitest/config";\n'
                 "\n"
                 "export default defineConfig({\n"
-                '  test: { environment: "node", include: ["tests/unit/**/*.test.ts"] },\n'
+                '  test: {\n    environment: "node",\n    include: ["tests/unit/**/*.test.ts", "tests/properties/**/*.test.ts"],\n  },\n'
                 "});\n"
             ),
             "playwright.config.ts": (
@@ -1510,6 +1589,8 @@ class NextJsTargetPack:
                     project,
                 )
             )
+        if architecture is not None:
+            files.update(_property_files(architecture))
 
         rendered: dict[str, bytes] = {}
         for path, content in files.items():

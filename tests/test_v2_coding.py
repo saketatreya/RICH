@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import PurePosixPath
 from decimal import Decimal
 
 import pytest
@@ -990,3 +991,49 @@ def test_the_key_separates_provider_model_and_schema(tmp_path):
         != key
     )
     assert generation_cache_key(prompt, **base) == key, "and it is stable"
+
+
+def test_the_pinned_interface_is_shown_only_to_the_task_that_implements_it(
+    tmp_path,
+):
+    """It is a protected input scoped out of current_files, so a task told to
+    satisfy it would otherwise fail typecheck for a reason it was never given."""
+
+    project, architecture, plan, approval = _fixture()
+    interface = tmp_path / "packages/contracts/src/operations.ts"
+    interface.parent.mkdir(parents=True)
+    interface.write_text("export interface Operations {\n  getNote(input: string): string;\n}\n")
+
+    web = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["web"],
+        approval=approval,
+        dependency_summaries={"domain": "Exposes a stable getNote operation."},
+    )
+    domain = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["domain"],
+        approval=approval,
+    )
+
+    assert "pinned_operations_interface" not in web.user_prompt
+    assert "export interface Operations" in domain.user_prompt
+    assert "packages/domain/src/operations.ts" in domain.user_prompt
+    assert "export a const named" in domain.user_prompt.lower()
+
+
+def test_the_pinned_interface_cannot_be_rewritten_by_the_worker():
+    """It sits inside the domain node's ownership because that is where it has
+    to be importable from -- without an explicit rule it would be the one
+    protected input a worker could legally edit."""
+
+    assert coding.is_protected_generation_path(
+        PurePosixPath("packages/contracts/src/operations.ts")
+    )
+    assert not coding.is_protected_generation_path(
+        PurePosixPath("packages/domain/src/operations.ts")
+    ), "the implementation is the worker's to write"
