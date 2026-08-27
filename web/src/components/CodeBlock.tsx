@@ -5,7 +5,7 @@ const PY_KW = new Set([
 ])
 const PY_LIT = new Set(['None', 'True', 'False', 'self', 'cls'])
 
-// v2 writes TypeScript, so the Python-only tokenizer this started as would
+// RICH writes TypeScript, so the Python-only tokenizer this started as would
 // paint every generated file as undifferentiated prose.
 const TS_KW = new Set([
   'const', 'let', 'var', 'function', 'return', 'import', 'export', 'from', 'default',

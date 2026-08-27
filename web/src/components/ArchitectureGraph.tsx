@@ -15,7 +15,7 @@ import type { Architecture, ArchitectureNode, DurableTask } from '../lib/api'
 /**
  * The approved architecture, as a graph.
  *
- * v2 could show a human the shape of what it was about to build only as a list
+ * The control plane could show a human the shape of what it was about to build only as a list
  * of node ids, while the visual canvas next door drew v1's tree. The graph is
  * the better read of both: layers, who may call whom, and — once a run exists —
  * where the work actually is.

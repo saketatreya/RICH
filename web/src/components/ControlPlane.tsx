@@ -33,7 +33,7 @@ type SavedSession = {
   scaffold: ScaffoldResult | null
 }
 
-const SESSION_KEY = 'rich.v2.control-plane.session'
+const SESSION_KEY = 'rich.control-plane.session'
 
 const defaultDraft: IntentDraft = {
   goal: 'Give technical founders a trustworthy way to turn approved product intent into a working web application.',
@@ -1156,7 +1156,7 @@ export default function ControlPlane() {
         </section>
 
         <footer className="v2-footer">
-          <span>RICH v2 · local state, explicit authority, layered evidence</span>
+          <span>RICH · local state, explicit authority, layered evidence</span>
           <code>{project?.id || 'no project selected'}</code>
         </footer>
       </div>

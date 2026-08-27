@@ -10,7 +10,7 @@ It is skipped by default because it spends real model quota, downloads a
 locked dependency graph, and takes minutes. Run it deliberately:
 
     python -m pytest --run-live --basetemp=.rich/live-loop \\
-        tests/test_v2_closed_loop_live.py
+        tests/test_closed_loop_live.py
 """
 
 import shutil

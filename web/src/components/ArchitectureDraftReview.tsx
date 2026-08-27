@@ -8,7 +8,7 @@ import type { Architecture, ArchitectureDraft } from '../lib/api'
  * Nothing durable exists yet when this renders: no revision, no approval. The
  * human reads the change against whatever is current, then applies it, asks
  * again with a correction, or discards it. That is v1's vibe-edit loop, which
- * v2 had replaced with a binary approve/reject on an already-stored revision.
+ * had been replaced with a binary approve/reject on an already-stored revision.
  */
 
 interface Props {

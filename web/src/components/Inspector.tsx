@@ -16,7 +16,7 @@ import {
 /**
  * Read what the machine wrote, one node at a time.
  *
- * v2 could build software and then show a human nothing but an event feed —
+ * RICH could build software and then show a human nothing but an event feed —
  * approve or veto, with no way to see a line of the result. Everything here is
  * a read: the durable store is the source of truth and this only renders it.
  */

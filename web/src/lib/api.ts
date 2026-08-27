@@ -429,7 +429,7 @@ const retryFingerprint = (path: string, init: RequestInit) => {
 const retryKey = (fingerprint: string) => {
   const existing = retryKeys.get(fingerprint)
   if (existing) return existing
-  const storageKey = `rich.v2.retry.${fingerprint}`
+  const storageKey = `rich.retry.${fingerprint}`
   let key: string | null = null
   try {
     key = sessionStorage.getItem(storageKey)
@@ -449,7 +449,7 @@ const retryKey = (fingerprint: string) => {
 const clearRetryKey = (fingerprint: string) => {
   retryKeys.delete(fingerprint)
   try {
-    sessionStorage.removeItem(`rich.v2.retry.${fingerprint}`)
+    sessionStorage.removeItem(`rich.retry.${fingerprint}`)
   } catch {
     // Best effort.
   }
@@ -488,7 +488,7 @@ async function request<T>(
       throw new V2ApiError(
         response.status,
         'InvalidResponse',
-        'The v2 API returned a non-JSON response.',
+        'The API returned a non-JSON response.',
         text,
       )
     }

@@ -166,7 +166,7 @@ def test_local_api_rejects_dns_rebinding_and_cross_origin_mutations(tmp_path):
         "/v1/projects",
         body={"project_id": "project.demo", "name": "Demo"},
         headers={
-            "Host": "127.0.0.1:8765",
+            "Host": "127.0.0.1:8767",
             "Origin": "https://attacker.example",
             "Idempotency-Key": "hostile-origin",
         },
