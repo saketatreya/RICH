@@ -25,13 +25,13 @@ Each live test is responsible for skipping with a useful message when its
 selected provider is unavailable. Never put credentials or placeholder
 credentials in test source.
 
-The v2 public-runtime conformance test is live because it downloads locked
+The public-runtime conformance test is live because it downloads locked
 packages and Playwright Chromium, but it does not call a model:
 
 ```bash
 python -m pytest --run-live \
   --basetemp=.rich/live-tests \
-  tests/test_v2_public_runtime_live.py
+  tests/test_public_runtime_live.py
 ```
 
 It scaffolds a new approved Next.js target and runs frozen install, browser

@@ -1,8 +1,8 @@
-# RICH v2 architecture and operating contract
+# RICH architecture and operating contract
 
 ## Mission
 
-RICH v2 is a kernel for generalizing software development as a controlled
+RICH is a kernel for generalizing software development as a controlled
 transformation:
 
 > approved intent → owned implementation work → independently verified release
@@ -415,7 +415,7 @@ artifact bytes.
 - exact pnpm 10.34.5 present in the local Corepack cache;
 - an `ANTHROPIC_API_KEY` for model-backed execution.
 
-`rich-v2 doctor` checks coarse host availability. Runtime construction performs the exact
+`rich doctor` checks coarse host availability. Runtime construction performs the exact
 Node/pnpm identity checks and fails closed on drift.
 
 ### Local Canvas
@@ -424,10 +424,10 @@ Node/pnpm identity checks and fails closed on drift.
 python -m pip install -e '.[test]'
 npm --prefix web ci
 npm --prefix web run build
-python canvas.py
+rich serve
 ```
 
-The Canvas runs on `http://127.0.0.1:8765` by default and mounts the v2 API under `/v2`.
+The Canvas runs on `http://127.0.0.1:8767` by default and serves the JSON API under `/v1`.
 State defaults to `.rich/state`; generated API workspaces default to
 `.rich/workspaces`.
 
@@ -450,12 +450,21 @@ preview-deploy
 preview-destroy
 ```
 
+Two commands sit outside that line because they act on a run already in
+flight:
+
+```text
+rebuild-node --project P --node domain   # forget one node's remembered
+                                         # generation; siblings still replay
+cancel-run RUN_ID                        # stop at the next checkpoint
+```
+
 Commands return JSON so IDs can be captured by an operator or a higher-level workflow.
-Use `rich-v2 events RUN_ID` to inspect the durable proof/recovery trail.
+Use `rich events RUN_ID` to inspect the durable proof/recovery trail.
 
 ### API rules
 
-- API version: `/v2`.
+- API version: `/v1`.
 - Bind default: loopback only.
 - Mutations require `Idempotency-Key`.
 - Reusing a key with different request content is rejected.
@@ -475,10 +484,10 @@ python -m pytest
 Live host/toolchain tests are opt-in:
 
 ```bash
-python -m pytest --run-live tests/test_v2_executor.py
+python -m pytest --run-live tests/test_executor.py
 python -m pytest --run-live \
   --basetemp=.rich/live-tests \
-  tests/test_v2_public_runtime_live.py
+  tests/test_public_runtime_live.py
 ```
 
 The public-runtime live test creates a fresh approved spec/architecture/scaffold, installs
@@ -509,7 +518,7 @@ the proof chain:
    preserve valid evidence, and prove compatibility across releases.
 6. **Production promotion:** a new approval/evidence layer beyond ephemeral previews,
    including policy, rollout, health, and automatic rollback.
-7. **Stronger assurance:** property, fuzz, security, performance, accessibility, and formal
+7. **Stronger assurance:** fuzz, security, performance, accessibility, and formal
    evidence packs selected from requirement kinds and risk.
 
 The invariant through all of these is unchanged: authority is explicit, generation is
