@@ -1928,3 +1928,28 @@ def test_a_cancellation_check_never_fails_the_run_it_guards(tmp_path):
     token._checked_at = 0.0
 
     assert token.is_cancelled is False
+
+
+def test_a_node_is_gated_on_its_own_obligation_suite_and_no_other(tmp_path):
+    """Running the whole properties directory fails a node because a component
+    built later has not written its module yet -- judging one node by another's
+    absence."""
+
+    from richbuild.run_engine import _VerifiedCodingHandler
+
+    workspace = tmp_path / "workspace"
+    (workspace / "tests" / "properties").mkdir(parents=True)
+    (workspace / "tests/properties/contract-domain.test.ts").write_text("//\n")
+
+    handler = object.__new__(_VerifiedCodingHandler)
+    handler.workspace = workspace
+    handler._properties = workspace / "tests" / "properties"
+
+    assert (
+        handler._property_suite("contract:domain")
+        == "tests/properties/contract-domain.test.ts"
+    )
+    assert handler._property_suite("contract:web") is None, (
+        "a component with no suite scaffolded runs no property gate"
+    )
+    assert handler._property_suite(None) is None

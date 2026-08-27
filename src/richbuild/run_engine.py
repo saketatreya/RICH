@@ -873,12 +873,7 @@ class _VerifiedCodingHandler:
         self.project = project
         self.root_node_id = root_node_id
         self.config = config
-        # Gate the gate on the scaffold actually holding suites: a property run
-        # over an empty directory passes, and a passing check that checked
-        # nothing is the failure mode this whole design exists to avoid.
-        self._has_property_suite = any(
-            (workspace / "tests" / "properties").glob("*.test.ts")
-        ) if (workspace / "tests" / "properties").is_dir() else False
+        self._properties = workspace / "tests" / "properties"
 
     def __call__(self, context: TaskContext) -> TaskResult:
         if context.is_cancelled:
@@ -913,12 +908,17 @@ class _VerifiedCodingHandler:
         ]
         # The obligations an approved contract declares, executed. Without this
         # the architect emits claims that nothing ever checks, which reads like
-        # assurance and is not. Runs on every task, because a node's own
-        # contract is a node's own business.
-        if self._has_property_suite:
+        # assurance and is not.
+        #
+        # A node is gated on its own contract's suite and no other. Running the
+        # whole directory would fail a node because a component built later has
+        # not written its module yet -- judging one node by another's absence.
+        suite = self._property_suite(context.compiled_task.contract_id)
+        if suite is not None:
             commands.append(
                 VerificationCommand(
-                    EvidenceKind.PROPERTY.value, self.config.property_argv
+                    EvidenceKind.PROPERTY.value,
+                    (*self.config.property_argv, suite),
                 )
             )
         if is_root:
@@ -1024,6 +1024,22 @@ class _VerifiedCodingHandler:
             evidence=generated.evidence + tuple(verification_evidence),
             artifacts=generated.artifacts + tuple(verification_artifacts),
         )
+
+    def _property_suite(self, contract_id: str | None) -> str | None:
+        """This node's own obligation suite, if the scaffold emitted one.
+
+        A property run over nothing passes, and a passing check that checked
+        nothing is the failure mode this whole design exists to avoid.
+        """
+
+        if not contract_id or not self._properties.is_dir():
+            return None
+        slug = "".join(
+            character if character.isalnum() else "-" for character in contract_id.lower()
+        )
+        slug = "-".join(part for part in slug.split("-") if part) or "contract"
+        relative = f"tests/properties/{slug}.test.ts"
+        return relative if (self.workspace / relative).is_file() else None
 
     def _run_command(
         self,
