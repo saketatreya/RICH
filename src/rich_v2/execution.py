@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import threading
+import time
 from typing import Any, Callable, Mapping
 
 from .run_engine import (
+    CancellationToken,
     BubblewrapCommandRunner,
     DEFAULT_EXECUTION_HEARTBEAT_SECONDS,
     DEFAULT_EXECUTION_LEASE_SECONDS,
@@ -100,11 +102,16 @@ class DefaultRunExecutor:
         workspace: str | Path,
         architecture_approval_id: str | None = None,
     ) -> SchedulerReport:
+        # Installed on the owner's own token rather than beside it: the
+        # engine requires the run and its lease to share one cancellation, so
+        # that losing the lease stops the run. A durable request now travels
+        # the same path.
         with RunExecutionOwner.claim(
             self.store,
             run_id=run_id,
             lease_seconds=DEFAULT_EXECUTION_LEASE_SECONDS,
             heartbeat_seconds=DEFAULT_EXECUTION_HEARTBEAT_SECONDS,
+            cancellation=_DurableCancellation(self.store, run_id),
         ) as execution_owner:
             run = self.store.get_run(run_id)
             event_history = _all_events(self.store, run_id)
@@ -152,6 +159,45 @@ class DefaultRunExecutor:
                 architecture_approval_id=architecture_approval_id,
                 execution_owner=execution_owner,
             )
+
+
+class _DurableCancellation(CancellationToken):
+    """A cancellation token that also watches the durable record.
+
+    The engine already checks a token at every attempt and command boundary;
+    what it lacked was anyone able to set one. Reading the run's standing
+    cancellation here means a request made through any surface -- this server,
+    another server, or the CLI -- reaches the process actually doing the work.
+
+    The store read is throttled because ``is_cancelled`` is checked on hot
+    paths, and a cancellation that lands a second late costs nothing.
+    """
+
+    _POLL_SECONDS = 1.0
+
+    def __init__(self, store: RichStore, run_id: str) -> None:
+        super().__init__()
+        self._store = store
+        self._run_id = run_id
+        self._checked_at = 0.0
+
+    @property
+    def is_cancelled(self) -> bool:
+        if super().is_cancelled:
+            return True
+        now = time.monotonic()
+        if now - self._checked_at < self._POLL_SECONDS:
+            return False
+        self._checked_at = now
+        try:
+            standing = self._store.run_cancellation(self._run_id)
+        except Exception:
+            # A cancellation check must never be the thing that fails a run.
+            return False
+        if standing is None:
+            return False
+        self.cancel(standing.get("reason") or "canceled by operator")
+        return True
 
 
 def _all_events(

@@ -986,3 +986,44 @@ def test_node_rebuild_route_forgets_one_node(tmp_path):
     assert response.body["rebuild"]["forgotten_generations"] == 1
     assert store.get_generation_memo("d" * 64) is None
     assert missing_key.status == 428, "it is a mutation like any other"
+
+
+def test_a_run_can_be_cancelled_durably_from_any_surface(tmp_path):
+    """The process that started a run is often not the one being asked to stop
+    it, so the request has to outlive whichever server hears it."""
+
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.cancel")
+    run = store.create_run(
+        project["id"],
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        status="running",
+    )
+    application = V2Application(store, workspace_root=tmp_path / "workspaces")
+
+    assert store.run_cancellation(run["id"]) is None
+    response = application.handle(
+        "POST",
+        f"/v2/runs/{run['id']}/cancellation",
+        body={"reason": "operator changed their mind"},
+        headers=_headers("cancel-once"),
+    )
+
+    assert response.status == 202, "cooperative: it is asked, not killed"
+    standing = store.run_cancellation(run["id"])
+    assert standing["reason"] == "operator changed their mind"
+    assert "run.cancellation_requested" in {
+        event["event_type"] for event in store.list_events(run["id"])
+    }
+
+    # A second request never overwrites the first reason.
+    application.handle(
+        "POST",
+        f"/v2/runs/{run['id']}/cancellation",
+        body={"reason": "something else"},
+        headers=_headers("cancel-twice"),
+    )
+    assert store.run_cancellation(run["id"])["reason"] == (
+        "operator changed their mind"
+    )

@@ -563,6 +563,28 @@ class ControlPlane:
             architecture_approval_id=architecture_approval_id,
         )
 
+    def cancel_run(
+        self, *, run_id: str, reason: str = "canceled by operator"
+    ) -> dict[str, Any]:
+        """Ask a run to stop at its next checkpoint.
+
+        Cooperative by design. The engine unwinds through the paths it already
+        has -- releasing its lease, rolling back a prepared source transaction,
+        settling its budget reservation -- rather than being killed partway
+        through a write it has not finished recording.
+        """
+
+        run = self.store.request_run_cancellation(run_id, reason=reason)
+        self.store.append_event(
+            run_id, "run.cancellation_requested", {"reason": reason}
+        )
+        standing = self.store.run_cancellation(run_id)
+        return {
+            "run_id": run_id,
+            "status": run["status"],
+            "cancellation": standing,
+        }
+
     def request_preview(
         self,
         *,

@@ -24,7 +24,7 @@ from .models import ApprovalGate
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 _UNSET = object()
 
 _RUN_TRANSITIONS = {
@@ -480,6 +480,17 @@ class RichStore:
                         ON generation_memos(project_id, node_id);
                     INSERT INTO schema_migrations(version, applied_at)
                     VALUES (10, CURRENT_TIMESTAMP);
+                    COMMIT;
+                    """
+                )
+            if 11 not in applied:
+                conn.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+                    ALTER TABLE runs ADD COLUMN cancellation_requested_at TEXT;
+                    ALTER TABLE runs ADD COLUMN cancellation_reason TEXT;
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (11, CURRENT_TIMESTAMP);
                     COMMIT;
                     """
                 )
@@ -1083,6 +1094,58 @@ class RichStore:
                 (project_id, node_id),
             )
         return cursor.rowcount
+
+    def request_run_cancellation(
+        self, run_id: str, *, reason: str = "canceled by operator"
+    ) -> dict[str, Any]:
+        """Ask a run to stop, durably.
+
+        Durable rather than in-process because the process that started a run
+        is often not the process being asked to stop it: the Canvas, the API
+        server and the CLI are three writers over one state directory. An
+        in-memory flag would cancel whichever one happened to be asked.
+
+        This records the request; the engine observes it at its next
+        cancellation checkpoint and unwinds through the paths that already
+        exist. Nothing is killed here.
+        """
+
+        normalized = str(reason).strip() or "canceled by operator"
+        with self._transaction(immediate=True) as conn:
+            row = conn.execute(
+                "SELECT status, cancellation_requested_at FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"run {run_id!r} does not exist")
+            if row["cancellation_requested_at"] is None:
+                conn.execute(
+                    """
+                    UPDATE runs
+                    SET cancellation_requested_at = ?, cancellation_reason = ?
+                    WHERE id = ?
+                    """,
+                    (_now(), normalized, run_id),
+                )
+        return self.get_run(run_id)
+
+    def run_cancellation(self, run_id: str) -> dict[str, Any] | None:
+        """Return the standing cancellation request for a run, if any."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT cancellation_requested_at, cancellation_reason
+                FROM runs WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        if row is None or row["cancellation_requested_at"] is None:
+            return None
+        return {
+            "requested_at": row["cancellation_requested_at"],
+            "reason": row["cancellation_reason"],
+        }
 
     def request_approval(
         self,

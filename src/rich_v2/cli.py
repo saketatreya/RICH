@@ -138,6 +138,12 @@ def _parser() -> argparse.ArgumentParser:
     rebuild.add_argument("--node", required=True)
     rebuild.add_argument("--architecture-revision")
 
+    cancel = commands.add_parser(
+        "cancel-run", help="ask a run to stop at its next checkpoint"
+    )
+    cancel.add_argument("run_id")
+    cancel.add_argument("--reason", default="canceled by operator")
+
     events = commands.add_parser("events", help="read durable run events")
     events.add_argument("run_id")
     events.add_argument("--after", type=int, default=0)
@@ -313,6 +319,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     node_id=args.node,
                     architecture_revision_id=args.architecture_revision,
                 )
+            )
+        elif args.command == "cancel-run":
+            _print_json(
+                control_plane.cancel_run(run_id=args.run_id, reason=args.reason)
             )
         elif args.command == "events":
             _print_json(

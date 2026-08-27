@@ -1890,3 +1890,41 @@ def test_prior_failure_source_reads_back_the_gate_logs_the_store_already_holds(
     assert "TS2304" in failures[0].diagnostics[0]
     assert all("private.ts" not in line for line in failures[0].diagnostics)
     assert failures[0].withheld_line_count == 1
+
+
+def test_a_durable_cancellation_reaches_a_token_in_another_process(tmp_path):
+    """The token the engine checks is in one process; the request arrives in
+    another. The store is what they share."""
+
+    from rich_v2.execution import _DurableCancellation
+
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.tok")
+    run = store.create_run(
+        project["id"],
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        status="running",
+    )
+    token = _DurableCancellation(store, run["id"])
+
+    assert token.is_cancelled is False
+    store.request_run_cancellation(run["id"], reason="stop please")
+    token._checked_at = 0.0  # skip the hot-path throttle
+    observed = token.is_cancelled
+
+    assert observed is True
+    assert token.reason == "stop please"
+
+
+def test_a_cancellation_check_never_fails_the_run_it_guards(tmp_path):
+    from rich_v2.execution import _DurableCancellation
+
+    class _Broken:
+        def run_cancellation(self, run_id):
+            raise RuntimeError("database is gone")
+
+    token = _DurableCancellation(_Broken(), "run.x")
+    token._checked_at = 0.0
+
+    assert token.is_cancelled is False

@@ -1206,6 +1206,26 @@ export default function V2ControlPlane() {
                           ? 'Resume durable execution'
                           : 'Execute verified build →'}
                 </button>
+                {execution?.active && (
+                  <button
+                    className="v2-secondary"
+                    disabled={busy === 'cancel-run'}
+                    onClick={async () => {
+                      setBusy('cancel-run')
+                      try {
+                        await v2Api.cancelRun(prepared.run.id)
+                      } catch (cause) {
+                        setError(
+                          cause instanceof Error ? cause.message : String(cause),
+                        )
+                      } finally {
+                        setBusy('')
+                      }
+                    }}
+                  >
+                    {busy === 'cancel-run' ? 'Asking…' : 'Stop at next checkpoint'}
+                  </button>
+                )}
               </div>
             )}
           </section>

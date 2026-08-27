@@ -625,6 +625,16 @@ export const v2Api = {
       },
     )).execution,
 
+  /**
+   * Ask a run to stop at its next checkpoint. Cooperative: the engine unwinds
+   * through its own paths rather than being killed mid-write.
+   */
+  cancelRun: async (runId: string, reason?: string): Promise<void> => {
+    await post(`/v2/runs/${encodeURIComponent(runId)}/cancellation`, {
+      ...(reason ? { reason } : {}),
+    })
+  },
+
   execution: async (runId: string): Promise<ExecutionStatus> =>
     (await request<{ execution: ExecutionStatus }>(
       `/v2/runs/${encodeURIComponent(runId)}/execution`,

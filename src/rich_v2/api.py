@@ -521,6 +521,22 @@ class V2Application:
         if (
             len(parts) == 4
             and parts[:2] == ["v2", "runs"]
+            and parts[3] == "cancellation"
+            and method == "POST"
+        ):
+            return ApiResponse(
+                202,
+                {
+                    "execution": self.control_plane.cancel_run(
+                        run_id=parts[2],
+                        reason=_optional_string(body, "reason")
+                        or "canceled by operator",
+                    )
+                },
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v2", "runs"]
             and parts[3] == "preview-requests"
             and method == "POST"
         ):
