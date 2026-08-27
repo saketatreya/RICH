@@ -24,6 +24,7 @@ rich serve                            # → http://127.0.0.1:8767
 rich doctor                           # host checks
 rich rebuild-node --project P --node domain   # forget one node's memo
 rich cancel-run RUN_ID                        # stop at the next checkpoint
+rich logs RUN_ID --follow                     # watch a run as a timeline
 npm --prefix web run dev              # hot-reload dev; Vite proxies /v1 → :8767
 
 # Live tests (marker `live`, skipped unless --run-live is passed)

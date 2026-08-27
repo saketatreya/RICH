@@ -16,6 +16,7 @@ from .api import serve
 from .executor import BubblewrapExecutor
 from .execution import DefaultRunExecutor
 from .preview import default_preview_orchestrator
+from .runlog import follow_run, run_is_settled
 from .store import RichStore
 
 
@@ -149,6 +150,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     cancel.add_argument("run_id")
     cancel.add_argument("--reason", default="canceled by operator")
+
+    logs = add_parser(
+        "logs", help="watch a run as a readable timeline of its durable events"
+    )
+    logs.add_argument("run_id")
+    logs.add_argument("--after", type=int, default=0)
+    logs.add_argument(
+        "--follow",
+        action="store_true",
+        help="keep printing until the run settles",
+    )
 
     events = add_parser("events", help="read durable run events")
     events.add_argument("run_id")
@@ -323,6 +335,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(
                 control_plane.cancel_run(run_id=args.run_id, reason=args.reason)
             )
+        elif args.command == "logs":
+            for line in follow_run(
+                store,
+                args.run_id,
+                follow=args.follow,
+                after_sequence=args.after,
+                is_finished=lambda: run_is_settled(store, args.run_id),
+            ):
+                print(line, flush=True)
         elif args.command == "events":
             _print_json(
                 {

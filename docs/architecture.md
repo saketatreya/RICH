@@ -457,6 +457,7 @@ flight:
 rebuild-node --project P --node domain   # forget one node's remembered
                                          # generation; siblings still replay
 cancel-run RUN_ID                        # stop at the next checkpoint
+logs RUN_ID --follow                     # watch it happen
 ```
 
 Commands return JSON so IDs can be captured by an operator or a higher-level workflow.
