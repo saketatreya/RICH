@@ -341,6 +341,29 @@ export interface InterviewNeeds {
   complete: boolean
 }
 
+export interface ChangePlan {
+  project_id: string
+  change: {
+    requirements: { added: string[]; removed: string[]; modified: string[] }
+    stale: string[]
+    directly_stale: string[]
+    contract_changed: string[]
+    consumers_stale: string[]
+    added_nodes: string[]
+    removed_nodes: string[]
+    reusable: string[]
+    notes: string[]
+  }
+  forgotten?: Record<string, number>
+}
+
+export interface ChangeRevisions {
+  fromSpec: string
+  toSpec: string
+  fromArchitecture: string
+  toArchitecture: string
+}
+
 export interface NodeRebuild {
   project_id: string
   node_id: string
@@ -658,6 +681,38 @@ export const api = {
     post<InterviewNeeds>(
       `/v1/projects/${encodeURIComponent(projectId)}/interview-questions`,
       { project_name: projectName, answers, limit },
+    ),
+
+  /**
+   * What moving between two approved revisions costs. Reads only: the plan is
+   * for looking at, and `applyChange` is the decision.
+   */
+  planChange: async (
+    projectId: string,
+    revisions: ChangeRevisions,
+  ): Promise<ChangePlan> =>
+    post<ChangePlan>(
+      `/v1/projects/${encodeURIComponent(projectId)}/change-plans`,
+      {
+        from_spec_revision_id: revisions.fromSpec,
+        to_spec_revision_id: revisions.toSpec,
+        from_architecture_revision_id: revisions.fromArchitecture,
+        to_architecture_revision_id: revisions.toArchitecture,
+      },
+    ),
+
+  applyChange: async (
+    projectId: string,
+    revisions: ChangeRevisions,
+  ): Promise<ChangePlan> =>
+    post<ChangePlan>(
+      `/v1/projects/${encodeURIComponent(projectId)}/change-applications`,
+      {
+        from_spec_revision_id: revisions.fromSpec,
+        to_spec_revision_id: revisions.toSpec,
+        from_architecture_revision_id: revisions.fromArchitecture,
+        to_architecture_revision_id: revisions.toArchitecture,
+      },
     ),
 
   /**

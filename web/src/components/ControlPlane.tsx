@@ -16,6 +16,7 @@ import {
 } from '../lib/api'
 import ApprovalGate from './ApprovalGate'
 import Assurance from './Assurance'
+import ChangeCost from './ChangeCost'
 import type { ContractDoc } from './Behaviour'
 import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
@@ -997,6 +998,18 @@ export default function ControlPlane() {
               ))}
             </div>
           </section>
+        )}
+
+        {project && spec && architecture && (
+          <ChangeCost
+            projectId={project.id}
+            revisions={{
+              fromSpec: spec.revision.id,
+              toSpec: spec.revision.id,
+              fromArchitecture: architecture.revision.id,
+              toArchitecture: architecture.revision.id,
+            }}
+          />
         )}
 
         {prepared && spec && (
