@@ -697,6 +697,11 @@ def is_protected_generation_path(path: PurePosixPath) -> bool:
     # shape it is being held to instead of implementing it.
     if path.parts == ("packages", "contracts", "src", "operations.ts"):
         return True
+    # Compiled from approved intent, exactly like the tests and the operations
+    # interface. A worker able to rewrite these could change what the
+    # application claims to do, which is not a coding decision.
+    if path.name == "product-intent.ts" and path.parts[:1] == ("packages",):
+        return True
     lowered = path.name.lower()
     if (
         ".test." in lowered
@@ -1202,7 +1207,8 @@ def _read_current_files(
         if not target.exists():
             continue
         if target.is_file():
-            candidates.add(target)
+            if not is_protected_generation_path(PurePosixPath(owned)):
+                candidates.add(target)
             continue
         if not target.is_dir():
             raise SourceTransactionError(
@@ -1227,6 +1233,13 @@ def _read_current_files(
                 safe_directories.append(name)
             directory_names[:] = safe_directories
             for name in sorted(file_names):
+                relative = (base / name).relative_to(workspace)
+                if is_protected_generation_path(PurePosixPath(relative.as_posix())):
+                    # Presenting a protected input as one of "your current
+                    # files" invites an edit the parser will reject. It is
+                    # context, not workspace, and the prompt hands it over
+                    # separately where a task genuinely needs it.
+                    continue
                 candidates.add(base / name)
 
     records: list[dict[str, Any]] = []

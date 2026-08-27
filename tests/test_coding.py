@@ -1037,3 +1037,31 @@ def test_the_pinned_interface_cannot_be_rewritten_by_the_worker():
     assert not coding.is_protected_generation_path(
         PurePosixPath("packages/domain/src/operations.ts")
     ), "the implementation is the worker's to write"
+
+
+def test_a_protected_input_is_not_offered_as_one_of_your_current_files(tmp_path):
+    """The parser rejects writes to protected paths, so presenting them as
+    editable sets a worker up to fail -- and makes every node's inputs change
+    whenever a shared, spec-derived file does."""
+
+    project, architecture, plan, approval = _fixture()
+    task = plan.task_index["domain"]
+    owned = task.owned_paths[0]
+    root = tmp_path / owned
+    root.mkdir(parents=True)
+    (root / "index.ts").write_text("export const mine = true;\n")
+    (root / "product-intent.ts").write_text("export const approved = [];\n")
+
+    prompt = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=task,
+        approval=approval,
+    )
+
+    assert "export const mine" in prompt.user_prompt
+    assert "product-intent.ts" not in prompt.user_prompt, (
+        "a compiled-from-intent module is context, not workspace"
+    )
+    assert prompt.current_file_count == 1
