@@ -1184,3 +1184,32 @@ def test_change_plans_read_and_change_applications_decide(tmp_path):
     assert planned.body["change"]["stale"] == [], "nothing changed"
     assert "forgotten" not in planned.body
     assert applied.body["forgotten"] == {}, "and so nothing was forgotten"
+
+
+def test_a_settled_run_says_how_to_try_again(tmp_path):
+    """It keeps its verdict -- that is what makes it evidence -- but an
+    operator whose run died on a missing credential should not have to work
+    out the way forward for themselves."""
+
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.settled")
+    run = store.create_run(
+        project["id"],
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        status="failed",
+    )
+    application = Application(store, workspace_root=tmp_path / "workspaces")
+    (tmp_path / "workspaces" / "w").mkdir(parents=True)
+
+    response = application.handle(
+        "POST",
+        f"/v1/runs/{run['id']}/executions",
+        body={"workspace": "w"},
+        headers=_headers("settled-run"),
+    )
+
+    assert response.status == 400
+    message = response.body["message"]
+    assert "keeps its result" in message
+    assert "prepare a new run" in message

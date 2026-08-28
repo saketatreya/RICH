@@ -70,8 +70,14 @@ class _ExecutionManager:
     ) -> dict[str, Any]:
         run = self.store.get_run(run_id)
         if run["status"] not in {"ready", "running", "verifying"}:
+            # A settled run keeps its verdict: that is what makes it evidence.
+            # But an operator whose run died on a missing credential should not
+            # have to work out for themselves that the way forward is a new run
+            # over the same approvals, so the message says it.
             raise ValueError(
-                f"run is {run['status']!r} and cannot be executed"
+                f"run is {run['status']!r} and cannot be executed. A settled "
+                "run keeps its result; prepare a new run over the same "
+                "approved spec and architecture revisions to try again."
             )
         with self._lock:
             if run_id in self._active:
