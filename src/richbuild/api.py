@@ -27,7 +27,7 @@ from .preview import (
     PreviewOrchestrator,
     default_preview_orchestrator,
 )
-from .runtime import default_architect
+from .runtime import CLAUDE_CODE_ROUTE, default_architect
 from .store import (
     SCHEMA_VERSION as STORE_SCHEMA_VERSION,
     IdempotencyReplay,
@@ -136,13 +136,16 @@ class Application:
         workspace_root: str | Path | None = None,
         run_executor: RunExecutor | None = None,
         architect: ArchitectProposer | None = None,
+        route: str = CLAUDE_CODE_ROUTE,
     ):
         self.store = store
         self.workspace_root = Path(
             workspace_root or (store.root.parent / "workspaces")
         ).resolve()
         self.workspace_root.mkdir(parents=True, exist_ok=True)
-        trusted_run_executor = run_executor or DefaultRunExecutor(store)
+        trusted_run_executor = run_executor or DefaultRunExecutor(
+            store, route=route
+        )
         self.control_plane = ControlPlane(
             store,
             preview_orchestrator=(
@@ -1103,6 +1106,7 @@ def serve(
     port: int = 8767,
     web_root: str | Path | None = None,
     architect: Any | None = None,
+    route: str = CLAUDE_CODE_ROUTE,
 ) -> None:
     """Serve the API and the canvas on one port.
 
@@ -1117,16 +1121,19 @@ def serve(
         raise ValueError("the local API binds to loopback only")
     root = Path(web_root) if web_root is not None else default_web_root()
     if architect is None:
-        architect = default_architect()
-    application = Application(RichStore(state_dir), architect=architect)
+        architect = default_architect(route=route)
+    application = Application(
+        RichStore(state_dir), architect=architect, route=route
+    )
     server = ThreadingHTTPServer((host, port), handler_for(application, root))
     # flush: stdout is block-buffered when piped, and a server that runs
     # forever would then print its own address only once someone kills it.
     print(f"RICH → http://{host}:{port}", flush=True)
+    print(f"  route  {route}", flush=True)
     print(
         "  architect  model-backed"
         if architect is not None
-        else "  architect  deterministic planner (no model route available)",
+        else "  architect  deterministic planner (that route is unavailable)",
         flush=True,
     )
     print(f"  api    http://{host}:{port}/v1/health", flush=True)

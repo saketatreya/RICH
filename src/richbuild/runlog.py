@@ -18,7 +18,13 @@ from .store import RichStore
 
 # Events whose payload is worth a second line rather than a glance.
 _DETAILED = frozenset(
-    {"evidence.recorded", "task.failed", "run.execution_error", "task.retry_scheduled"}
+    {
+        "evidence.recorded",
+        "task.failed",
+        "run.execution_error",
+        "task.retry_scheduled",
+        "model.attempt.failed",
+    }
 )
 
 _MARK = {

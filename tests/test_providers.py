@@ -315,3 +315,65 @@ def test_the_request_id_reader_differs_only_in_which_header_it_trusts():
         safe_request_id("has spaces", {}, header_name="request-id") is None
     ), "an unsafe id is dropped rather than recorded"
     assert safe_request_id("a" * 129, {}, header_name="request-id") is None
+
+
+def test_a_failed_attempt_records_why(monkeypatch):
+    """An operator reading "handler raised ProviderFailure" has nowhere to go,
+    and the commonest cause -- a route with no credential -- is one line of
+    text away from obvious."""
+
+    from richbuild.providers import _redacted_failure
+
+    events: list[tuple[str, dict]] = []
+
+    class _Refusing:
+        name = "refusing"
+
+        def generate(self, request):
+            raise ProviderFailure(
+                "ANTHROPIC_API_KEY is not set",
+                retryable=False,
+                request_was_sent=False,
+            )
+
+    gateway = ModelGateway(
+        [_Refusing()],
+        BudgetLedger(
+            RunBudget(
+                max_model_attempts=2,
+                max_input_tokens=1000,
+                max_output_tokens=500,
+                max_cost_usd=Decimal("1"),
+                max_execution_seconds=60,
+            )
+        ),
+        event_sink=lambda kind, payload: events.append((kind, dict(payload))),
+    )
+
+    with pytest.raises(ProviderFailure):
+        gateway.generate(
+            ModelRequest(
+                run_id="run.why",
+                task_id="task.why",
+                correlation_id="corr.why",
+                role=GenerationRole.IMPLEMENTER,
+                provider="refusing",
+                model="test-model",
+                system_prompt="s",
+                user_prompt="u",
+                max_input_tokens=1000,
+                max_output_tokens=500,
+                max_cost_usd=Decimal("1"),
+                timeout_seconds=30,
+            )
+        )
+
+    failed = [payload for kind, payload in events if kind == "model.attempt.failed"]
+    assert failed, "the failure must be recorded at all"
+    assert failed[0]["reason"] == "ANTHROPIC_API_KEY is not set"
+
+    # Bounded, so an unexpectedly chatty upstream cannot push a response body
+    # into the durable event stream.
+    assert len(_redacted_failure(RuntimeError("x" * 5000))) <= 300
+    assert _redacted_failure(RuntimeError("")) == "RuntimeError"
+    assert _redacted_failure(RuntimeError("a\n  b")) == "a b"

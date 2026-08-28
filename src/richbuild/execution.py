@@ -18,7 +18,12 @@ from .run_engine import (
     RunExecutionOwner,
     SchedulerReport,
 )
-from .runtime import DefaultRunRuntime, default_run_runtime
+from .runtime import (
+    API_ROUTE,
+    MODEL_ROUTES,
+    DefaultRunRuntime,
+    default_run_runtime,
+)
 from .store import RichStore, StoreError
 
 
@@ -88,12 +93,18 @@ class DefaultRunExecutor:
 
     store: RichStore
     runtime_builder: RuntimeBuilder = default_run_runtime
+    # Which way to reach the pinned model. Explicit and never substituted: the
+    # two routes spend different accounts, and picking one silently because the
+    # other's credential is missing would change who pays without saying so.
+    route: str = API_ROUTE
 
     def __post_init__(self) -> None:
         if not isinstance(self.store, RichStore):
             raise TypeError("store must be a RichStore")
         if not callable(self.runtime_builder):
             raise TypeError("runtime_builder must be callable")
+        if self.route not in MODEL_ROUTES:
+            raise ValueError(f"route must be one of {sorted(MODEL_ROUTES)}")
 
     def execute(
         self,
@@ -125,6 +136,7 @@ class DefaultRunExecutor:
                 run["budget"],
                 event_history=event_history,
                 event_sink=model_events,
+                route=self.route,
             )
             commands = runtime.commands
             config = RunEngineConfig(

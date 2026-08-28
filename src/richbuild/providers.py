@@ -157,6 +157,21 @@ class ModelProvider(Protocol):
 EventSink = Callable[[str, Mapping[str, Any]], None]
 
 
+
+# A provider failure names a route, a status, or a missing credential -- never
+# the credential itself. The adapters raise text they wrote; this bounds it so
+# an unexpectedly chatty upstream cannot push a response body into the durable
+# event stream.
+_MAX_FAILURE_REASON = 300
+
+
+def _redacted_failure(failure: BaseException) -> str:
+    reason = " ".join(str(failure).split())
+    if len(reason) > _MAX_FAILURE_REASON:
+        reason = reason[: _MAX_FAILURE_REASON - 1] + "…"
+    return reason or failure.__class__.__name__
+
+
 class ModelGateway:
     """Routes one structured request while accounting for every provider retry."""
 
@@ -242,6 +257,11 @@ class ModelGateway:
                     reservation_state = "settled"
                 terminal_payload = {
                     **base_event,
+                    # Why it failed, not merely that it did. Without this an
+                    # operator reads "handler raised ProviderFailure" and has
+                    # nowhere to go -- and the commonest cause, a route with no
+                    # credential, is one line of text away from obvious.
+                    "reason": _redacted_failure(exc),
                     "reservation_state": reservation_state,
                     "settled_usage": settled.to_mapping(),
                     "retryable": (
@@ -289,6 +309,7 @@ class ModelGateway:
                         "usage_known": False,
                         "request_was_sent": True,
                         "reported_usage_exceeded_reservation": False,
+                        "reason": "unexpected provider error",
                     },
                 )
                 raise

@@ -16,6 +16,7 @@ from .api import serve
 from .executor import BubblewrapExecutor
 from .execution import DefaultRunExecutor
 from .preview import default_preview_orchestrator
+from .runtime import CLAUDE_CODE_ROUTE, MODEL_ROUTES
 from .runlog import follow_run, run_is_settled
 from .store import RichStore
 
@@ -50,6 +51,16 @@ def _parser() -> argparse.ArgumentParser:
     serve_command = add_parser("serve", help="serve the local versioned JSON API")
     serve_command.add_argument("--host", default="127.0.0.1")
     serve_command.add_argument("--port", type=int, default=8767)
+    serve_command.add_argument(
+        "--route",
+        default=CLAUDE_CODE_ROUTE,
+        choices=sorted(MODEL_ROUTES),
+        help=(
+            "how to reach the pinned model: an existing `claude` login, or "
+            "ANTHROPIC_API_KEY. Never substituted for one another -- they "
+            "spend different accounts (default: %(default)s)"
+        ),
+    )
 
     create = add_parser("project-create", help="create a durable project")
     create.add_argument("project_id")
@@ -188,7 +199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(_doctor())
             return 0
         if args.command == "serve":
-            serve(state_dir, host=args.host, port=args.port)
+            serve(state_dir, host=args.host, port=args.port, route=args.route)
             return 0
 
         store = RichStore(state_dir)

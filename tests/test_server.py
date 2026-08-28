@@ -120,7 +120,9 @@ def test_serving_offers_the_model_architect_when_one_is_available(monkeypatch):
     import richbuild.api as api
 
     built: list[str] = []
-    monkeypatch.setattr(api, "default_architect", lambda: built.append("asked") or "arch")
+    monkeypatch.setattr(
+        api, "default_architect", lambda **_: built.append("asked") or "arch"
+    )
     captured: dict[str, object] = {}
 
     class _Server:
@@ -149,7 +151,7 @@ def test_an_explicit_architect_is_not_overridden(monkeypatch):
     import richbuild.api as api
 
     monkeypatch.setattr(
-        api, "default_architect", lambda: pytest.fail("must not be consulted")
+        api, "default_architect", lambda **_: pytest.fail("must not be consulted")
     )
     captured: dict[str, object] = {}
 
@@ -172,3 +174,31 @@ def test_an_explicit_architect_is_not_overridden(monkeypatch):
     api.serve("/tmp/rich-serve-test", port=8799, architect="mine")
 
     assert captured["kwargs"]["architect"] == "mine"
+
+
+def test_the_route_is_one_explicit_choice_for_designing_and_for_building():
+    """The architect defaulted to the subscription route and the builder to the
+    API one, so a host with a `claude` login could design and not build -- and
+    said only "handler raised ProviderFailure" when it tried."""
+
+    from richbuild.execution import DefaultRunExecutor
+    from richbuild.runtime import API_ROUTE, CLAUDE_CODE_ROUTE
+    import inspect
+    import richbuild.api as api
+
+    assert (
+        inspect.signature(api.serve).parameters["route"].default == CLAUDE_CODE_ROUTE
+    )
+    assert (
+        inspect.signature(api.Application.__init__).parameters["route"].default
+        == CLAUDE_CODE_ROUTE
+    )
+
+    store = object.__new__(RichStore)
+    for route in (API_ROUTE, CLAUDE_CODE_ROUTE):
+        executor = DefaultRunExecutor.__new__(DefaultRunExecutor)
+        object.__setattr__(executor, "route", route)
+        assert executor.route == route
+
+    with pytest.raises(ValueError, match="route must be one of"):
+        DefaultRunExecutor(store, route="whichever-is-cheapest")

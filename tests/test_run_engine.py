@@ -1156,7 +1156,7 @@ def test_default_executor_recovers_budget_only_after_claiming_lease(
     continue_construction = threading.Event()
     recovered_usage = {}
 
-    def runtime_builder(budget, *, event_history, event_sink):
+    def runtime_builder(budget, *, event_history, event_sink, route=None):
         approved = RunBudget.from_mapping(budget)
         usage = recover_model_usage(event_history)
         recovered_usage["value"] = usage
