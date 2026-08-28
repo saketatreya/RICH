@@ -110,3 +110,65 @@ def test_an_unbuilt_canvas_says_so_instead_of_failing_obscurely(tmp_path):
     assert status == 503
     assert b"npm --prefix web" in body
     assert content_type.startswith("text/html")
+
+
+def test_serving_offers_the_model_architect_when_one_is_available(monkeypatch):
+    """A server that silently plans deterministically is a server whose
+    headline feature cannot be reached. This regressed once already, when the
+    old canvas -- which did wire it -- was retired."""
+
+    import richbuild.api as api
+
+    built: list[str] = []
+    monkeypatch.setattr(api, "default_architect", lambda: built.append("asked") or "arch")
+    captured: dict[str, object] = {}
+
+    class _Server:
+        def __init__(self, address, handler):
+            captured["handler"] = handler
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(api, "ThreadingHTTPServer", _Server)
+    monkeypatch.setattr(
+        api, "Application", lambda store, **kwargs: captured.setdefault("kwargs", kwargs)
+    )
+    monkeypatch.setattr(api, "handler_for", lambda application, root: object())
+
+    api.serve("/tmp/rich-serve-test", port=8799)
+
+    assert built == ["asked"], "serve must build one rather than default to none"
+    assert captured["kwargs"]["architect"] == "arch"
+
+
+def test_an_explicit_architect_is_not_overridden(monkeypatch):
+    import richbuild.api as api
+
+    monkeypatch.setattr(
+        api, "default_architect", lambda: pytest.fail("must not be consulted")
+    )
+    captured: dict[str, object] = {}
+
+    class _Server:
+        def __init__(self, address, handler):
+            pass
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(api, "ThreadingHTTPServer", _Server)
+    monkeypatch.setattr(
+        api, "Application", lambda store, **kwargs: captured.setdefault("kwargs", kwargs)
+    )
+    monkeypatch.setattr(api, "handler_for", lambda application, root: object())
+
+    api.serve("/tmp/rich-serve-test", port=8799, architect="mine")
+
+    assert captured["kwargs"]["architect"] == "mine"

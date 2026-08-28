@@ -27,6 +27,7 @@ from .preview import (
     PreviewOrchestrator,
     default_preview_orchestrator,
 )
+from .runtime import default_architect
 from .store import (
     SCHEMA_VERSION as STORE_SCHEMA_VERSION,
     IdempotencyReplay,
@@ -1103,14 +1104,31 @@ def serve(
     web_root: str | Path | None = None,
     architect: Any | None = None,
 ) -> None:
+    """Serve the API and the canvas on one port.
+
+    The architect is built here rather than left to the caller, because a
+    server that silently plans deterministically is a server whose headline
+    feature is unreachable. `default_architect` returns None when no model
+    route is available, so a host with no login still starts and still plans
+    -- and every draft says which one answered.
+    """
+
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("the local API binds to loopback only")
     root = Path(web_root) if web_root is not None else default_web_root()
+    if architect is None:
+        architect = default_architect()
     application = Application(RichStore(state_dir), architect=architect)
     server = ThreadingHTTPServer((host, port), handler_for(application, root))
     # flush: stdout is block-buffered when piped, and a server that runs
     # forever would then print its own address only once someone kills it.
     print(f"RICH → http://{host}:{port}", flush=True)
+    print(
+        "  architect  model-backed"
+        if architect is not None
+        else "  architect  deterministic planner (no model route available)",
+        flush=True,
+    )
     print(f"  api    http://{host}:{port}/v1/health", flush=True)
     print(
         "  canvas ready"
