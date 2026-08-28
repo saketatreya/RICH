@@ -1,0 +1,560 @@
+<title>RICH Delivery Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --bg: #07080c;
+    --bg-glow: rgba(124, 108, 255, .09);
+    --bg-glow-2: rgba(45, 212, 191, .045);
+    --surface: #0e1017;
+    --surface-2: #14171f;
+    --rule: rgba(255, 255, 255, .085);
+    --rule-strong: rgba(255, 255, 255, .16);
+    --ink: #e7eaf1;
+    --ink-dim: #98a1b2;
+    --ink-faint: #5a6273;
+    --accent: #7c6cff;
+    --done: #2fd3a0;
+    --doing: #f0b429;
+    --next: #5b7cfa;
+    --later: #8a93a3;
+    --decided: #2dd4bf;
+    --sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --mono: 'Geist Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f5f6fa; --bg-glow: rgba(124,108,255,.07); --bg-glow-2: rgba(45,212,191,.05);
+      --surface: #ffffff; --surface-2: #f0f1f6;
+      --rule: rgba(9,11,18,.11); --rule-strong: rgba(9,11,18,.2);
+      --ink: #12141b; --ink-dim: #4e5668; --ink-faint: #838c9e;
+      --accent: #5847d8; --done: #0f9d72; --doing: #a9761a;
+      --next: #3a56c9; --later: #6d7688; --decided: #0e9c92;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f6fa; --bg-glow: rgba(124,108,255,.07); --bg-glow-2: rgba(45,212,191,.05);
+    --surface: #ffffff; --surface-2: #f0f1f6;
+    --rule: rgba(9,11,18,.11); --rule-strong: rgba(9,11,18,.2);
+    --ink: #12141b; --ink-dim: #4e5668; --ink-faint: #838c9e;
+    --accent: #5847d8; --done: #0f9d72; --doing: #a9761a;
+    --next: #3a56c9; --later: #6d7688; --decided: #0e9c92;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1100px 620px at 50% -10%, var(--bg-glow), transparent 68%),
+      radial-gradient(800px 560px at 100% 4%, var(--bg-glow-2), transparent 60%),
+      var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page { max-width: 1500px; margin: 0 auto; padding: 52px 28px 90px; }
+
+  header.top { display: flex; flex-direction: column; gap: 14px; margin-bottom: 30px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--ink-faint);
+    display: flex; flex-wrap: wrap; gap: 8px 18px;
+  }
+  .eyebrow b { color: var(--accent); font-weight: 500; }
+  h1 { margin: 0; font-size: clamp(28px, 4vw, 40px); font-weight: 600; letter-spacing: -.026em; }
+  .sub { margin: 0; max-width: 72ch; color: var(--ink-dim); font-size: 16px; }
+  .sub strong { color: var(--ink); font-weight: 500; }
+
+  /* health strip */
+  .health {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    margin: 22px 0 4px; padding: 14px 16px;
+    border: 1px solid var(--rule-strong); border-radius: 4px;
+    background: var(--surface);
+  }
+  .stat { display: flex; flex-direction: column; gap: 1px; padding-right: 26px; }
+  .stat b { font-family: var(--mono); font-size: 17px; font-variant-numeric: tabular-nums; }
+  .stat span {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+  .stat.ok b { color: var(--done); }
+
+  /* board */
+  .board {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(268px, 1fr));
+    gap: 18px;
+    align-items: start;
+    overflow-x: auto;
+    padding-bottom: 8px;
+  }
+
+  .col { display: flex; flex-direction: column; gap: 10px; min-width: 268px; }
+  .col-head {
+    display: flex; align-items: center; gap: 9px;
+    padding-bottom: 10px; border-bottom: 2px solid var(--lane);
+  }
+  .col-head h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -.005em; }
+  .col-head .n {
+    margin-left: auto; font-family: var(--mono); font-size: 11px;
+    color: var(--ink-faint); font-variant-numeric: tabular-nums;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--lane); }
+
+  .col.done    { --lane: var(--done); }
+  .col.doing   { --lane: var(--doing); }
+  .col.next    { --lane: var(--next); }
+  .col.later   { --lane: var(--later); }
+
+  .card {
+    border: 1px solid var(--rule);
+    border-left: 2px solid var(--lane);
+    border-radius: 3px;
+    background: var(--surface);
+    padding: 11px 13px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .card h3 { margin: 0; font-size: 13.5px; font-weight: 550; line-height: 1.4; }
+  .card p { margin: 0; font-size: 12.5px; color: var(--ink-dim); line-height: 1.5; }
+  .meta {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 10px;
+  }
+  .tag {
+    letter-spacing: .07em; text-transform: uppercase;
+    padding: 1.5px 6px; border-radius: 2px;
+    border: 1px solid var(--rule-strong); color: var(--ink-faint);
+    background: var(--surface-2);
+  }
+  .tag.engine  { color: var(--accent); border-color: var(--accent); }
+  .tag.canvas  { color: var(--next); border-color: var(--next); }
+  .tag.core    { color: var(--decided); border-color: var(--decided); }
+  .tag.release { color: var(--doing); border-color: var(--doing); }
+  .sha { color: var(--done); }
+  .card code {
+    font-family: var(--mono); font-size: .87em;
+    background: var(--surface-2); border: 1px solid var(--rule);
+    border-radius: 2px; padding: .05em .3em;
+  }
+
+  /* decisions */
+  .decisions { margin-top: 46px; }
+  .decisions h2 {
+    margin: 0 0 4px; font-size: 17px; font-weight: 600;
+    padding-bottom: 11px; border-bottom: 1px solid var(--rule-strong);
+  }
+  .dgrid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 14px; margin-top: 18px;
+  }
+  .decision {
+    border: 1px solid var(--rule); border-radius: 3px;
+    background: var(--surface); padding: 15px 17px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .decision h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  .decision p { margin: 0; font-size: 12.75px; color: var(--ink-dim); }
+  .decision .verdict {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--decided);
+  }
+
+  footer {
+    margin-top: 50px; padding-top: 18px; border-top: 1px solid var(--rule-strong);
+    font-family: var(--mono); font-size: 11px; color: var(--ink-faint);
+    display: flex; flex-wrap: wrap; gap: 6px 22px;
+  }
+
+  @media (max-width: 980px) {
+    .board { grid-template-columns: 1fr; }
+    .col { min-width: 0; }
+  }
+</style>
+
+<div class="page">
+
+  <header class="top">
+    <div class="eyebrow">
+      <span>Delivery board</span>
+      <span><b>RICH</b> — intent-to-verified-software compiler</span>
+      <span>updated 27 Aug 2026 · v1.0.0</span>
+    </div>
+    <h1>RICH Delivery Board</h1>
+    <p class="sub">
+      What is done, what is moving, and what is deliberately not being done yet.
+      The repo is now <strong>one product</strong>: one package, one server, one UI —
+      after retiring the second engine that shared them. The control plane is being
+      pointed at the architect's question — <em>is this requirement true, and what
+      proves it?</em> — rather than at the code that resulted.
+    </p>
+
+    <div class="health">
+      <div class="stat ok"><b>661</b><span>tests pass</span></div>
+      <div class="stat ok"><b>3.10–3.14</b><span>python, all verified</span></div>
+      <div class="stat ok"><b>green</b><span>ruff · tsc · build</span></div>
+      <div class="stat ok"><b>9</b><span>bugs found by one live test</span></div>
+      <div class="stat"><b>−10k</b><span>net lines this pass</span></div>
+      <div class="stat"><b>0</b><span>known defects</span></div>
+    </div>
+  </header>
+
+  <div class="board">
+
+    <!-- ── DONE ─────────────────────────────────────── -->
+    <div class="col done">
+      <div class="col-head"><span class="dot"></span><h2>Shipped</h2><span class="n">41</span></div>
+
+      <article class="card">
+        <h3>Provider conformance suite</h3>
+        <p>Seven rules every adapter obeys, run against all three. Found a real bug on its first run: a cost ceiling of zero was constructible, authorizing a call with no money budgeted.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">cec3beb</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Watch a run happen</h3>
+        <p><code>rich logs --follow</code> renders the durable events as a timeline. Evidence lines say what they spoke for.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">c1be254</span></div>
+      </article>
+
+      <article class="card">
+        <h3>The CLI works where people type</h3>
+        <p><code>rich serve --state-dir X</code> answered "unrecognized". Found by installing clean and following the README.</p>
+        <div class="meta"><span class="tag release">release</span><span class="sha">7a11ad1</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Select the project, not just create it</h3>
+        <p>"Create or select" could only create; a second project was reachable only by typing its id from memory.</p>
+        <div class="meta"><span class="tag canvas">canvas</span><span class="sha">fb2e9bf</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Change locality, proven live</h3>
+        <p>Amend a requirement the domain layer does not serve: domain <em>replayed</em> its memo and passed every gate in one attempt, while web — which does serve it — was rewritten. Cost proportional to the change, against a real model.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">6fc6019</span></div>
+      </article>
+
+      <article class="card">
+        <h3>A node is gated on its own contract</h3>
+        <p>The property gate ran every contract's suite on every task, so domain failed because web — built later — had not written its module yet. A node was being judged by another node's absence.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">635d6fc</span></div>
+      </article>
+
+      <article class="card">
+        <h3>The verifier accepts idiomatic TypeScript</h3>
+        <p><code>_input</code> is how TypeScript says "deliberately unused", and the pinned interface makes it common. The lint gate was failing correct code for it.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">6fc6019</span></div>
+      </article>
+
+      <article class="card">
+        <h3>One operations module per component</h3>
+        <p>Every component's operations lived in one shared module owned by domain — so domain implemented <code>accept_req_a11y</code>, an operation belonging to app. Change locality was real at the contract level and worth nothing at the implementation level.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">82b96cd</span></div>
+      </article>
+
+      <article class="card">
+        <h3>A failing check says what it got</h3>
+        <p>Every generated assertion collapsed to a boolean before asserting, so a failure read "expected false to be true". The retry loop was working perfectly and being handed a message with no information in it.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">344241c</span></div>
+      </article>
+
+      <article class="card">
+        <h3>The memo key is the question, not the coaching</h3>
+        <p>Recorded under whichever attempt won — so any task needing a retry filed its answer under a key that could never recur. Memoization only helped tasks that succeeded first try.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">92074d7</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Keyed on the run's baseline</h3>
+        <p>A failed attempt leaves its source behind to repair, so the winning answer was filed under "the workspace after a failure" — a state no fresh run reproduces.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">3564984</span></div>
+      </article>
+
+      <article class="card">
+        <h3>A repair's memo is still replayable</h3>
+        <p>Its bundle says "replace" for files a fresh scaffold lacks. That guard protects against a model's mistake, not against replaying an already-verified answer.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">07891fe</span></div>
+      </article>
+
+      <article class="card">
+        <h3>A retry asks, it does not replay</h3>
+        <p>Fixing the key made every attempt replay the same rejected answer — three identical gate failures without ever asking the model.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">00992ae</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Only remember what the gates accepted</h3>
+        <p>The memo was written as soon as source applied, so a generation whose gates then failed stayed replayable. The worker now stages it and cannot commit it — whatever ran the gates does.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">5cd675a</span></div>
+      </article>
+
+      <article class="card">
+        <h3>A protected input is context, not workspace</h3>
+        <p>Compiled-from-intent modules were model-editable and shown as "your files" the parser would refuse to let it write. They also carried every capability, so amending any requirement changed every node's inputs.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">e745bc1</span></div>
+      </article>
+
+      <article class="card">
+        <h3>A change costs what it changes</h3>
+        <p>Two approved revisions compile to the smallest stale set. Measured on a model-authored architecture: amending a UI-only requirement leaves data and domain replaying from memo.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">58ac550</span></div>
+      </article>
+
+      <article class="card">
+        <h3>The blast radius is derived, not guessed</h3>
+        <p>An implementation change cannot reach a consumer — none was ever shown it. A contract change invalidates consumers transitively. The firewall, cashed in.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">58ac550</span></div>
+      </article>
+
+      <article class="card">
+        <h3>An architect's control plane, not a developer's</h3>
+        <p>The run leads with an assurance panel: every requirement, its scenarios, the gates that spoke for it, proven or not. Source moved behind a disclosure labelled for audit.</p>
+        <div class="meta"><span class="tag canvas">canvas</span><span class="sha">0b28a76</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Contracts read as behaviour</h3>
+        <p>Operations as signatures in words, obligations as the sentences they mean — each one compiled into a test that runs.</p>
+        <div class="meta"><span class="tag canvas">canvas</span><span class="sha">7613c91</span></div>
+      </article>
+
+      <article class="card">
+        <h3>The rail says what is waiting on you</h3>
+        <p>Derived from durable objects rather than a counter, so an unapproved spec no longer reads as a finished stage. Each stage jumps to its section.</p>
+        <div class="meta"><span class="tag canvas">canvas</span><span class="sha">aaac89a</span></div>
+      </article>
+
+      <article class="card">
+        <h3>1.0.0, with a changelog</h3>
+        <p>A version customers can pin and a record of what moved — naming the defect, not just the fix.</p>
+        <div class="meta"><span class="tag release">release</span><span class="sha">75dbf3a</span></div>
+      </article>
+
+      <article class="card">
+        <h3>One product, not two systems</h3>
+        <p>v1 engine, its surface, its half of the UI and the dead canvas importer removed. One server now answers the API and serves the canvas.</p>
+        <div class="meta"><span class="tag core">codebase</span><span class="sha">3c968be</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Names stop referring to a version that is gone</h3>
+        <p><code>richbuild</code>, command <code>rich</code>, API <code>/v1</code>, classes named for what they are. Wire-format strings deliberately untouched.</p>
+        <div class="meta"><span class="tag core">codebase</span><span class="sha">3c968be</span></div>
+      </article>
+
+      <article class="card">
+        <h3>models split by subject</h3>
+        <p>3,900 lines → six modules, one import name, acyclic and held to it by a test.</p>
+        <div class="meta"><span class="tag core">codebase</span><span class="sha">e874f07</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Obligations are executed, not declared</h3>
+        <p>Contracts compile to a vitest suite against a pinned interface and run as their own gate. Verified live: 9 property gates green.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">4e62532</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Generation memoized, verification never</h3>
+        <p>Keyed on the exact request, so a retry — which carries its predecessor's failures — can never replay the answer that just failed.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">3532017</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Rebuild one node</h3>
+        <p>Scoped per project; siblings replay from memo instead of being paid for twice.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">03304fa</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Gate output feeds the retry</h3>
+        <p>Redacted to what the failing task may read, so a diagnostic cannot leak a sibling's source. Evidence informs generation; generation never becomes evidence.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">aefc481</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Durable cancellation</h3>
+        <p>The engine always checked a token; nothing could set one. Now reachable from any surface, because the process that starts a run is rarely the one asked to stop it.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">cc793de</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Architect always assembles</h3>
+        <p>0/6 → 6/6 first-attempt, measured. Derive what the model already evidenced; drop the claim it cannot express; keep a valid answer in reserve.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">bd3bd94</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Two vulnerabilities in the old API</h3>
+        <p>Arbitrary-directory source read via path traversal, and no Host check at all — a DNS-rebinding hole. Both fixed, then the surface was deleted outright.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">5b1b042</span></div>
+      </article>
+
+      <article class="card">
+        <h3>One canonical encoding</h3>
+        <p>Four definitions of the bytes digests are taken over, already drifted — the store's alone permitted <code>NaN</code>, which is not JSON.</p>
+        <div class="meta"><span class="tag core">codebase</span><span class="sha">a1e889d</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Approval gates are validated</h3>
+        <p>A typo would have opened an approval at a gate nothing checks: granted in appearance, authorizing nothing.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">cf60643</span></div>
+      </article>
+
+      <article class="card">
+        <h3>One path guard, one ownership check</h3>
+        <p>Five validators at four strictnesses collapsed to the strictest. Every caller got stricter; none got weaker.</p>
+        <div class="meta"><span class="tag core">codebase</span><span class="sha">0fd25a7</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Provider helpers shared</h3>
+        <p>Byte-identical across three adapters. Each keeps its own parsing; only the part that was never vendor-specific moved.</p>
+        <div class="meta"><span class="tag core">codebase</span><span class="sha">ac2cd9d</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Workspace boundary in the control plane</h3>
+        <p>It guarded only the HTTP entry point. Now every caller crosses it — and the CLI opts out explicitly, with a reason.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">2ae0d95</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Execution status reads the lease</h3>
+        <p>It reported an in-memory set while the guarantee lived in SQLite, so a run executing elsewhere read as idle.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">6dbd6a1</span></div>
+      </article>
+
+      <article class="card">
+        <h3>The architecture is a graph</h3>
+        <p>Rows by layer, edges by kind, live per-node task status, per-node rebuild, selection shared with the inspector.</p>
+        <div class="meta"><span class="tag canvas">canvas</span><span class="sha">3d5fdd1</span></div>
+      </article>
+
+      <article class="card">
+        <h3>The interview is a conversation</h3>
+        <p>It was always adaptive and nothing called it, so it behaved like a fixed form that rejected you for missing a question it never asked.</p>
+        <div class="meta"><span class="tag canvas">canvas</span><span class="sha">11556f7</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Preview reaches a URL</h3>
+        <p>Five routes existed with nothing calling them. The approval binds the verified digest, so a later change cannot ride an earlier decision.</p>
+        <div class="meta"><span class="tag canvas">canvas</span><span class="sha">0acc7f7</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Every claimed Python version tested</h3>
+        <p><code>requires-python</code> said 3.10 while CI ran two versions. All five now run, each verified locally first — which caught a dependency I had wrongly dropped.</p>
+        <div class="meta"><span class="tag release">release</span><span class="sha">3c968be</span></div>
+      </article>
+    </div>
+
+    <!-- ── DOING ────────────────────────────────────── -->
+    <div class="col doing">
+      <div class="col-head"><span class="dot"></span><h2>In progress</h2><span class="n">3</span></div>
+
+      <article class="card">
+        <h3>Change locality, end to end</h3>
+        <p>A live test that builds, amends a requirement the domain layer does not serve, and asserts domain replays while the rest is rewritten. Four fixture bugs found and fixed; the first build now lands on its third attempt. Running.</p>
+        <div class="meta"><span class="tag engine">engine</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Three attempts, not two</h3>
+        <p>The first build needed a third attempt to act on property-gate output. Worth deciding deliberately rather than leaving as a test-local tweak.</p>
+        <div class="meta"><span class="tag engine">engine</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Green the locality test</h3>
+        <p>The claim is proven — domain replayed, web rebuilt, all gates re-ran. The run still ended red on an unrelated lint failure, now fixed. One more run makes it a standing test rather than a demonstration.</p>
+        <div class="meta"><span class="tag engine">engine</span></div>
+      </article>
+    </div>
+
+    <!-- ── NEXT ─────────────────────────────────────── -->
+    <div class="col next">
+      <div class="col-head"><span class="dot"></span><h2>Next</h2><span class="n">0</span></div>
+
+      <article class="card">
+        <h3>Nothing queued</h3>
+        <p>The next column is empty. Pulling from Later means picking one and scoping it properly.</p>
+        <div class="meta"><span class="tag core">status</span></div>
+      </article>
+    </div>
+
+    <!-- ── LATER ────────────────────────────────────── -->
+    <div class="col later">
+      <div class="col-head"><span class="dot"></span><h2>Roadmap</h2><span class="n">4</span></div>
+
+      <article class="card">
+        <h3>A second target pack</h3>
+        <p>The growth path, and the one that tests whether the compiler/pack seam is real. Breadth at the boundary, not depth inside one shape.</p>
+        <div class="meta"><span class="tag engine">engine</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Parallel coding across worktrees</h3>
+        <p>Coding is single-worker by design. Parallelism needs isolated worktrees plus reverification, not racing one directory.</p>
+        <div class="meta"><span class="tag engine">engine</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Richer architecture semantics</h3>
+        <p>State machines, transactions, concurrency and failure modes as first-class contract vocabulary.</p>
+        <div class="meta"><span class="tag engine">engine</span></div>
+      </article>
+
+      <article class="card">
+        <h3>Vertical decomposition</h3>
+        <p>Layers are horizontal, so a feature cuts through all of them. Capability-shaped components would give change locality by construction rather than by good allocation.</p>
+        <div class="meta"><span class="tag engine">engine</span></div>
+      </article>
+    </div>
+
+  </div>
+
+  <section class="decisions">
+    <h2>Decided, and why</h2>
+    <div class="dgrid">
+      <div class="decision">
+        <span class="verdict">Kept</span>
+        <h3>The architect's four-layer cap</h3>
+        <p>It is a choice, not a limit — the compiler's ordering is general and would carry a deeper graph today. It is also what took first-attempt assembly from 0/6 to 6/6. Growth belongs at the pack boundary.</p>
+      </div>
+      <div class="decision">
+        <span class="verdict">Reversed</span>
+        <h3>Retiring v1 would have cost the canvas</h3>
+        <p>The census said delete it. Acting on that would have deleted the React Flow canvas with it, so v2 got the graph first — then v1 came out having lost nothing.</p>
+      </div>
+      <div class="decision">
+        <span class="verdict">Kept</span>
+        <h3><code>models</code> keeps its own path check</h3>
+        <p>An explicit layering rule says it imports no sibling. Weakening that to fit a refactor was the wrong trade, so the duplication is intentional and says so in the code.</p>
+      </div>
+      <div class="decision">
+        <span class="verdict">Kept</span>
+        <h3>The unwired OpenAI adapter</h3>
+        <p>A seam with one implementation is not a seam. It stays until a conformance suite can prove the claim — which is the card in Next, not a promise.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>RICH delivery board</span>
+    <span>661 passed · 24 skipped</span>
+    <span>ruff · tsc · build green</span>
+    <span>HEAD 6fc6019</span>
+  </footer>
+
+</div>
