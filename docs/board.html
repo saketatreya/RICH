@@ -197,7 +197,7 @@
     </p>
 
     <div class="health">
-      <div class="stat ok"><b>661</b><span>tests pass</span></div>
+      <div class="stat ok"><b>662</b><span>tests pass</span></div>
       <div class="stat ok"><b>3.10–3.14</b><span>python, all verified</span></div>
       <div class="stat ok"><b>green</b><span>ruff · tsc · build</span></div>
       <div class="stat ok"><b>9</b><span>bugs found by one live test</span></div>
@@ -210,7 +210,7 @@
 
     <!-- ── DONE ─────────────────────────────────────── -->
     <div class="col done">
-      <div class="col-head"><span class="dot"></span><h2>Shipped</h2><span class="n">41</span></div>
+      <div class="col-head"><span class="dot"></span><h2>Shipped</h2><span class="n">42</span></div>
 
       <article class="card">
         <h3>Provider conformance suite</h3>
@@ -237,8 +237,8 @@
       </article>
 
       <article class="card">
-        <h3>Change locality, proven live</h3>
-        <p>Amend a requirement the domain layer does not serve: domain <em>replayed</em> its memo and passed every gate in one attempt, while web — which does serve it — was rewritten. Cost proportional to the change, against a real model.</p>
+        <h3>Change locality, proven live · green</h3>
+        <p>A standing test now: build, amend a requirement the domain layer does not serve, rebuild. Domain <em>replayed</em> its memo and passed every gate on its first attempt; web, which does serve it, was rewritten. Nine real defects came out of getting there.</p>
         <div class="meta"><span class="tag engine">engine</span><span class="sha">6fc6019</span></div>
       </article>
 
@@ -476,9 +476,9 @@
       </article>
 
       <article class="card">
-        <h3>Green the locality test</h3>
-        <p>The claim is proven — domain replayed, web rebuilt, all gates re-ran. The run still ended red on an unrelated lint failure, now fixed. One more run makes it a standing test rather than a demonstration.</p>
-        <div class="meta"><span class="tag engine">engine</span></div>
+        <h3>Put change compilation in the run flow</h3>
+        <p>The mechanism is proven and reachable from CLI, API and canvas, but preparing a second run against an amended spec is still assembled by hand in a test. It should be a button.</p>
+        <div class="meta"><span class="tag canvas">canvas</span></div>
       </article>
     </div>
 
@@ -552,9 +552,9 @@
 
   <footer>
     <span>RICH delivery board</span>
-    <span>661 passed · 24 skipped</span>
+    <span>662 passed · 24 skipped</span>
     <span>ruff · tsc · build green</span>
-    <span>HEAD 6fc6019</span>
+    <span>HEAD 46b5ebb</span>
   </footer>
 
 </div>
