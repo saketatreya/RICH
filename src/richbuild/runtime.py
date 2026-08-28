@@ -91,11 +91,12 @@ CODING_LIMITS_BY_ROUTE: dict[str, CodingLimits] = {
 
 @dataclass(frozen=True, slots=True)
 class PinnedRunCommands:
-    """The five package scripts consumed by ``RunEngineConfig``."""
+    """The verification commands consumed by ``RunEngineConfig``."""
 
     lint_argv: tuple[str, ...]
     static_argv: tuple[str, ...]
     unit_argv: tuple[str, ...]
+    property_argv: tuple[str, ...]
     build_argv: tuple[str, ...]
     acceptance_argv: tuple[str, ...]
 
@@ -109,6 +110,13 @@ class PinnedRunCommands:
             lint_argv=toolchain.verification_argv("lint"),
             static_argv=toolchain.verification_argv("typecheck"),
             unit_argv=toolchain.verification_argv("test"),
+            # vitest directly rather than the package script: a node is gated
+            # on its own suite, and the script names the whole directory, so
+            # appending one file would add a second filter rather than narrow
+            # to the first.
+            property_argv=toolchain.pnpm_argv(
+                "exec", "vitest", "run", "--configLoader", "runner"
+            ),
             build_argv=toolchain.verification_argv("build"),
             acceptance_argv=toolchain.verification_argv("test:e2e"),
         )

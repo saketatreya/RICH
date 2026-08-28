@@ -269,6 +269,7 @@ def _execute(state, events=None):
             lint_argv=runtime.commands.lint_argv,
             static_argv=runtime.commands.static_argv,
             unit_argv=runtime.commands.unit_argv,
+            property_argv=runtime.commands.property_argv,
             build_argv=runtime.commands.build_argv,
             acceptance_argv=runtime.commands.acceptance_argv,
         ),

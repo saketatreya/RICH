@@ -448,7 +448,18 @@ class RunEngineConfig:
     lint_argv: tuple[str, ...] = ("pnpm", "run", "lint")
     static_argv: tuple[str, ...] = ("pnpm", "run", "typecheck")
     unit_argv: tuple[str, ...] = ("pnpm", "run", "test")
-    property_argv: tuple[str, ...] = ("pnpm", "run", "test:properties")
+    # vitest directly, not `pnpm run test:properties`: the script names the
+    # whole directory, and appending one file to it adds a second filter rather
+    # than narrowing to the first. A node is gated on its own suite, so the
+    # suite path has to be the only path.
+    property_argv: tuple[str, ...] = (
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "--configLoader",
+        "runner",
+    )
     build_argv: tuple[str, ...] = ("pnpm", "run", "build")
     acceptance_argv: tuple[str, ...] = ("pnpm", "run", "test:e2e")
     max_verification_log_bytes: int = 256 * 1024
