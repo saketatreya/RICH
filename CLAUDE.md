@@ -41,6 +41,11 @@ python -m pytest --run-live --basetemp=.rich/live-tests tests/test_public_runtim
 # ^ downloads locked pnpm deps + Chromium (>2 GiB); needs a non-tmpfs basetemp
 #   and Linux with Bubblewrap + user namespaces. It does NOT call a model.
 python -m pytest --run-live --basetemp=.rich/live-loop tests/test_closed_loop_live.py
+python -m pytest --run-live --basetemp=.rich/locality \
+  tests/test_change_locality_live.py
+# ^ build, amend a requirement one component does not serve, rebuild: that
+#   component replays its memo while the ones that do serve it are rewritten,
+#   and every gate runs again. ~9 min, two model-backed builds.
 # ^ the whole loop: intent → architecture → scaffold → a REAL model authors
 #   source → lint/typecheck/unit/properties/build/Playwright in Bubblewrap.
 #   ~3.5 min and a few dollars of quota.

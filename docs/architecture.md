@@ -341,6 +341,17 @@ The second is not a failure of the mechanism: that requirement really is served 
 layer, so every layer really must be rebuilt. The first is the point — cost proportional
 to the change, on an architecture nobody hand-tuned for the demonstration.
 
+**Driven end to end against a real model.** `tests/test_change_locality_live.py`
+builds the application, amends a requirement the domain layer does not serve, applies
+the change, and runs again:
+
+- `domain` **replayed** its remembered generation and passed every gate on its first
+  attempt;
+- `web`, which does serve that requirement, was written again;
+- and the second pass re-ran lint, types, unit, properties, build and acceptance in full.
+
+That last point is the one to keep hold of. A smaller stale set is not a smaller proof.
+
 **The allocation is what decides the cost.** The deterministic planner gives every layer
 every requirement, which is honest for a layered baseline — a feature really does cut
 through UI, domain and data — and buys no change locality at all: every amendment stales
