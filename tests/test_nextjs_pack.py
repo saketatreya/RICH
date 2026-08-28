@@ -629,3 +629,21 @@ def test_an_architecture_that_claims_nothing_scaffolds_no_property_gate(tmp_path
     assert not [p for p in paths if p.startswith("tests/properties/")]
     assert not [p for p in paths if p.endswith("operations-contract.ts")]
     assert "packages/contracts/src/operations.ts" not in paths
+
+
+def test_the_verifier_accepts_the_underscore_convention_for_unused_arguments(
+    tmp_path,
+):
+    """A worker satisfying a pinned interface it does not need every argument
+    of writes `_input`, which is how TypeScript says "deliberately unused".
+    A verifier that fails that is failing idiomatic code."""
+
+    manifest = _approved_pack().scaffold(tmp_path / "workspace")
+    paths = {item.path for item in manifest.files}
+    assert "apps/web/eslint.config.mjs" in paths
+
+    config = (tmp_path / "workspace/apps/web/eslint.config.mjs").read_text()
+
+    assert '"@typescript-eslint/no-unused-vars"' in config
+    assert 'argsIgnorePattern: "^_"' in config
+    assert 'varsIgnorePattern: "^_"' in config

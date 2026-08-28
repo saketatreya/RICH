@@ -1276,6 +1276,23 @@ class NextJsTargetPack:
                     "export default defineConfig([\n"
                     "  ...nextVitals,\n"
                     "  ...nextTypescript,\n"
+                    "  {\n"
+                    "    rules: {\n"
+                    "      // An underscore prefix is how TypeScript says a\n"
+                    "      // parameter is deliberately unused -- satisfying an\n"
+                    "      // interface it does not need every argument of. The\n"
+                    "      // pinned operations interface makes that common, and\n"
+                    "      // without this the verifier fails idiomatic code.\n"
+                    '      "@typescript-eslint/no-unused-vars": [\n'
+                    '        "warn",\n'
+                    "        {\n"
+                    '          argsIgnorePattern: "^_",\n'
+                    '          varsIgnorePattern: "^_",\n'
+                    '          caughtErrorsIgnorePattern: "^_",\n'
+                    "        },\n"
+                    "      ],\n"
+                    "    },\n"
+                    "  },\n"
                     '  globalIgnores([".next/**", "out/**", "build/**", "next-env.d.ts"]),\n'
                     "]);\n"
                 ),
