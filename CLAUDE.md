@@ -37,6 +37,9 @@ python -m pytest --run-live tests/test_claude_code_provider.py
 # ^ one small real `claude -p` call; needs a Claude Code login, no API key.
 # ^ obligations run the generated sampler under the pinned Node and check every
 #   drawn value against ValueType.accepts. Needs `node` 22.x; no model.
+python -m pytest --run-live tests/test_preview_live.py
+# ^ a real Neon branch + Vercel deployment of a seeded run, then torn down; needs
+#   NEON_API_TOKEN, VERCEL_TOKEN, RICH_NEON_PROJECT_ID. Skips without them.
 python -m pytest --run-live --basetemp=.rich/live-tests tests/test_public_runtime_live.py
 # ^ downloads locked pnpm deps + Chromium (>2 GiB); needs a non-tmpfs basetemp
 #   and Linux with Bubblewrap + user namespaces. It does NOT call a model.
