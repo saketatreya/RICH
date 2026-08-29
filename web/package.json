@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "smoke": "node smoke.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "drive:m1": "node drive/m1-return.mjs"
   },
   "dependencies": {
     "@xyflow/react": "^12.3.5",
