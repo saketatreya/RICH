@@ -1474,3 +1474,87 @@ def test_an_application_without_a_data_component_hears_nothing_about_databases(
 
     assert "force-dynamic" not in prompt.user_prompt
     assert "pinned_database_factory" not in prompt.user_prompt
+
+
+def test_a_retry_prompt_withholds_the_oldest_failures_rather_than_not_happening(
+    tmp_path,
+):
+    """Three bounded failures beside a large owned tree overflowed the prompt
+    on a live run, so the second and third attempts never happened -- the
+    task failed on PromptLimitError without the model ever reading the gate
+    output. The oldest failures go first, the worker is told how many, and
+    only a prompt that overflows with no failure at all is refused."""
+
+    project, architecture, plan, approval = _fixture()
+    task = plan.task_index["web"]
+    summaries = {"domain": "Exposes a stable getNote operation."}
+    failures = [
+        PriorAttemptFailure(
+            attempt=index,
+            gate="types",
+            summary=f"types exited with {index}",
+            diagnostics=tuple(
+                f"apps/web/note.tsx({line},1): error TS{index}000: failure number {index} "
+                + "x" * 90
+                for line in range(1, 30)
+            ),
+        )
+        for index in range(1, 4)
+    ]
+    base = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=task,
+        approval=approval,
+        dependency_summaries=summaries,
+    )
+    one_failure = len(json.dumps(failures[2].to_dict()).encode("utf-8"))
+    limits = coding.CodingLimits(max_prompt_bytes=base.prompt_bytes + one_failure + 1500)
+
+    retry = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=task,
+        approval=approval,
+        dependency_summaries=summaries,
+        prior_failures=failures,
+        limits=limits,
+    )
+
+    assert retry.prompt_bytes <= limits.max_prompt_bytes
+    assert "failure number 3" in retry.user_prompt, "the most recent is what fits"
+    assert "failure number 2" not in retry.user_prompt
+    assert "failure number 1" not in retry.user_prompt
+    assert '"prior_attempt_failures_withheld":2' in retry.user_prompt
+    assert "2 oldest failure(s) did not fit" in retry.user_prompt
+    assert "observed by the harness" in retry.user_prompt
+
+    # With room for all three, nothing is withheld and nothing says so.
+    roomy = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=task,
+        approval=approval,
+        dependency_summaries=summaries,
+        prior_failures=failures,
+    )
+    assert "failure number 1" in roomy.user_prompt
+    assert "did not fit" not in roomy.user_prompt
+    assert "prior_attempt_failures_withheld" not in roomy.user_prompt
+
+    # A prompt that overflows with no failure at all is still refused: that
+    # is a task too large for the worker, not a retry too large to explain.
+    with pytest.raises(coding.PromptLimitError):
+        build_task_prompt(
+            workspace=tmp_path,
+            project=project,
+            architecture=architecture,
+            task=task,
+            approval=approval,
+            dependency_summaries=summaries,
+            prior_failures=failures,
+            limits=coding.CodingLimits(max_prompt_bytes=base.prompt_bytes - 1),
+        )

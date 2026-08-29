@@ -1492,10 +1492,10 @@ def build_task_prompt(
         normalized_summaries[dependency_id] = normalized
 
     ordered_failures = sorted(prior_failures, key=lambda item: item.attempt)
-    recent_failures = ordered_failures[-limits.max_prior_failures :]
-    for failure in recent_failures:
+    for failure in ordered_failures:
         if not isinstance(failure, PriorAttemptFailure):
             raise CodingWorkerError("prior failures must be PriorAttemptFailure")
+    recent_failures = ordered_failures[-limits.max_prior_failures :]
 
     root = _assert_workspace(Path(workspace))
     current_files, _ = _read_current_files(root, task.owned_paths, limits)
@@ -1519,6 +1519,73 @@ def build_task_prompt(
         for node in relevant_nodes
         if node["contract_id"] is not None
     }
+    def render(carried: Sequence[PriorAttemptFailure]) -> tuple[dict[str, Any], str, str]:
+        return _render_task_prompt(
+            project=project,
+            architecture=architecture,
+            task=task,
+            requirement_ids=requirement_ids,
+            relevant_nodes=relevant_nodes,
+            relevant_contract_ids=relevant_contract_ids,
+            relevant_node_ids=relevant_node_ids,
+            normalized_summaries=normalized_summaries,
+            obligation_surface=obligation_surface,
+            pinned=pinned,
+            database_factory=database_factory,
+            persists=persists,
+            current_files=current_files,
+            carried=carried,
+            withheld=len(recent_failures) - len(carried),
+        )
+
+    # The gate output a retry is shown is bounded per failure, but three
+    # bounded failures beside a large owned tree can still overflow the
+    # prompt. A retry that cannot see why the last attempt failed is just
+    # another first attempt -- and a retry that never happens because the
+    # failure was too big to show is worse. So the oldest failures are
+    # withheld first, and the worker is told how many, until the prompt fits;
+    # only a prompt that overflows with no failure at all is refused.
+    carried = list(recent_failures)
+    while True:
+        context, system_prompt, user_prompt = render(carried)
+        prompt_bytes = len(system_prompt.encode("utf-8")) + len(
+            user_prompt.encode("utf-8")
+        )
+        if prompt_bytes <= limits.max_prompt_bytes:
+            break
+        if not carried:
+            raise PromptLimitError(
+                f"task prompt is {prompt_bytes} bytes, over the "
+                f"{limits.max_prompt_bytes}-byte limit"
+            )
+        carried = carried[1:]
+    return PromptBundle(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        current_file_count=len(current_files),
+        prompt_bytes=prompt_bytes,
+    )
+
+
+def _render_task_prompt(
+    *,
+    project: ProjectSpec,
+    architecture: ArchitectureSpec,
+    task: CompiledTask,
+    requirement_ids: set[str],
+    relevant_nodes: list[dict[str, Any]],
+    relevant_contract_ids: set[str],
+    relevant_node_ids: set[str],
+    normalized_summaries: dict[str, str],
+    obligation_surface: str | None,
+    pinned: tuple[str, str] | None,
+    database_factory: tuple[str, str] | None,
+    persists: bool,
+    current_files: list[dict[str, Any]],
+    carried: Sequence[PriorAttemptFailure],
+    withheld: int,
+) -> tuple[dict[str, Any], str, str]:
+    recent_failures = list(carried)
     context = {
         "approved_intent": {
             "project_id": project.id,
@@ -1586,6 +1653,11 @@ def build_task_prompt(
         "prior_attempt_failures": [
             failure.to_dict() for failure in recent_failures
         ],
+        **(
+            {"prior_attempt_failures_withheld": withheld}
+            if withheld
+            else {}
+        ),
         "current_files": current_files,
         "write_authority": {
             "operations": ["create", "replace"],
@@ -1657,7 +1729,7 @@ def build_task_prompt(
     )
     retry_guidance = (
         ""
-        if not recent_failures
+        if not recent_failures and not withheld
         else (
             "Earlier attempts at this task failed the gates recorded under "
             "prior_attempt_failures. That output was observed by the harness, "
@@ -1666,6 +1738,12 @@ def build_task_prompt(
             "answer. Diagnostics naming files you do not own are withheld; a "
             "withheld count means you broke a consumer and should re-read your "
             "contract.\n"
+            + (
+                f"The {withheld} oldest failure(s) did not fit this prompt and "
+                "are withheld; the most recent are shown.\n"
+                if withheld
+                else ""
+            )
         )
     )
     user_prompt = (
@@ -1676,20 +1754,7 @@ def build_task_prompt(
         + retry_guidance
         + _canonical_json(context)
     )
-    prompt_bytes = len(system_prompt.encode("utf-8")) + len(
-        user_prompt.encode("utf-8")
-    )
-    if prompt_bytes > limits.max_prompt_bytes:
-        raise PromptLimitError(
-            f"task prompt is {prompt_bytes} bytes, over the "
-            f"{limits.max_prompt_bytes}-byte limit"
-        )
-    return PromptBundle(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        current_file_count=len(current_files),
-        prompt_bytes=prompt_bytes,
-    )
+    return context, system_prompt, user_prompt
 
 
 def generated_source_artifact_bytes(
