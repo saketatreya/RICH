@@ -1722,7 +1722,14 @@ def _render_task_prompt(
                     "while being prerendered fails the build. Read and write "
                     "through Server Actions (`<form action={...}>`) so the "
                     "page needs no client JavaScript. Operations that reach "
-                    "the database are async: await them.\n"
+                    "the database are async: await them. The acceptance "
+                    "scenarios under approved_intent are run by a real browser "
+                    "against the pages this application owns: a page must "
+                    "offer exactly the controls each oracle step names -- a "
+                    "field with that label, a button with that name -- and "
+                    "list what was persisted after a reload. A scaffolded "
+                    "placeholder page that only prints the requirement does "
+                    "not pass such a scenario; replace it.\n"
                 )
             )
         )

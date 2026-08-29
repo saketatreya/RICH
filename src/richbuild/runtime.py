@@ -79,6 +79,15 @@ MODEL_ROUTES: dict[str, str] = {
 # before the fact, so it needs headroom the bounded HTTP route does not.
 CLAUDE_CODE_LIMITS = replace(
     DEFAULT_LIMITS,
+    # Measured on M7's proof: the web task of a four-component persisting
+    # application -- two requirements with their oracles, three contracts,
+    # the pinned interface, its own tree -- is a 25,186-byte prompt with no
+    # gate failure carried at all, over the 24,000 the API route sizes for
+    # its 32k-token reservation. This route reports what an attempt cost
+    # rather than bounding it before the fact, so the bound here is the
+    # prompt's, and it gets the headroom the measurement asks for.
+    max_prompt_bytes=36_000,
+    max_input_tokens=48_000,
     max_output_tokens=24_000,
     # Not rate-derived: on this route the harness reports what an attempt
     # actually cost, so this is a per-attempt ceiling rather than an estimate.

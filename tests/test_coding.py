@@ -1458,6 +1458,10 @@ def test_the_database_factory_is_shown_only_to_the_task_that_owns_the_data_packa
         "every task in a persisting application is told the build has no database"
     )
     assert "importing a database driver" in domain.user_prompt
+    # The first live proof: the web worker satisfied its contract and left the
+    # scaffold's placeholder page, so the browser never found the field.
+    assert "exactly the controls each oracle step names" in domain.user_prompt
+    assert "placeholder page" in domain.user_prompt
 
 
 def test_an_application_without_a_data_component_hears_nothing_about_databases(

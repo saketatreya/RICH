@@ -590,3 +590,16 @@ def test_default_runtime_is_lazy_exact_priced_and_restart_aware(monkeypatch):
         )
     assert oversized.value.request_was_sent is False
     assert transport.calls == []
+
+
+def test_the_cli_route_gives_the_prompt_the_headroom_the_proof_measured():
+    from richbuild.coding import DEFAULT_LIMITS
+    from richbuild.runtime import CLAUDE_CODE_LIMITS
+
+    # 25,186 bytes with no failure carried, measured on M7's proof for the
+    # web task of a four-component persisting application. The API route's
+    # bound is sized for its 32k-token reservation and is left alone.
+    assert CLAUDE_CODE_LIMITS.max_prompt_bytes == 36_000
+    assert CLAUDE_CODE_LIMITS.max_prompt_bytes > 25_186
+    assert CLAUDE_CODE_LIMITS.max_prompt_bytes <= CLAUDE_CODE_LIMITS.max_input_tokens
+    assert DEFAULT_LIMITS.max_prompt_bytes == 24_000
