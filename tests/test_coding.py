@@ -1327,3 +1327,150 @@ def test_a_retry_asks_rather_than_replaying_the_answer_that_just_failed(tmp_path
     assert len(provider.requests) == 1, "it asks, with the failure in hand"
     assert "property exited with 1" in provider.requests[0].user_prompt
     assert result.evidence[0].details["generation_reused"] is False
+
+
+# --------------------------------------------------------------------------
+# Persistence: the data package's factory and migrator are protected, and the
+# factory is handed to the one task that must reach the database through it.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["packages/db/src/database.ts", "packages/db/src/migrate.ts"],
+)
+def test_the_database_boundary_cannot_be_rewritten_by_the_data_worker(path):
+    """Inside the data node's ownership because that is where it must be
+    importable from; protected because a worker that could rewrite the factory
+    could pick an engine the gates never ran, and one that could rewrite the
+    migrator could journal a migration it did not apply."""
+
+    assert coding.is_protected_generation_path(PurePosixPath(path))
+    with pytest.raises(
+        FileBundleValidationError, match="protected verification or toolchain"
+    ):
+        parse_file_bundle(
+            _valid_bundle(
+                files=[{"operation": "replace", "path": path, "content": "export {};\n"}]
+            ),
+            owned_paths=("packages/db",),
+        )
+    # Exactly those two, not the whole package: the schema, the migrations and
+    # the operations are the worker's to write.
+    assert not coding.is_protected_generation_path(PurePosixPath("packages/db/src/schema.ts"))
+    assert not coding.is_protected_generation_path(
+        PurePosixPath("packages/db/migrations/0001_todos.sql")
+    )
+    assert not coding.is_protected_generation_path(PurePosixPath("packages/db/src/operations.ts"))
+    assert not coding.is_protected_generation_path(
+        PurePosixPath("packages/domain/src/database.ts")
+    ), "the rule names the data package, not a filename"
+
+
+def _persisting_fixture(tmp_path):
+    from richbuild.planner import plan_nextjs_architecture
+    from richbuild.target_packs.nextjs import NextJsTargetPack, NextJsTargetPackConfig
+
+    project = ProjectSpec(
+        id="project.todo",
+        name="Todo",
+        goal="Keep a todo list that is stored in the database.",
+        audiences=("members",),
+        requirements=(
+            Requirement(
+                id="requirement.todo",
+                title="Todo list",
+                statement="A member adds a todo and it is stored.",
+            ),
+        ),
+        acceptance_scenarios=(
+            AcceptanceScenario(
+                id="scenario.todo",
+                title="A todo persists",
+                given=("The list is empty.",),
+                when=("A member adds 'Buy milk'.",),
+                then=("'Buy milk' is listed.",),
+                requirement_ids=("requirement.todo",),
+                oracle=(
+                    {"action": "open_requirement"},
+                    {
+                        "action": "assert_visible",
+                        "locator": {"kind": "text", "value": "Buy milk"},
+                    },
+                ),
+            ),
+        ),
+    )
+    architecture = plan_nextjs_architecture(project).architecture
+    assert any(node.kind is NodeKind.DATA for node in architecture.nodes)
+    workspace = tmp_path / "workspace"
+    NextJsTargetPack(
+        NextJsTargetPackConfig(
+            project_name="todo", project_spec=project, architecture=architecture
+        )
+    ).scaffold(workspace)
+    plan = compile_architecture(architecture, project)
+    approval = ApprovalWitness(
+        project_id=project.id,
+        project_revision=project.revision,
+        architecture_id=architecture.id,
+        architecture_revision=architecture.revision,
+    )
+    return workspace, project, architecture, plan, approval
+
+
+def test_the_database_factory_is_shown_only_to_the_task_that_owns_the_data_package(
+    tmp_path,
+):
+    """It is protected, so it is scoped out of current_files; a worker told to
+    persist without being shown the one door to the database would invent a
+    second one."""
+
+    workspace, project, architecture, plan, approval = _persisting_fixture(tmp_path)
+
+    data = build_task_prompt(
+        workspace=workspace,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["data"],
+        approval=approval,
+    )
+    domain = build_task_prompt(
+        workspace=workspace,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["domain"],
+        approval=approval,
+        dependency_summaries={"data": "Stores todos."},
+    )
+
+    assert "pinned_database_factory" in data.user_prompt
+    assert "DATABASE_URL or RICH_DATABASE_DIR is required" in data.user_prompt
+    assert "packages/db/src/database.ts" in data.user_prompt
+    assert "--> statement-breakpoint" in data.user_prompt
+    assert "never assume existing rows" in data.user_prompt
+    # Not one of "your current files": the parser would refuse the edit.
+    assert '"path": "packages/db/src/database.ts", "sha256"' not in data.user_prompt
+    assert "packages/db/src/migrate.ts" not in data.user_prompt
+
+    assert "pinned_database_factory" not in domain.user_prompt
+    assert "force-dynamic" in domain.user_prompt, (
+        "every task in a persisting application is told the build has no database"
+    )
+    assert "importing a database driver" in domain.user_prompt
+
+
+def test_an_application_without_a_data_component_hears_nothing_about_databases(
+    tmp_path,
+):
+    project, architecture, plan, approval = _fixture()
+    prompt = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["domain"],
+        approval=approval,
+    )
+
+    assert "force-dynamic" not in prompt.user_prompt
+    assert "pinned_database_factory" not in prompt.user_prompt

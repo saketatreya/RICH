@@ -1,39 +1,48 @@
-"""The M7 spike: can the database live inside the gates?
+"""The M7 spike, kept as the model-free proof of the pack's persistence.
 
 Design A in docs/program.md puts PGlite -- Postgres compiled to WebAssembly,
 in-process, socket-free, filesystem-backed -- inside the network-off Bubblewrap
-gates, and real Postgres on Neon at preview. Nothing else in the milestone is
-worth building if that engine cannot start under the sandbox as it stands:
-``--unshare-net``, a 16 GiB address-space ceiling for Node gates with the
-WebAssembly trap handler disabled, a 1.5 GiB V8 heap, bounded processes. This
-test asks exactly that question, in one run, on a scaffold the pack renders:
+gates, and real Postgres on Neon at preview. The spike asked whether that
+engine could start under the sandbox as it stands: ``--unshare-net``, a 16 GiB
+address-space ceiling for Node gates with the WebAssembly trap handler
+disabled, a 1.5 GiB V8 heap, bounded processes. It could, twice.
 
-a. a trusted probe script opens ``new PGlite(dir)`` on a writable path, applies
-   ``packages/db/migrations/*.sql`` with the algorithm ``preview.py`` uses on
-   Neon, inserts a row, reads it back, and prints ``RICH_DATABASE_PROBE``;
-b. ``next build --webpack`` with ``serverExternalPackages`` for the two drivers
-   and a fixture-authored server-action page that writes through
-   ``packages/domain`` -> ``packages/db``, with no database in the environment;
-c. ``next start`` under Playwright running the approved
-   ``fill -> click -> reload -> assert_visible`` oracle with
-   ``RICH_DATABASE_DIR`` set, then the probe again over the same directory.
+The pack now renders what the spike carried as fixtures -- the engine-selecting
+factory, the migrator, the probe -- so this test runs those protected files
+exactly as the engine will, with only what a worker would author laid over the
+scaffold: a schema, a migration, a domain module, a page. In one run, on a
+scaffold the pack renders:
+
+a. lint, typecheck and unit gates over the rendered tree -- the typecheck is
+   the first real ``tsc`` the protected TypeScript faces;
+b. the trusted prepare step, ``pnpm -C packages/db exec tsx src/migrate.ts``,
+   under the Node-gate policy with ``RICH_DATABASE_DIR`` set, which prints the
+   ``RICH_DATABASE_MIGRATIONS`` line the engine records; then the read-only
+   probe over the same directory;
+c. ``next build --webpack`` with no database in the environment, checking that
+   both drivers stay externals and no server chunk bundles the engine;
+d. a fresh directory, migrated again, then ``next start`` under Playwright
+   running the approved ``fill -> click -> reload -> assert_visible`` oracle,
+   then the probe, which must count the row the browser created.
 
 It measures wall time and the peak virtual size of every process the sandbox
 ran (RLIMIT_AS is per process, so the largest single ``VmPeak`` is the number
-that matters), and records how the external requires were emitted. The two
-deltas from today's gate policy are exactly the ones step 4 of the milestone
-introduces -- ``.rich/runtime/db`` writable and ``RICH_DATABASE_DIR`` in the
-environment -- and nothing else is loosened.
+that matters). The two deltas from the pre-M7 gate policy are exactly the two
+step 4 of the milestone makes the runner's own -- ``.rich/runtime/db``
+writable and ``RICH_DATABASE_DIR`` in the environment -- and nothing else is
+loosened.
 
 It is skipped by default: it downloads the locked dependency graph and
-Chromium (about 2 GiB) into the workspace. No model is called.
+Chromium (about 2 GiB) into the workspace, or into ``RICH_LIVE_CACHE_ROOT``
+when that is set. No model is called.
 
-    python -m pytest --run-live --basetemp=.rich/live-m7 -q -s \\
-        tests/test_persistence_spike_live.py
+    RICH_LIVE_CACHE_ROOT=.rich/live-cache python -m pytest --run-live \\
+        --basetemp=.rich/live-m7 -q -s tests/test_persistence_spike_live.py
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -42,6 +51,8 @@ import shutil
 import threading
 
 import pytest
+
+from liveutil import live_cache_root
 
 from richbuild.executor import (
     ExecutionResult,
@@ -62,14 +73,15 @@ from richbuild.run_engine import (
 )
 from richbuild.runtime import PinnedRunCommands
 from richbuild.target_packs.nextjs import (
+    DATABASE_DIRECTORY,
+    DATABASE_PROBE_PATH,
     NextJsTargetPack,
     NextJsTargetPackConfig,
     _route_segments,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "persistence_spike"
-DATABASE_DIRECTORY = ".rich/runtime/db"
-PROBE = ".rich/verify-database.mjs"
+MIGRATIONS_PREFIX = "RICH_DATABASE_MIGRATIONS "
 PROBE_PREFIX = "RICH_DATABASE_PROBE "
 GATE_TIMEOUT_SECONDS = 900.0
 TODO_REQUIREMENT = "req.todo"
@@ -169,18 +181,13 @@ def spike_project():
 def apply_spike_fixtures(workspace: Path, scope: str) -> str:
     """Author the spike's application over a fresh scaffold; return its route.
 
-    Everything written here is what step 3 of the milestone will render as
-    protected scaffold or what a worker would author into owned paths. The
-    scaffold's postgres-only ``migrate.ts``/``seed.ts`` and drizzle's journal
-    are removed rather than adapted: step 3 replaces them, and here they would
-    only fail the typecheck.
+    Only what a worker would write into owned paths. The factory, the
+    migrator and the probe are the pack's own protected files now, and this
+    test exists to run those, not copies of them.
     """
 
     route = f"/capabilities/{_route_segments((TODO_REQUIREMENT,))[TODO_REQUIREMENT]}"
     for source, destination in {
-        "verify-database.mjs": PROBE,
-        "database.ts": "packages/db/src/database.ts",
-        "db-index.ts": "packages/db/src/index.ts",
         "schema.ts": "packages/db/src/schema.ts",
         "0000_initial.sql": "packages/db/migrations/0000_initial.sql",
     }.items():
@@ -188,34 +195,26 @@ def apply_spike_fixtures(workspace: Path, scope: str) -> str:
     (workspace / "packages/domain/src/todos.ts").write_text(
         (FIXTURES / "todos.ts").read_text("utf-8").replace("__SCOPE__", scope), "utf-8"
     )
-    (workspace / f"apps/web/src/app{route}/page.tsx").write_text(
+    page = workspace / f"apps/web/src/app{route}/page.tsx"
+    assert 'export const dynamic = "force-dynamic";' in page.read_text("utf-8"), (
+        "the pack renders a persisting capability's page dynamic"
+    )
+    page.write_text(
         (FIXTURES / "page.tsx")
         .read_text("utf-8")
         .replace("__SCOPE__", scope)
         .replace("__ROUTE__", route),
         "utf-8",
     )
-    for stale in (
-        "packages/db/src/migrate.ts",
-        "packages/db/src/seed.ts",
-        "packages/db/migrations/meta/_journal.json",
-    ):
-        (workspace / stale).unlink()
-    (workspace / "packages/db/migrations/meta").rmdir()
     index = workspace / "packages/domain/src/index.ts"
     index.write_text(index.read_text("utf-8") + '\nexport * from "./todos";\n', "utf-8")
-    config = workspace / "apps/web/next.config.mjs"
-    marker = "  poweredByHeader: false,\n"
-    text = config.read_text("utf-8")
-    assert marker in text
-    config.write_text(
-        text.replace(
-            marker,
-            marker + '  serverExternalPackages: ["@electric-sql/pglite", "postgres"],\n',
-            1,
-        ),
-        "utf-8",
-    )
+    config = (workspace / "apps/web/next.config.mjs").read_text("utf-8")
+    assert (
+        'serverExternalPackages: ["@electric-sql/pglite", "postgres"]' in config
+    ), "the pack renders the externals itself"
+    for protected in ("packages/db/src/database.ts", "packages/db/src/migrate.ts"):
+        assert (workspace / protected).is_file(), protected
+    assert (workspace / DATABASE_PROBE_PATH).is_file()
     return route
 
 
@@ -323,12 +322,12 @@ class AddressSpaceWatch:
             self.resident_kb[name] = max(self.resident_kb.get(name, 0), resident)
 
 
-def probe_report(result: ExecutionResult) -> dict:
-    assert result.passed, f"probe failed:\n{result.stdout}\n{result.stderr}"
+def _report(result: ExecutionResult, prefix: str) -> dict:
+    assert result.passed, f"{prefix.strip()} step failed:\n{result.stdout}\n{result.stderr}"
     lines = [
-        line[len(PROBE_PREFIX) :]
+        line[len(prefix) :]
         for line in result.stdout.splitlines()
-        if line.startswith(PROBE_PREFIX)
+        if line.startswith(prefix)
     ]
     assert len(lines) == 1, result.stdout
     return json.loads(lines[0])
@@ -382,7 +381,8 @@ def test_the_database_runs_inside_the_gates(tmp_path):
         toolchain = trusted_node_pnpm_runtime()
     except SandboxUnavailable as exc:
         pytest.skip(f"live test; {exc}")
-    bootstrapper = WorkspaceBootstrapper(toolchain)
+    cache = live_cache_root()
+    bootstrapper = WorkspaceBootstrapper(toolchain, cache_root=cache)
     commands = PinnedRunCommands.for_toolchain(toolchain)
     executor = toolchain.executor
 
@@ -397,11 +397,17 @@ def test_the_database_runs_inside_the_gates(tmp_path):
     workspace = tmp_path / "workspace"
     NextJsTargetPack(config).scaffold(workspace)
     route = apply_spike_fixtures(workspace, config.scope)
+    migration = workspace / "packages/db/migrations/0000_initial.sql"
+    expected_digest = hashlib.sha256(migration.read_bytes()).hexdigest()
 
     prepared = bootstrapper.bootstrap(workspace)
-    assert prepared.passed
+    assert prepared.passed, (
+        f"bootstrap failed:\n{prepared.dependency_install.stdout}\n"
+        f"{prepared.dependency_install.stderr}"
+    )
     measurements: dict[str, object] = {
         "route": route,
+        "cache_root": str(cache) if cache else None,
         "bootstrap": {
             "seconds": round(
                 prepared.dependency_install.duration_seconds
@@ -410,11 +416,17 @@ def test_the_database_runs_inside_the_gates(tmp_path):
             )
         },
     }
-    runner = BubblewrapCommandRunner(executor, timeout_seconds=GATE_TIMEOUT_SECONDS)
+    runner = BubblewrapCommandRunner(
+        executor, timeout_seconds=GATE_TIMEOUT_SECONDS, cache_root=cache
+    )
     node = toolchain.node_executable
     database = workspace / DATABASE_DIRECTORY
+    # What step 4 pins as PinnedRunCommands.database_argv and probe_argv.
+    migrate_argv = toolchain.pnpm_argv("-C", "packages/db", "exec", "tsx", "src/migrate.ts")
+    probe_argv = (node, DATABASE_PROBE_PATH)
 
-    # The gates the fixture must not break, exactly as the engine runs them.
+    # (a) The gates the protected files must pass, exactly as the engine runs
+    # them. The typecheck is the first real tsc the factory and migrator face.
     for kind, argv in (
         ("lint", commands.lint_argv),
         ("static", commands.static_argv),
@@ -424,28 +436,42 @@ def test_the_database_runs_inside_the_gates(tmp_path):
         assert result.passed, f"{kind} gate:\n{result.stdout}\n{result.stderr}"
         measurements[kind] = _measured(result, None)
 
-    # (a) The engine starts under the Node gate's own ceiling, migrates, writes, reads.
+    # (b) The trusted prepare step under the Node gate's own ceiling, then the
+    # read-only probe over the directory it left behind.
     shutil.rmtree(database, ignore_errors=True)
     with AddressSpaceWatch() as watch:
         result = executor.run(
-            workspace,
-            (node, PROBE, "--exercise"),
-            gate_policy(runner, acceptance=False, database=True),
+            workspace, migrate_argv, gate_policy(runner, acceptance=False, database=True)
         )
-    exercised = probe_report(result)
-    measurements["probe_exercise"] = {
+    migrated = _report(result, MIGRATIONS_PREFIX)
+    measurements["migrate"] = {
         **_measured(result, watch),
-        "engine": exercised["engine"],
-        "migrations": exercised["migrations"],
-        "memory_inside": exercised["memory"],
-        "duration_ms_inside": exercised["duration_ms"],
+        "engine": migrated["engine"],
+        "migrations": migrated["migrations"],
     }
-    assert exercised["exercised"]["read_back"] is True, exercised
-    assert exercised["tables"] == {"projects": 0, "todos": 1}, exercised
-    assert [m["file"] for m in exercised["migrations"]] == ["0000_initial.sql"]
-    assert exercised["migrations"][0]["applied"] is True
+    assert migrated["schema_version"] == "rich.database-migrations/v1"
+    assert migrated["engine"]["name"] == "pglite"
+    assert "PostgreSQL" in migrated["engine"]["server_version"], migrated
+    assert migrated["migrations"] == [
+        {"file": "0000_initial.sql", "sha256": expected_digest, "applied": True}
+    ], migrated
+    # Again over the same directory: nothing to apply, same journal.
+    result = executor.run(
+        workspace, migrate_argv, gate_policy(runner, acceptance=False, database=True)
+    )
+    assert _report(result, MIGRATIONS_PREFIX)["migrations"] == [
+        {"file": "0000_initial.sql", "sha256": expected_digest, "applied": False}
+    ]
+    result = executor.run(
+        workspace, probe_argv, gate_policy(runner, acceptance=False, database=True)
+    )
+    fresh = _report(result, PROBE_PREFIX)
+    measurements["probe"] = {**_measured(result, None), "engine": fresh["engine"]}
+    assert fresh["schema_version"] == "rich.database-probe/v1"
+    assert fresh["tables"] == {"projects": 0, "todos": 0}, fresh
+    assert fresh["migrations"] == [{"file": "0000_initial.sql", "sha256": expected_digest}]
 
-    # (b) The production build, with no database in its environment.
+    # (c) The production build, with no database in its environment.
     with AddressSpaceWatch() as watch:
         result = runner.run(workspace, VerificationCommand("build", commands.build_argv))
     assert result.passed, f"build gate:\n{result.stdout}\n{result.stderr}"
@@ -454,14 +480,13 @@ def test_the_database_runs_inside_the_gates(tmp_path):
     assert any("pglite" in request for request in externals["externals"]), externals
     assert not externals["chunks_bundling_pglite"], externals
 
-    # (c) A fresh directory, migrated by the trusted step, then the oracle.
+    # (d) A fresh directory, migrated by the trusted step, then the oracle, then
+    # the probe over what the browser left behind.
     shutil.rmtree(database)
     result = executor.run(
-        workspace, (node, PROBE), gate_policy(runner, acceptance=False, database=True)
+        workspace, migrate_argv, gate_policy(runner, acceptance=False, database=True)
     )
-    fresh = probe_report(result)
-    assert fresh["tables"] == {"projects": 0, "todos": 0}, fresh
-    measurements["probe_prepare"] = _measured(result, None)
+    _report(result, MIGRATIONS_PREFIX)
     with AddressSpaceWatch() as watch:
         result = executor.run(
             workspace,
@@ -480,9 +505,9 @@ def test_the_database_runs_inside_the_gates(tmp_path):
     )
     assert SCENARIO in coverage, coverage
     result = executor.run(
-        workspace, (node, PROBE), gate_policy(runner, acceptance=False, database=True)
+        workspace, probe_argv, gate_policy(runner, acceptance=False, database=True)
     )
-    after = probe_report(result)
+    after = _report(result, PROBE_PREFIX)
     measurements["probe_after_acceptance"] = {
         **_measured(result, None),
         "tables": after["tables"],
@@ -496,7 +521,7 @@ def test_the_database_runs_inside_the_gates(tmp_path):
         "the row Playwright created is not in the directory the gate designated\n"
         + summary
     )
-    assert after["migrations"][0]["applied"] is False, summary
+    assert after["migrations"] == [{"file": "0000_initial.sql", "sha256": expected_digest}]
     limit_kb = runner.max_memory_bytes // 1024
-    assert measurements["probe_exercise"]["peak_address_space"]["kb"] < limit_kb, summary
+    assert measurements["migrate"]["peak_address_space"]["kb"] < limit_kb, summary
     assert measurements["build"]["peak_address_space"]["kb"] < limit_kb, summary

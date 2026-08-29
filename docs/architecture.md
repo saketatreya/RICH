@@ -170,6 +170,28 @@ Model output is restricted to approved owned source paths. Package manifests, lo
 tests, type declarations, compiler configuration, framework configuration, CI, and RICH
 metadata are protected generation inputs.
 
+**Persistence is scaffolded, not improvised.** When the architecture has a data
+component the pack renders `packages/db`, and two files inside it are protected even
+though the data node owns the directory: `src/database.ts`, the only place an engine is
+chosen (`DATABASE_URL` → Postgres over the wire; else `RICH_DATABASE_DIR` → PGlite,
+Postgres compiled to WebAssembly, in-process and socket-free; else throw — there is no
+default, so a page that reads the database while `next build` prerenders it fails, as it
+should), and `src/migrate.ts`, the gate-side half of the one migration algorithm
+(`packages/db/migrations/NNNN_name.sql` in name order, split on `--> statement-breakpoint`,
+one transaction, a journal of `(filename, sha256)`; an applied file whose content changed
+is refused). Each driver is imported only once selected, so a preview server never
+evaluates the WebAssembly engine. Drizzle's `meta/_journal.json` is not rendered: the SQL
+files and their digests are the only migration state, so there is no second bookkeeping
+for a worker to keep consistent. The factory is handed to the data task the way the pinned
+operations interface is — as context, never as one of its current files — because a
+worker told to persist without being shown the one door to the database would invent a
+second one. Requirements a data component serves are marked `persists` in the compiled
+intent and their pages are rendered `dynamic = "force-dynamic"`. Beside the manifest
+verifier sits `.rich/verify-database.mjs`, the read-only persistence probe §8 describes.
+The persistence pack is target-pack version 1.4.0; every remembered generation was
+invalidated once by that bump, deliberately, because what a worker is shown and held to
+changed.
+
 ### 5. Authority and budget are explicit
 
 Preparing a run binds:

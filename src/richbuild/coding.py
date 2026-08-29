@@ -32,7 +32,7 @@ from .fs import fsync_directory
 from .canonical import canonical_json_text as _canonical_json
 from .paths import UnsafePath, is_owned, safe_relative_path
 from .compiler import CompiledTask, compile_architecture
-from .models import ArchitectureSpec, ProjectSpec
+from .models import ArchitectureSpec, NodeKind, ProjectSpec
 from .providers import GenerationRole, ModelGateway, ModelRequest, ModelResponse
 from .scheduler import ProducedArtifact, TaskContext, TaskEvidence, TaskResult
 
@@ -676,6 +676,20 @@ _PROTECTED_DIRECTORY_NAMES = frozenset(
 )
 
 
+_DATABASE_PACKAGE = ("packages", "db", "src")
+_DATABASE_BOUNDARY_NAMES = frozenset({"database.ts", "migrate.ts"})
+
+
+def is_database_boundary_path(path: PurePosixPath) -> bool:
+    """The data package's protected factory and migrator, and nothing else."""
+
+    return (
+        len(path.parts) == 4
+        and path.parts[:3] == _DATABASE_PACKAGE
+        and path.name in _DATABASE_BOUNDARY_NAMES
+    )
+
+
 def is_protected_generation_path(path: PurePosixPath) -> bool:
     """Return whether a model-authored change could weaken its own verifier."""
 
@@ -699,6 +713,15 @@ def is_protected_generation_path(path: PurePosixPath) -> bool:
     # interface. A worker able to rewrite these could change what the
     # application claims to do, which is not a coding decision.
     if path.name == "product-intent.ts" and path.parts[:1] == ("packages",):
+        return True
+    # The data package's engine-selecting factory and its migrator. Inside the
+    # data node's ownership for the same reason as the operations interface --
+    # that is where they must be importable from -- and protected for a
+    # sharper one: a worker that could rewrite the factory could pick an engine
+    # the gates never ran, or a default the environment never set, and a
+    # worker that could rewrite the migrator could journal a migration it did
+    # not apply.
+    if is_database_boundary_path(path):
         return True
     lowered = path.name.lower()
     if (
@@ -1379,6 +1402,42 @@ def _pinned_operations(
         return None
 
 
+def _pinned_database_factory(
+    root: Path, task: CompiledTask, limits: CodingLimits
+) -> tuple[str, str] | None:
+    """Return the protected database factory this task must reach the database
+    through, and its path -- for the task that owns the data package only.
+
+    Same shape as ``_pinned_operations`` and for the same reason: the factory
+    is protected, so it is scoped out of current_files, and a worker told to
+    persist without being shown the one door to the database would invent a
+    second one.
+    """
+
+    for owned in sorted(task.owned_paths):
+        candidate = PurePosixPath(owned) / "src" / "database.ts"
+        if not is_database_boundary_path(candidate):
+            continue
+        source = root.joinpath(*candidate.parts)
+        try:
+            if not source.is_file():
+                continue
+            content = source.read_bytes()
+        except OSError:
+            continue
+        if len(content) > limits.max_current_file_bytes:
+            continue
+        try:
+            return content.decode("utf-8"), candidate.as_posix()
+        except UnicodeError:
+            continue
+    return None
+
+
+def _has_data_component(architecture: ArchitectureSpec) -> bool:
+    return any(node.kind is NodeKind.DATA for node in architecture.nodes)
+
+
 def build_task_prompt(
     *,
     workspace: str | os.PathLike[str],
@@ -1442,6 +1501,8 @@ def build_task_prompt(
     current_files, _ = _read_current_files(root, task.owned_paths, limits)
     pinned = _pinned_operations(root, task, limits)
     obligation_surface = pinned[0] if pinned else None
+    database_factory = _pinned_database_factory(root, task, limits)
+    persists = _has_data_component(architecture)
     requirement_ids = set(task.requirement_ids)
     relevant_node_ids = {
         task.node_id,
@@ -1507,6 +1568,16 @@ def build_task_prompt(
             if obligation_surface
             else {}
         ),
+        **(
+            {
+                "pinned_database_factory": {
+                    "path": database_factory[1],
+                    "content": database_factory[0],
+                }
+            }
+            if database_factory
+            else {}
+        ),
         # Independently observed gate output from earlier attempts, redacted to
         # what this task may read.  Verification stays out of process and the
         # worker still cannot declare itself correct -- this only stops it from
@@ -1546,6 +1617,44 @@ def build_task_prompt(
             "run.\n"
         )
     )
+    persistence_guidance = (
+        ""
+        if not persists
+        else (
+            (
+                "This task owns the data package. Reach the database only "
+                "through `database()` from "
+                f"{database_factory[1]!r}, shown under "
+                "pinned_database_factory: it is protected, it selects the "
+                "engine from the environment (Postgres over the wire, or "
+                "PGlite in-process inside the verification gates), and it "
+                "returns a drizzle `Database` over `./schema`. Never import a "
+                "driver yourself and never read DATABASE_URL. Declare tables "
+                "in `src/schema.ts` and write the matching plain-Postgres DDL "
+                "as `migrations/NNNN_name.sql` files -- applied in name order, "
+                "statements separated by a line `--> statement-breakpoint`, "
+                "no `CREATE EXTENSION` (`gen_random_uuid()` is built in). "
+                "The database is created fresh and migrated before every "
+                "gate, so never assume existing rows. Operations that touch "
+                "the database are async; the interface allows "
+                "`O | Promise<O>`.\n"
+                if database_factory
+                else (
+                    "This application persists state through its data "
+                    "component. Reach persisted state only through the "
+                    "contracts of the components you depend on, never by "
+                    "importing a database driver. Any page that shows "
+                    "persisted state must keep "
+                    '`export const dynamic = "force-dynamic"`: the production '
+                    "build runs with no database, and a page that reads one "
+                    "while being prerendered fails the build. Read and write "
+                    "through Server Actions (`<form action={...}>`) so the "
+                    "page needs no client JavaScript. Operations that reach "
+                    "the database are async: await them.\n"
+                )
+            )
+        )
+    )
     retry_guidance = (
         ""
         if not recent_failures
@@ -1563,6 +1672,7 @@ def build_task_prompt(
         "Produce the smallest coherent source change for this task. The control "
         "plane will validate and apply it, and separate workers will verify it.\n"
         + surface_guidance
+        + persistence_guidance
         + retry_guidance
         + _canonical_json(context)
     )

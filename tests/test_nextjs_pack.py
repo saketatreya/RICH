@@ -102,6 +102,9 @@ def test_scaffold_contains_strict_full_stack_workspace(tmp_path):
         "packages/contracts/src/index.ts",
         "packages/db/drizzle.config.ts",
         "packages/db/migrations/0000_initial.sql",
+        "packages/db/src/database.ts",
+        "packages/db/src/migrate.ts",
+        ".rich/verify-database.mjs",
         "packages/domain/src/index.ts",
         "packages/ui/src/button.tsx",
         "playwright.config.ts",
@@ -118,6 +121,11 @@ def test_scaffold_contains_strict_full_stack_workspace(tmp_path):
         if path.is_file()
     }
     assert expected_paths <= actual_paths
+    # Gone with the persistence pack: drizzle's journal was a second migration
+    # bookkeeping for a worker to keep consistent, and the seed assumed a table
+    # a worker is free to drop.
+    assert "packages/db/migrations/meta/_journal.json" not in actual_paths
+    assert "packages/db/src/seed.ts" not in actual_paths
 
     root_package = json.loads((destination / "package.json").read_text())
     assert root_package["packageManager"] == "pnpm@10.34.5"
@@ -165,7 +173,7 @@ def test_scaffold_contains_strict_full_stack_workspace(tmp_path):
     assert manifest.project_name == "founder-os"
     assert manifest.package_scope == "@founder-os"
     assert manifest.schema_version == "rich.target-pack-manifest/v2"
-    assert manifest.target_pack_version == "1.3.0"
+    assert manifest.target_pack_version == "1.4.0"
 
 
 def test_manifest_is_deterministic_and_accounts_for_every_content_file(tmp_path):
@@ -960,3 +968,161 @@ def test_exercised_pages_name_the_page_files_a_scenario_opens():
         own,
     )
     assert exercised_pages(project, scenarios["scenario.none"]) == ()
+
+
+# --------------------------------------------------------------------------
+# Persistence: the data package selects its engine from the environment, the
+# migrator is the one algorithm, and a persisting capability is read live.
+# --------------------------------------------------------------------------
+
+
+def _project_without_persistence() -> ProjectSpec:
+    return ProjectSpec(
+        id="project.reading",
+        name="Reading application",
+        goal="Show the approved welcome.",
+        audiences=("visitors",),
+        requirements=(
+            Requirement(
+                id="req.welcome",
+                title="Welcome",
+                statement="A visitor reads the approved welcome.",
+            ),
+        ),
+        acceptance_scenarios=(
+            AcceptanceScenario(
+                id="scenario.welcome",
+                title="Welcome is shown",
+                given=("The application is available.",),
+                when=("A visitor opens it.",),
+                then=("The welcome is visible.",),
+                requirement_ids=("req.welcome",),
+                oracle=(
+                    {"action": "open_requirement"},
+                    {
+                        "action": "assert_visible",
+                        "locator": {
+                            "kind": "text",
+                            "value": "A visitor reads the approved welcome.",
+                        },
+                    },
+                ),
+            ),
+        ),
+    )
+
+
+def test_the_data_package_selects_its_engine_from_the_environment_never_by_default():
+    files = {
+        path: content.decode("utf-8")
+        for path, content in _approved_pack().render_files().items()
+    }
+
+    factory = files["packages/db/src/database.ts"]
+    assert "process.env.DATABASE_URL" in factory
+    assert "process.env.RICH_DATABASE_DIR" in factory
+    assert "DATABASE_URL or RICH_DATABASE_DIR is required" in factory, (
+        "neither set is a refusal, not a default"
+    )
+    # Each driver loads only once selected: a preview server on Postgres never
+    # evaluates the WebAssembly engine.
+    assert 'import("@electric-sql/pglite")' in factory
+    assert 'import("postgres")' in factory
+    assert 'from "@electric-sql/pglite"' not in factory
+    assert 'from "postgres"' not in factory
+    assert "Protected input: do not edit" in factory
+
+    migrator = files["packages/db/src/migrate.ts"]
+    assert '"--> statement-breakpoint"' in migrator
+    assert "__rich_migrations" in migrator
+    assert "changed content" in migrator, "an applied migration is immutable"
+    assert "RICH_DATABASE_MIGRATIONS " in migrator
+    assert 'from "./database"' in migrator
+    assert "drizzle-orm/postgres-js/migrator" not in migrator, (
+        "drizzle's migrator reads a journal this pack no longer renders"
+    )
+
+    initial = files["packages/db/migrations/0000_initial.sql"]
+    assert "CREATE EXTENSION" not in initial, (
+        "gen_random_uuid() is core Postgres and PGlite ships no pgcrypto"
+    )
+    assert "gen_random_uuid()" in initial
+
+    probe = files[".rich/verify-database.mjs"]
+    assert "RICH_DATABASE_PROBE " in probe
+    assert 'resolve("@electric-sql/pglite")' in probe, (
+        "resolved through packages/db: pnpm exposes the engine nowhere else"
+    )
+    assert "INSERT" not in probe and "CREATE" not in probe, "the probe only reads"
+
+    next_config = files["apps/web/next.config.mjs"]
+    assert (
+        'serverExternalPackages: ["@electric-sql/pglite", "postgres"]'
+        in next_config
+    )
+    db_package = json.loads(files["packages/db/package.json"])
+    assert db_package["scripts"]["db:migrate"] == "tsx src/migrate.ts"
+    assert "db:seed" not in db_package["scripts"]
+    assert "db:seed" not in json.loads(files["package.json"])["scripts"]
+    assert ".rich/runtime/" in files[".gitignore"]
+
+
+def test_a_scaffold_without_a_data_component_carries_no_database_at_all():
+    project = _project_without_persistence()
+    architecture = plan_nextjs_architecture(project).architecture
+    assert not any(node.kind is NodeKind.DATA for node in architecture.nodes)
+    files = {
+        path: content.decode("utf-8")
+        for path, content in NextJsTargetPack(
+            NextJsTargetPackConfig(
+                project_name="reading-application",
+                project_spec=project,
+                architecture=architecture,
+            )
+        )
+        .render_files()
+        .items()
+    }
+
+    assert not any(path.startswith("packages/db/") for path in files)
+    assert ".rich/verify-database.mjs" not in files
+    assert "serverExternalPackages" not in files["apps/web/next.config.mjs"]
+    assert "force-dynamic" not in "".join(
+        content for path, content in files.items() if path.endswith("page.tsx")
+    )
+    assert '"persists": false' in files["packages/contracts/src/product-intent.ts"]
+
+
+def test_a_requirement_the_data_component_serves_renders_a_page_read_on_every_request():
+    project = _approved_project()
+    architecture = plan_nextjs_architecture(project).architecture
+    data = next(node for node in architecture.nodes if node.kind is NodeKind.DATA)
+    assert "req.records" in data.requirement_ids
+    files = {
+        path: content.decode("utf-8")
+        for path, content in _approved_pack(architecture=architecture)
+        .render_files()
+        .items()
+    }
+
+    route = nextjs_target._route_segments(("req.records",))["req.records"]
+    page = files[f"apps/web/src/app/capabilities/{route}/page.tsx"]
+    # The production build runs with no database in scope, so a page that
+    # showed persisted state while being prerendered would fail the build.
+    assert 'export const dynamic = "force-dynamic";' in page
+    assert "Keep\n// this declaration" in page
+    intent = files["packages/contracts/src/product-intent.ts"]
+    assert "persists: z.boolean()" in intent
+    assert '"persists": true' in intent
+    document = json.loads(files[".rich/product-intent.json"])
+    assert document["persisting_requirement_ids"] == ["req.records"]
+    assert nextjs_target.persisting_requirement_ids(architecture) == {"req.records"}
+
+
+def test_the_persistence_pack_is_a_new_version_so_every_memo_is_forgotten_once():
+    # Every scaffold's protected inputs changed -- the factory, the migrator,
+    # the async interface -- so every remembered generation is invalidated
+    # once. The bump is the announcement; a silent change would replay a
+    # bundle written against inputs that no longer exist.
+    assert nextjs_target.TARGET_PACK_VERSION == "1.4.0"
+    assert _pack().manifest().target_pack_version == "1.4.0"
