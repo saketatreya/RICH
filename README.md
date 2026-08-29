@@ -105,7 +105,9 @@ docker run --rm -p 127.0.0.1:8767:8767 -v rich-state:/rich \
 The image holds Bubblewrap, the pinned Node and pnpm, Chromium's system
 libraries and the wheel; state and the dependency cache live on the volume.
 The port is published only to the host's loopback, and inside the container
-the server binds `0.0.0.0` with its Host and Origin checks enforced. Building
+the server binds `0.0.0.0` with its Host and Origin checks enforced. Those
+checks read headers, so another container on the same Docker network could
+still reach the port: give RICH its own network if that matters. Building
 software needs unprivileged user namespaces inside the container, which
 Docker's default seccomp profile blocks (CI records `rich doctor` saying so).
 `docker/seccomp.json` is that default profile with exactly the namespace and

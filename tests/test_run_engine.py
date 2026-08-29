@@ -18,9 +18,11 @@ from richbuild.execution import (
 from richbuild.executor import BubblewrapExecutor, ExecutionResult
 from richbuild.models import (
     AcceptanceScenario,
+    ArchitectureEdge,
     ArchitectureNode,
     ArchitectureSpec,
     Contract,
+    EdgeKind,
     NodeKind,
     OperationContract,
     ProjectSpec,
@@ -2226,3 +2228,111 @@ def test_reopened_owner_reads_the_acceptance_failure_it_caused(tmp_path):
     assert any("Project name" in line for line in failure.diagnostics[1:])
     # The same artifact says nothing to a task it was not attributed to.
     assert read(task("domain", "packages/domain"), 2) == ()
+
+
+def test_attribution_spares_the_owner_of_a_page_that_passed(tmp_path):
+    """Two scenarios on two pages with two owners; only the failing one's owner
+    is named. The coverage line of a failed run is read leniently for this and
+    for nothing else."""
+    from richbuild.run_engine import (
+        RunEngineConfig,
+        _VerifiedCodingHandler,
+        _lenient_observed_scenario_ids,
+    )
+    from richbuild.target_packs.nextjs import _route_segments, exercised_pages
+
+    def scenario(scenario_id, requirement_id):
+        return AcceptanceScenario(
+            id=scenario_id,
+            title=scenario_id,
+            when=("it runs",),
+            then=("it answers",),
+            requirement_ids=(requirement_id,),
+            oracle=(
+                {"action": "open_requirement"},
+                {"action": "assert_visible", "locator": {"kind": "text", "value": "ok"}},
+            ),
+        )
+
+    project = ProjectSpec(
+        id="project.two-pages",
+        name="Two pages",
+        goal="Attribute a failure to its page",
+        audiences=("owner",),
+        requirements=(
+            Requirement(id="req.a", title="A", statement="Page A works."),
+            Requirement(id="req.b", title="B", statement="Page B works."),
+        ),
+        acceptance_scenarios=(scenario("scenario.a", "req.a"), scenario("scenario.b", "req.b")),
+    )
+    routes = _route_segments(("req.a", "req.b"))
+
+    def node(node_id, requirement_id):
+        return ArchitectureNode(
+            id=node_id,
+            name=node_id,
+            kind=NodeKind.MODULE,
+            contract_id=f"contract.{node_id}",
+            requirement_ids=(requirement_id,),
+            owned_paths=(f"apps/web/src/app/capabilities/{routes[requirement_id]}",),
+        )
+
+    def contract(node_id, requirement_id):
+        return Contract(
+            id=f"contract.{node_id}",
+            node_id=node_id,
+            operations=(
+                OperationContract(
+                    id=f"operation.{node_id}.show",
+                    name="show",
+                    input_schema={"type": "object"},
+                    output_schema={"type": "object"},
+                    requirement_ids=(requirement_id,),
+                ),
+            ),
+        )
+
+    architecture = ArchitectureSpec(
+        id="architecture.two-pages",
+        project_id=project.id,
+        root_node_id="owner-a",
+        target_pack="nextjs-app-router",
+        nodes=(node("owner-a", "req.a"), node("owner-b", "req.b")),
+        edges=(
+            ArchitectureEdge(
+                id="contains:owner-b",
+                kind=EdgeKind.CONTAINS,
+                source_node_id="owner-a",
+                target_node_id="owner-b",
+            ),
+        ),
+        contracts=(contract("owner-a", "req.a"), contract("owner-b", "req.b")),
+        project_spec_revision=project.revision,
+    )
+    handler = _VerifiedCodingHandler(
+        lambda context: None,
+        command_runner=PassingCommandRunner(),
+        workspace=tmp_path,
+        project=project,
+        root_node_id="owner-a",
+        config=RunEngineConfig(exercised_paths=exercised_pages),
+        architecture=architecture,
+    )
+    failed = [{"scenario_id": "scenario.a", "step": "2 · Expect to see ‘ok’", "message": "not found"}]
+    assert handler._acceptance_owners(
+        failed, expected=("scenario.a", "scenario.b"), observed=("scenario.b",)
+    ) == ("owner-a",)
+    # Without the passed list every expected scenario counts as failed and both
+    # owners are named -- the case the lenient read exists to avoid.
+    assert handler._acceptance_owners(
+        failed, expected=("scenario.a", "scenario.b"), observed=()
+    ) == ("owner-a", "owner-b")
+
+    coverage = json.dumps({"schema_version": "rich.acceptance-coverage/v1", "scenario_ids": ["scenario.b"]})
+    stdout = f"  ✘  1 scenario.a\nRICH_ACCEPTANCE_COVERAGE {coverage}\n"
+    assert _lenient_observed_scenario_ids(
+        ExecutionResult(argv=("x",), returncode=1, stdout=stdout, stderr="", duration_seconds=0.1)
+    ) == ("scenario.b",)
+    assert _lenient_observed_scenario_ids(
+        ExecutionResult(argv=("x",), returncode=1, stdout="RICH_ACCEPTANCE_COVERAGE {not json\n", stderr="", duration_seconds=0.1)
+    ) == ()

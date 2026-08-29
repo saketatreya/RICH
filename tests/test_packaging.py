@@ -26,8 +26,18 @@ def test_an_installed_wheel_serves_the_bundled_canvas(tmp_path):
 def test_nothing_built_names_where_a_checkout_would_build(tmp_path):
     bundled = tmp_path / "site-packages" / "richbuild" / "canvas"
     (tmp_path / "checkout" / "web").mkdir(parents=True)
+    (tmp_path / "checkout" / "pyproject.toml").write_text("[project]\n")
     repo = tmp_path / "checkout" / "web" / "dist"
     assert canvas_origin(bundled=bundled, repo_dist=repo) == ("missing", repo)
+
+
+def test_nothing_built_in_an_installed_wheel_names_the_package(tmp_path):
+    # site-packages/../.. exists (it is the venv), but it is no checkout: the
+    # remedy must not send an operator to build a web/ that is not there.
+    bundled = tmp_path / "venv" / "lib" / "site-packages" / "richbuild" / "canvas"
+    repo = tmp_path / "venv" / "lib" / "web" / "dist"
+    (tmp_path / "venv" / "lib").mkdir(parents=True)
+    assert canvas_origin(bundled=bundled, repo_dist=repo) == ("missing", bundled)
 
 
 def test_default_web_root_is_the_origin_the_process_would_serve():

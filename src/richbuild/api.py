@@ -1254,7 +1254,8 @@ def canvas_origin(
         return "repo", repo_dist
     if (bundled / "index.html").is_file():
         return "bundled", bundled
-    return "missing", repo_dist if repo_dist.parent.parent.is_dir() else bundled
+    checkout = repo_dist.parent.parent
+    return "missing", repo_dist if (checkout / "pyproject.toml").is_file() else bundled
 
 
 def default_web_root() -> Path:
@@ -1391,7 +1392,8 @@ def serve(
     -- and every draft says which one answered.
     """
 
-    loopback = host in {"127.0.0.1", "localhost", "::1"}
+    # The server binds IPv4; ::1 would fail at bind time after the banner.
+    loopback = host in {"127.0.0.1", "localhost"}
     if not loopback and not published_on_loopback:
         raise ValueError(
             "the local API binds to loopback only; inside a container whose port "

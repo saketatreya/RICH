@@ -54,6 +54,9 @@ def main(argv: list[str]) -> int:
         shutil.rmtree(CANVAS)
     shutil.copytree(DIST, CANVAS)
     print(f"+ copied {DIST} -> {CANVAS}")
+    # setuptools reuses build/lib across builds, so a module deleted since the
+    # last build, or an older canvas, would ship silently. Start clean.
+    shutil.rmtree(ROOT / "build", ignore_errors=True)
     try:
         WHEELS.mkdir(exist_ok=True)
         run([sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "-w", str(WHEELS)])

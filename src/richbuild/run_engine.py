@@ -141,6 +141,7 @@ class AcceptanceCoverageContext:
 
 # Playwright colours its assertion messages; the words are what a person reads.
 _ANSI_ESCAPES = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_MAX_NAMED_STEPS_IN_PROMPT = 12
 
 
 def _observed_acceptance_failures(result: ExecutionResult) -> list[dict[str, str]]:
@@ -180,6 +181,32 @@ def _observed_acceptance_failures(result: ExecutionResult) -> list[dict[str, str
             if len(failures) >= _MAX_FAILED_STEPS:
                 return failures
     return failures
+
+
+def _lenient_observed_scenario_ids(result: ExecutionResult) -> tuple[str, ...]:
+    """Which scenarios a *failed* acceptance run says passed -- for routing only.
+
+    The strict parser refuses a failed run, rightly: nothing a failed run
+    reports may publish success. But deciding whom to reopen is not
+    publishing anything, and treating every expected scenario as failed would
+    reopen the owners of pages that passed. So the coverage line is read here
+    without the context check, and the answer reaches attribution alone --
+    never evidence, never coverage.
+    """
+
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(_ACCEPTANCE_COVERAGE_PREFIX):
+            continue
+        try:
+            document = json.loads(line[len(_ACCEPTANCE_COVERAGE_PREFIX) :])
+        except json.JSONDecodeError:
+            return ()
+        ids = document.get("scenario_ids") if isinstance(document, Mapping) else None
+        if not isinstance(ids, list):
+            return ()
+        return tuple(str(item) for item in ids if isinstance(item, str))
+    return ()
 
 
 def _observed_acceptance_coverage(
@@ -892,10 +919,14 @@ def _prior_failure_source(
                 for entry in (document.get("failed_steps") or [])
                 if isinstance(entry, Mapping)
             ]
+            # Bounded before it reaches a bounded prompt: the reporter may name
+            # up to forty steps, and the redacted log follows these lines.
             named = tuple(
-                f"{entry.get('scenario_id', '')} · {entry.get('step', '')}: "
-                f"{entry.get('message', '')}".strip()
-                for entry in steps
+                (
+                    f"{entry.get('scenario_id', '')} · {entry.get('step', '')}: "
+                    f"{entry.get('message', '')}"
+                ).strip()[:400]
+                for entry in steps[:_MAX_NAMED_STEPS_IN_PROMPT]
             )
             failures.append(
                 PriorAttemptFailure(
@@ -1280,7 +1311,7 @@ class _VerifiedCodingHandler:
                 attributed = self._acceptance_owners(
                     failed_steps,
                     expected=command.expected_acceptance_scenario_ids,
-                    observed=observed_scenario_ids,
+                    observed=_lenient_observed_scenario_ids(result),
                 )
 
         artifact_content = canonical_json_bytes(result_document)
