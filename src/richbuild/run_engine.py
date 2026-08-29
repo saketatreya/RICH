@@ -28,6 +28,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
+import shutil
 import stat
 import tempfile
 import threading
@@ -61,9 +62,15 @@ from .executor import (
     SandboxPolicy,
     cache_mounts_for,
 )
-from .models import ArchitectureSpec, EvidenceKind, ProjectSpec
+from .models import ArchitectureSpec, EvidenceKind, NodeKind, ProjectSpec
 from .providers import ModelGateway
-from .preview import collect_deployment_files, create_deployment_snapshot
+from .preview import (
+    MigrationDigest,
+    PreviewError,
+    collect_deployment_files,
+    create_deployment_snapshot,
+    migration_digests,
+)
 from .scheduler import (
     CancellationToken,
     DagScheduler,
@@ -242,6 +249,20 @@ def _observed_acceptance_coverage(
     return scenario_ids
 
 
+def _validated_argv(value: object, label: str) -> tuple[str, ...]:
+    if (
+        isinstance(value, (str, bytes))
+        or not isinstance(value, Sequence)
+        or not value
+        or any(
+            not isinstance(item, str) or not item or "\x00" in item
+            for item in value
+        )
+    ):
+        raise ValueError(f"{label} must contain non-empty strings")
+    return tuple(value)
+
+
 @dataclass(frozen=True, slots=True)
 class VerificationCommand:
     """One independently executed verification gate."""
@@ -269,16 +290,9 @@ class VerificationCommand:
                 "build, or acceptance"
             )
         object.__setattr__(self, "kind", kind.value)
-        if (
-            isinstance(self.argv, (str, bytes))
-            or not self.argv
-            or any(
-                not isinstance(value, str) or not value or "\x00" in value
-                for value in self.argv
-            )
-        ):
-            raise ValueError("verification argv must contain non-empty strings")
-        object.__setattr__(self, "argv", tuple(self.argv))
+        object.__setattr__(
+            self, "argv", _validated_argv(self.argv, "verification argv")
+        )
         scenarios = tuple(self.expected_acceptance_scenario_ids)
         if any(
             not isinstance(value, str) or not value.strip() for value in scenarios
@@ -308,13 +322,60 @@ class VerificationCommand:
             )
 
 
+# Two trusted steps around the gates that run the software: the prepare step
+# that creates and migrates a fresh database, and the probe that reads what the
+# browser left in it. Neither is evidence of its own -- there is no
+# "database" evidence kind a worker could claim -- and both are recorded on the
+# gate they serve.
+DATABASE_PREPARE = "database-prepare"
+DATABASE_PROBE = "database-probe"
+DATABASE_STEP_KINDS = frozenset({DATABASE_PREPARE, DATABASE_PROBE})
+# The gates that run the software, and so see the database. Build is
+# deliberately absent: the deployed build has no database at build time either,
+# and a page that reads one while `next build` prerenders it must fail here,
+# not in production. Lint and typecheck run no code.
+DATABASE_GATE_KINDS = frozenset(
+    {
+        EvidenceKind.UNIT.value,
+        EvidenceKind.PROPERTY.value,
+        EvidenceKind.ACCEPTANCE.value,
+    }
+)
+DEFAULT_DATABASE_DIRECTORY = ".rich/runtime/db"
+_MIGRATIONS_PREFIX = "RICH_DATABASE_MIGRATIONS "
+_MIGRATIONS_SCHEMA = "rich.database-migrations/v1"
+_PROBE_PREFIX = "RICH_DATABASE_PROBE "
+_PROBE_SCHEMA = "rich.database-probe/v1"
+_MAX_PROBED_TABLES = 512
+_MAX_ENGINE_TEXT = 512
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseStep:
+    """A trusted database step, run under the Node-gate policy with the
+    database in scope. Not a gate: it carries no scenario claim and publishes
+    no evidence kind of its own."""
+
+    kind: str
+    argv: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.kind not in DATABASE_STEP_KINDS:
+            raise ValueError(
+                f"database steps are {sorted(DATABASE_STEP_KINDS)}, not {self.kind!r}"
+            )
+        object.__setattr__(
+            self, "argv", _validated_argv(self.argv, "database step argv")
+        )
+
+
 class CommandRunner(Protocol):
     """Sandbox boundary used by the trusted verifier."""
 
     def run(
         self,
         workspace: Path,
-        command: VerificationCommand,
+        command: VerificationCommand | DatabaseStep,
         *,
         cancellation: Callable[[], bool] | None = None,
         deadline: float | None = None,
@@ -350,10 +411,17 @@ class BubblewrapCommandRunner:
     )
     max_output_bytes: int = 1_048_576
     # RLIMIT_AS measures reserved virtual address space, not resident memory.
-    # A single ARM64 Node child reserves an 8 GiB pointer-compression cage.
-    # Leave finite address-space headroom for shared libraries and Next's trace
-    # collector; NODE_OPTIONS below separately caps its V8 heap at 1.5 GiB.
-    max_memory_bytes: int = 17_179_869_184
+    # A single ARM64 Node child reserves an 8 GiB pointer-compression cage per
+    # V8 isolate -- and a process running module-customization hooks
+    # (`--import tsx`, which the trusted migrator uses) runs them on a worker
+    # thread, a second isolate with a second cage. Measured on the persistence
+    # spike: the migrator's node peaked at 15.65 GiB with PGlite's WebAssembly
+    # heap beside two cages, and a plain `next build` at 16.0 GiB, against the
+    # previous 16 GiB ceiling -- surviving on the allocator's retry, which is
+    # not headroom. 24 GiB leaves a real 8 GiB above both; the resident peak
+    # of the same processes was under 1 GiB, and NODE_OPTIONS below separately
+    # caps each V8 heap at 1.5 GiB. The ceiling still stops a runaway mapping.
+    max_memory_bytes: int = 25_769_803_776
     # Chromium's PartitionAlloc cage reserves much more address space than it
     # commits. Acceptance is sequential and separately heap/process bounded.
     acceptance_max_address_space_bytes: int = 137_438_953_472
@@ -366,10 +434,29 @@ class BubblewrapCommandRunner:
     # that filled them was trusted, and a gate that could write them could
     # alter what a later run installs or is judged by.
     cache_root: str | Path | None = None
+    # Where the software's database lives while a gate runs it, and which
+    # kinds see it. The seam is by kind rather than a flag on each command so
+    # that the answer to "does this gate have a database" is one table, and so
+    # that adding a variable for one gate is a reviewable change here.
+    database_directory: str = DEFAULT_DATABASE_DIRECTORY
+    database_kinds: frozenset[str] = frozenset(
+        {*DATABASE_GATE_KINDS, *DATABASE_STEP_KINDS}
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.executor, BubblewrapExecutor):
             raise TypeError("executor must be a BubblewrapExecutor")
+        try:
+            directory = safe_relative_path(
+                self.database_directory, label="database directory"
+            )
+        except UnsafePath as exc:
+            raise ValueError(str(exc)) from exc
+        object.__setattr__(self, "database_directory", directory.as_posix())
+        if not isinstance(self.database_kinds, frozenset) or any(
+            not isinstance(kind, str) or not kind for kind in self.database_kinds
+        ):
+            raise ValueError("database_kinds must be a frozenset of kinds")
         if (
             self.cache_root is not None
             and self.playwright_browsers_path == "/workspace/.rich/runtime/playwright"
@@ -414,15 +501,11 @@ class BubblewrapCommandRunner:
                 "Playwright browser path must be inside the workspace or the shared cache"
             )
 
-    def run(
-        self,
-        workspace: Path,
-        command: VerificationCommand,
-        *,
-        cancellation: Callable[[], bool] | None = None,
-        deadline: float | None = None,
-    ) -> ExecutionResult:
-        context_path: Path | None = None
+    def environment_for(self, kind: str) -> dict[str, str]:
+        """The environment one kind of command sees. Everything a gate is
+        told comes from here, so a variable that reaches one gate and not
+        another is a decision this table records."""
+
         environment = {
             "CI": "1",
             "NEXT_TELEMETRY_DISABLED": "1",
@@ -433,7 +516,29 @@ class BubblewrapCommandRunner:
             "RAYON_NUM_THREADS": "2",
             "PLAYWRIGHT_BROWSERS_PATH": self.playwright_browsers_path,
         }
-        if command.acceptance_context is not None:
+        if kind in self.database_kinds:
+            environment["RICH_DATABASE_DIR"] = f"/workspace/{self.database_directory}"
+        return environment
+
+    def writable_paths_for(self, kind: str) -> tuple[str, ...]:
+        """The database directory is writable exactly where it is in scope."""
+
+        if kind in self.database_kinds:
+            return (*self.writable_paths, self.database_directory)
+        return self.writable_paths
+
+    def run(
+        self,
+        workspace: Path,
+        command: VerificationCommand | DatabaseStep,
+        *,
+        cancellation: Callable[[], bool] | None = None,
+        deadline: float | None = None,
+    ) -> ExecutionResult:
+        context_path: Path | None = None
+        environment = self.environment_for(command.kind)
+        acceptance_context = getattr(command, "acceptance_context", None)
+        if acceptance_context is not None:
             root = Path(workspace).resolve(strict=True)
             context_directory = root / "test-results"
             if context_directory.is_symlink():
@@ -449,7 +554,7 @@ class BubblewrapCommandRunner:
             context_path = Path(raw_path)
             try:
                 payload = json.dumps(
-                    command.acceptance_context.to_dict(),
+                    acceptance_context.to_dict(),
                     ensure_ascii=True,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -471,7 +576,7 @@ class BubblewrapCommandRunner:
                 workspace,
                 command.argv,
                 SandboxPolicy(
-                    writable_paths=self.writable_paths,
+                    writable_paths=self.writable_paths_for(command.kind),
                     network=False,
                     environment=environment,
                     cache_mounts=(
@@ -532,6 +637,19 @@ class RunEngineConfig:
     )
     build_argv: tuple[str, ...] = ("pnpm", "run", "build")
     acceptance_argv: tuple[str, ...] = ("pnpm", "run", "test:e2e")
+    # The trusted database steps a data component brings with it. The
+    # migrator is protected scaffold run through the data package's pinned
+    # tsx; the probe is protected scaffold run by plain Node.
+    database_argv: tuple[str, ...] = (
+        "pnpm",
+        "-C",
+        "packages/db",
+        "exec",
+        "tsx",
+        "src/migrate.ts",
+    )
+    probe_argv: tuple[str, ...] = ("node", ".rich/verify-database.mjs")
+    database_directory: str = DEFAULT_DATABASE_DIRECTORY
     # The pack's answer to "which page files does this scenario open", so a
     # failed acceptance run can be attributed to the task that owns them.
     # None means no attribution: the failing task retries, as before.
@@ -587,6 +705,8 @@ class RunEngineConfig:
             "property_argv",
             "build_argv",
             "acceptance_argv",
+            "database_argv",
+            "probe_argv",
         ):
             value = getattr(self, name)
             if (
@@ -599,6 +719,13 @@ class RunEngineConfig:
             ):
                 raise ValueError(f"{name} must contain non-empty argv strings")
             object.__setattr__(self, name, tuple(value))
+        try:
+            directory = safe_relative_path(
+                self.database_directory, label="database_directory"
+            )
+        except UnsafePath as exc:
+            raise ValueError(str(exc)) from exc
+        object.__setattr__(self, "database_directory", directory.as_posix())
         if not isinstance(self.coding_limits, CodingLimits):
             raise TypeError("coding_limits must be CodingLimits")
 
@@ -958,6 +1085,128 @@ class _LoadedRun:
     workspace: Path
 
 
+@dataclass(frozen=True, slots=True)
+class _DatabaseObservation:
+    """One trusted database step as the engine saw it."""
+
+    kind: str
+    argv: tuple[str, ...]
+    passed: bool
+    reason: str = ""
+    result: ExecutionResult | None = None
+    report: Mapping[str, Any] | None = None
+    error_type: str | None = None
+
+    def failed(self, reason: str) -> "_DatabaseObservation":
+        return _DatabaseObservation(
+            self.kind, self.argv, passed=False, reason=reason, result=self.result
+        )
+
+    def with_report(self, report: Mapping[str, Any]) -> "_DatabaseObservation":
+        return _DatabaseObservation(
+            self.kind, self.argv, passed=True, result=self.result, report=report
+        )
+
+    def document(self, max_log_bytes: int) -> dict[str, Any]:
+        document: dict[str, Any] = {
+            "kind": self.kind,
+            "argv": list(self.argv),
+            "status": "passed" if self.passed else "failed",
+        }
+        if self.reason:
+            document["reason"] = self.reason[:2000]
+        if self.error_type:
+            document["error_type"] = self.error_type
+        if self.result is not None:
+            document.update(
+                {
+                    "returncode": self.result.returncode,
+                    "timed_out": self.result.timed_out,
+                    "cancelled": self.result.cancelled,
+                    "duration_seconds": self.result.duration_seconds,
+                    "stdout": _bounded_text(self.result.stdout, max_log_bytes),
+                    "stderr": _bounded_text(self.result.stderr, max_log_bytes),
+                }
+            )
+        if self.report is not None:
+            document["report"] = dict(self.report)
+        return document
+
+
+def _observed_database_report(
+    result: ExecutionResult, *, prefix: str, schema: str
+) -> Mapping[str, Any]:
+    """The one line a trusted database step prints, or a refusal."""
+
+    lines = [
+        line[len(prefix) :]
+        for line in _ANSI_ESCAPES.sub("", result.stdout).splitlines()
+        if line.startswith(prefix)
+    ]
+    if len(lines) != 1:
+        raise RunEngineError(
+            f"the step printed {len(lines)} {prefix.strip()} lines, not one"
+        )
+    try:
+        report = json.loads(lines[0])
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise RunEngineError(f"the {prefix.strip()} line is not JSON") from exc
+    if not isinstance(report, Mapping) or report.get("schema_version") != schema:
+        raise RunEngineError(f"the {prefix.strip()} line is not {schema}")
+    return report
+
+
+def _validated_engine(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise RunEngineError("the database step named no engine")
+    engine: dict[str, str] = {}
+    for key in ("name", "server_version"):
+        text = value.get(key)
+        if not isinstance(text, str) or not text or len(text) > _MAX_ENGINE_TEXT:
+            raise RunEngineError(f"the database engine's {key} is not a bounded string")
+        engine[key] = text
+    version = value.get("version")
+    if isinstance(version, str) and 0 < len(version) <= _MAX_ENGINE_TEXT:
+        engine["version"] = version
+    return engine
+
+
+def _validated_migration_set(value: object) -> tuple[MigrationDigest, ...]:
+    if not isinstance(value, list) or len(value) > 4096:
+        raise RunEngineError("the database step reported no migration list")
+    entries: list[MigrationDigest] = []
+    for entry in value:
+        if (
+            not isinstance(entry, Mapping)
+            or not isinstance(entry.get("file"), str)
+            or not isinstance(entry.get("sha256"), str)
+            or not _SHA256.fullmatch(entry["sha256"])
+        ):
+            raise RunEngineError("the database step reported a malformed migration")
+        entries.append(MigrationDigest(entry["file"], entry["sha256"]))
+    names = [entry.file for entry in entries]
+    if names != sorted(names) or len(set(names)) != len(names):
+        raise RunEngineError("the database step reported migrations out of order")
+    return tuple(entries)
+
+
+def _validated_tables(value: object) -> dict[str, int]:
+    if not isinstance(value, Mapping) or len(value) > _MAX_PROBED_TABLES:
+        raise RunEngineError("the probe reported no table counts")
+    tables: dict[str, int] = {}
+    for name, count in value.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+        ):
+            raise RunEngineError("the probe reported a malformed table count")
+        tables[name] = count
+    return tables
+
+
 class _VerifiedCodingHandler:
     """Compose model generation with independent process verification."""
 
@@ -996,6 +1245,13 @@ class _VerifiedCodingHandler:
         self.root_node_id = root_node_id
         self.config = config
         self._properties = workspace / "tests" / "properties"
+        # A data component means the software keeps state: every gate that
+        # runs it gets a fresh, migrated database first, and the browser's run
+        # is followed by the probe. Decided from the approved architecture,
+        # never from what the workspace happens to contain.
+        self._persists = architecture is not None and any(
+            node.kind is NodeKind.DATA for node in architecture.nodes
+        )
 
     def __call__(self, context: TaskContext) -> TaskResult:
         if context.is_cancelled:
@@ -1171,35 +1427,21 @@ class _VerifiedCodingHandler:
         error: Exception | None = None
         result: ExecutionResult | None = None
         observed_scenario_ids: tuple[str, ...] = ()
-        try:
-            candidate = self.command_runner.run(
-                self.workspace,
-                command,
-                cancellation=lambda: context.is_cancelled,
-                deadline=context.deadline_monotonic,
-            )
-            validated = _validated_execution_result(candidate, command)
-            if (
-                command.kind == EvidenceKind.ACCEPTANCE.value
-                and validated.passed
-            ):
-                assert command.acceptance_context is not None
-                observed_scenario_ids = _observed_acceptance_coverage(
-                    validated,
-                    expected_scenario_ids=(
-                        command.expected_acceptance_scenario_ids
-                    ),
-                    expected_context=command.acceptance_context,
-                )
-            result = validated
-        except Exception as exc:
-            error = exc
-
-        if result is None:
-            status = "error"
+        # A gate that runs the software gets a fresh, migrated database first.
+        # If that cannot be done the gate is not run: judging software against
+        # a database that was never prepared would be judging it against
+        # whatever the last gate left behind.
+        preparation = (
+            self._prepare_database(context)
+            if self._persists and command.kind in DATABASE_GATE_KINDS
+            else None
+        )
+        probe: _DatabaseObservation | None = None
+        if preparation is not None and not preparation.passed:
+            status = "failed"
             summary = (
-                f"{command.kind} verification was not observed: "
-                f"{type(error).__name__}"
+                f"{command.kind} database preparation failed: "
+                f"{preparation.reason}"
             )
             attributed: tuple[str, ...] = ()
             result_document: dict[str, Any] = {
@@ -1211,8 +1453,8 @@ class _VerifiedCodingHandler:
                 "kind": command.kind,
                 "argv": list(command.argv),
                 "status": status,
-                "error_type": type(error).__name__,
-                "error_message": str(error)[:2000],
+                "error_type": preparation.error_type or "DatabasePreparationFailed",
+                "error_message": preparation.reason[:2000],
                 "expected_acceptance_scenario_ids": list(
                     command.expected_acceptance_scenario_ids
                 ),
@@ -1220,68 +1462,150 @@ class _VerifiedCodingHandler:
                 "failed_steps": [],
             }
         else:
-            if result.passed:
-                status = "passed"
-            elif result.timed_out or result.cancelled:
+            try:
+                candidate = self.command_runner.run(
+                    self.workspace,
+                    command,
+                    cancellation=lambda: context.is_cancelled,
+                    deadline=context.deadline_monotonic,
+                )
+                validated = _validated_execution_result(candidate, command)
+                if (
+                    command.kind == EvidenceKind.ACCEPTANCE.value
+                    and validated.passed
+                ):
+                    assert command.acceptance_context is not None
+                    observed_scenario_ids = _observed_acceptance_coverage(
+                        validated,
+                        expected_scenario_ids=(
+                            command.expected_acceptance_scenario_ids
+                        ),
+                        expected_context=command.acceptance_context,
+                    )
+                result = validated
+            except Exception as exc:
+                error = exc
+
+            if result is None:
                 status = "error"
+                summary = (
+                    f"{command.kind} verification was not observed: "
+                    f"{type(error).__name__}"
+                )
+                attributed = ()
+                result_document = {
+                    "schema_version": "rich.command-verification/v1",
+                    "run_id": context.run_id,
+                    "task_id": context.task_id,
+                    "node_id": context.compiled_task.node_id,
+                    "attempt": context.attempt,
+                    "kind": command.kind,
+                    "argv": list(command.argv),
+                    "status": status,
+                    "error_type": type(error).__name__,
+                    "error_message": str(error)[:2000],
+                    "expected_acceptance_scenario_ids": list(
+                        command.expected_acceptance_scenario_ids
+                    ),
+                    "observed_acceptance_scenario_ids": [],
+                    "failed_steps": [],
+                }
             else:
-                status = "failed"
-            summary = (
-                f"{command.kind} command passed"
-                if status == "passed"
-                else (
-                    (
-                        f"{command.kind} command canceled"
-                        if result.cancelled
-                        else f"{command.kind} command timed out"
-                    )
-                    if result.timed_out or result.cancelled
+                if result.passed:
+                    status = "passed"
+                elif result.timed_out or result.cancelled:
+                    status = "error"
+                else:
+                    status = "failed"
+                summary = (
+                    f"{command.kind} command passed"
+                    if status == "passed"
                     else (
-                        f"{command.kind} command exited with "
-                        f"{result.returncode}"
+                        (
+                            f"{command.kind} command canceled"
+                            if result.cancelled
+                            else f"{command.kind} command timed out"
+                        )
+                        if result.timed_out or result.cancelled
+                        else (
+                            f"{command.kind} command exited with "
+                            f"{result.returncode}"
+                        )
                     )
                 )
-            )
-            failed_steps = (
-                _observed_acceptance_failures(result)
-                if command.kind == EvidenceKind.ACCEPTANCE.value
-                and status == "failed"
-                else []
-            )
-            attributed = ()
-            result_document = {
-                "schema_version": "rich.command-verification/v1",
-                "run_id": context.run_id,
-                "task_id": context.task_id,
-                "node_id": context.compiled_task.node_id,
-                "attempt": context.attempt,
-                "kind": command.kind,
-                "argv": list(result.argv),
-                "status": status,
-                "returncode": result.returncode,
-                "timed_out": result.timed_out,
-                "cancelled": result.cancelled,
-                "duration_seconds": result.duration_seconds,
-                "stdout": _bounded_text(
-                    result.stdout, self.config.max_verification_log_bytes
-                ),
-                "stderr": _bounded_text(
-                    result.stderr, self.config.max_verification_log_bytes
-                ),
-                "expected_acceptance_scenario_ids": list(
-                    command.expected_acceptance_scenario_ids
-                ),
-                "observed_acceptance_scenario_ids": list(
-                    observed_scenario_ids
-                ),
-                "failed_steps": failed_steps,
-            }
-            if command.kind == EvidenceKind.ACCEPTANCE.value and status == "failed":
-                attributed = self._acceptance_owners(
-                    failed_steps,
-                    expected=command.expected_acceptance_scenario_ids,
-                    observed=observed_scenario_ids,
+                failed_steps = (
+                    _observed_acceptance_failures(result)
+                    if command.kind == EvidenceKind.ACCEPTANCE.value
+                    and status == "failed"
+                    else []
                 )
+                attributed = ()
+                result_document = {
+                    "schema_version": "rich.command-verification/v1",
+                    "run_id": context.run_id,
+                    "task_id": context.task_id,
+                    "node_id": context.compiled_task.node_id,
+                    "attempt": context.attempt,
+                    "kind": command.kind,
+                    "argv": list(result.argv),
+                    "status": status,
+                    "returncode": result.returncode,
+                    "timed_out": result.timed_out,
+                    "cancelled": result.cancelled,
+                    "duration_seconds": result.duration_seconds,
+                    "stdout": _bounded_text(
+                        result.stdout, self.config.max_verification_log_bytes
+                    ),
+                    "stderr": _bounded_text(
+                        result.stderr, self.config.max_verification_log_bytes
+                    ),
+                    "expected_acceptance_scenario_ids": list(
+                        command.expected_acceptance_scenario_ids
+                    ),
+                    "observed_acceptance_scenario_ids": list(
+                        observed_scenario_ids
+                    ),
+                    "failed_steps": failed_steps,
+                }
+                if command.kind == EvidenceKind.ACCEPTANCE.value and status == "failed":
+                    attributed = self._acceptance_owners(
+                        failed_steps,
+                        expected=command.expected_acceptance_scenario_ids,
+                        observed=observed_scenario_ids,
+                    )
+                if (
+                    command.kind == EvidenceKind.ACCEPTANCE.value
+                    and status == "passed"
+                    and preparation is not None
+                ):
+                    # The browser has run every scenario. `reload` proved a
+                    # record outlived the request; the probe proves it reached
+                    # the database, and a data component whose tables are all
+                    # empty afterwards has not been exercised at all.
+                    probe = self._probe_database(context, preparation)
+                    if probe.passed:
+                        assert probe.report is not None
+                        tables = probe.report["tables"]
+                        summary = (
+                            f"{summary}; the database holds "
+                            f"{sum(tables.values())} row(s) across "
+                            f"{len(tables)} table(s)"
+                        )
+                    else:
+                        status = "failed"
+                        observed_scenario_ids = ()
+                        summary = f"acceptance passed but {probe.reason}"
+                        result_document["status"] = status
+                        result_document["observed_acceptance_scenario_ids"] = []
+
+        if preparation is not None:
+            result_document["database_preparation"] = preparation.document(
+                self.config.max_verification_log_bytes
+            )
+        if probe is not None:
+            result_document["database_probe"] = probe.document(
+                self.config.max_verification_log_bytes
+            )
 
         artifact_content = canonical_json_bytes(result_document)
         log_digest = hashlib.sha256(artifact_content).hexdigest()
@@ -1296,6 +1620,29 @@ class _VerifiedCodingHandler:
             if scenario_coverage
             else context.compiled_task.requirement_ids
         )
+        details: dict[str, Any] = {
+            "argv": list(command.argv),
+            "log_sha256": log_digest,
+            "result_source": "sandbox_command",
+            "observed_acceptance_scenario_ids": list(
+                scenario_coverage
+            ),
+        }
+        if preparation is not None and preparation.passed:
+            # The migration set the gate ran against, host-computed and
+            # sandbox-confirmed. Preview and promotion assert the journal they
+            # write equals exactly this.
+            assert preparation.report is not None
+            database: dict[str, Any] = {
+                "directory": self.config.database_directory,
+                "engine": preparation.report["engine"],
+                "migrations": preparation.report["migrations"],
+            }
+            if probe is not None and probe.passed:
+                assert probe.report is not None
+                database["tables"] = probe.report["tables"]
+                database["rows"] = sum(probe.report["tables"].values())
+            details["database"] = database
         evidence = TaskEvidence(
             kind=command.kind,
             status=status,
@@ -1303,14 +1650,7 @@ class _VerifiedCodingHandler:
             blocking=True,
             requirement_ids=tuple(requirement_ids),
             acceptance_scenario_ids=tuple(scenario_coverage),
-            details={
-                "argv": list(command.argv),
-                "log_sha256": log_digest,
-                "result_source": "sandbox_command",
-                "observed_acceptance_scenario_ids": list(
-                    scenario_coverage
-                ),
-            },
+            details=details,
             attributed_node_ids=attributed,
         )
         artifact = ProducedArtifact(
@@ -1331,6 +1671,144 @@ class _VerifiedCodingHandler:
             },
         )
         return evidence, artifact
+
+    def _database_directory(self) -> Path:
+        """The host path of the gate database, refusing to cross a symlink."""
+
+        relative = PurePosixPath(self.config.database_directory)
+        current = self.workspace
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise RunEngineError(
+                    "the database directory crosses a symbolic link: "
+                    f"{relative.as_posix()!r}"
+                )
+        return current
+
+    def _run_database_step(
+        self, context: TaskContext, step: DatabaseStep
+    ) -> _DatabaseObservation:
+        try:
+            candidate = self.command_runner.run(
+                self.workspace,
+                step,
+                cancellation=lambda: context.is_cancelled,
+                deadline=context.deadline_monotonic,
+            )
+            result = _validated_execution_result(candidate, step)
+        except Exception as exc:
+            return _DatabaseObservation(
+                step.kind,
+                step.argv,
+                passed=False,
+                reason=f"the {step.kind} step was not observed: {type(exc).__name__}",
+                error_type=type(exc).__name__,
+            )
+        if not result.passed:
+            outcome = (
+                "was canceled"
+                if result.cancelled
+                else "timed out"
+                if result.timed_out
+                else f"exited with {result.returncode}"
+            )
+            return _DatabaseObservation(
+                step.kind,
+                step.argv,
+                passed=False,
+                reason=f"the {step.kind} step {outcome}",
+                result=result,
+            )
+        return _DatabaseObservation(step.kind, step.argv, passed=True, result=result)
+
+    def _prepare_database(self, context: TaskContext) -> _DatabaseObservation:
+        """A fresh database, migrated by the protected migrator, before a gate.
+
+        Host-side: the previous directory is removed and the migration set is
+        computed from the files on disk. Sandbox-side: the migrator applies
+        them and reports what it journaled. The two must agree exactly --
+        the sandbox ran model-authored SQL, and its report is a command
+        result, not a claim the host takes on trust.
+        """
+
+        argv = self.config.database_argv
+        try:
+            directory = self._database_directory()
+            if directory.exists():
+                shutil.rmtree(directory)
+            expected = migration_digests(self.workspace)
+        except (RunEngineError, PreviewError, OSError) as exc:
+            return _DatabaseObservation(
+                DATABASE_PREPARE,
+                argv,
+                passed=False,
+                reason=f"the workspace's migrations cannot be prepared: {exc}",
+                error_type=type(exc).__name__,
+            )
+        observed = self._run_database_step(
+            context, DatabaseStep(DATABASE_PREPARE, argv)
+        )
+        if not observed.passed:
+            return observed
+        assert observed.result is not None
+        try:
+            report = _observed_database_report(
+                observed.result, prefix=_MIGRATIONS_PREFIX, schema=_MIGRATIONS_SCHEMA
+            )
+            engine = _validated_engine(report.get("engine"))
+            reported = _validated_migration_set(report.get("migrations"))
+        except RunEngineError as exc:
+            return observed.failed(str(exc))
+        if reported != expected:
+            return observed.failed(
+                "the migration set the sandbox reported is not the set on disk: "
+                f"reported {[entry.file for entry in reported]}, "
+                f"on disk {[entry.file for entry in expected]}"
+            )
+        return observed.with_report(
+            {
+                "engine": engine,
+                "migrations": [entry.as_dict() for entry in reported],
+            }
+        )
+
+    def _probe_database(
+        self, context: TaskContext, preparation: _DatabaseObservation
+    ) -> _DatabaseObservation:
+        """What the database holds after the browser ran every scenario."""
+
+        assert preparation.report is not None
+        observed = self._run_database_step(
+            context, DatabaseStep(DATABASE_PROBE, self.config.probe_argv)
+        )
+        if not observed.passed:
+            return observed
+        assert observed.result is not None
+        try:
+            report = _observed_database_report(
+                observed.result, prefix=_PROBE_PREFIX, schema=_PROBE_SCHEMA
+            )
+            engine = _validated_engine(report.get("engine"))
+            journaled = _validated_migration_set(report.get("migrations"))
+            tables = _validated_tables(report.get("tables"))
+        except RunEngineError as exc:
+            return observed.failed(str(exc))
+        expected = tuple(
+            MigrationDigest(entry["file"], entry["sha256"])
+            for entry in preparation.report["migrations"]
+        )
+        if journaled != expected:
+            return observed.failed(
+                "the probe found a different migration journal than the "
+                "prepare step recorded"
+            )
+        if sum(tables.values()) < 1:
+            return observed.failed(
+                "the data component persisted nothing: every table is empty "
+                "after the browser ran every scenario"
+            )
+        return observed.with_report({"engine": engine, "tables": tables})
 
     def _acceptance_owners(
         self,
@@ -2888,7 +3366,7 @@ def _is_runtime_output(path: PurePosixPath) -> bool:
 
 
 def _validated_execution_result(
-    value: object, command: VerificationCommand
+    value: object, command: VerificationCommand | DatabaseStep
 ) -> ExecutionResult:
     if not isinstance(value, ExecutionResult):
         raise TypeError("command runner returned no observed ExecutionResult")

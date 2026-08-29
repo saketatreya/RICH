@@ -296,7 +296,15 @@ Linux Bubblewrap is mandatory for the production runtime. Generated commands see
 - explicit writable runtime/build/report paths;
 - no network during lint, typecheck, unit, build, or browser verification;
 - bounded wall/CPU time, processes, file size, logs, V8 heaps, and virtual address
-  space.
+  space;
+- a database, exactly where the software runs. `BubblewrapCommandRunner` decides the
+  environment and the writable set *per command kind* (`environment_for`,
+  `writable_paths_for`): the unit, property and acceptance gates, and the two trusted
+  database steps around them, get `.rich/runtime/db` writable and `RICH_DATABASE_DIR`
+  set; lint and typecheck run no code and get neither; **build gets neither on
+  purpose** — the deployed build has no database at build time either, so a page that
+  reads one while `next build` prerenders it fails here, not in production. A variable
+  that reaches one gate and not another is a decision that table records.
 
 Dependency and Chromium installation is a distinct network-enabled bootstrap. It uses
 the frozen lockfile, strict peers, store-integrity verification, ignored lifecycle
@@ -314,12 +322,18 @@ All sandbox processes run in dedicated process groups. Caller cancellation, leas
 and timeout share the same bounded termination-and-reaping path.
 
 `RLIMIT_AS` measures reserved virtual address space, not resident memory. ARM64 Node
-workers reserve 8 GiB pointer-compression cages before shared libraries and build
-tracing, while Chromium reserves a much larger PartitionAlloc cage. RICH therefore
-combines:
+workers reserve an 8 GiB pointer-compression cage *per V8 isolate* before shared
+libraries and build tracing — and a process running module-customization hooks
+(`--import tsx`, which the trusted migrator uses) runs them on a worker thread, a
+second isolate with a second cage — while Chromium reserves a much larger
+PartitionAlloc cage. RICH therefore combines:
 
 - 1.5 GiB Node V8 heap limits;
-- a finite 16 GiB Node address-space ceiling with cage/runtime headroom;
+- a finite 24 GiB Node address-space ceiling. Measured on the persistence spike: the
+  migrator's node peaked at 15.65 GiB (two cages beside PGlite's WebAssembly heap) and
+  a plain `next build` at 16.0 GiB against the previous 16 GiB ceiling, surviving on the
+  allocator's retry, which is not headroom; the resident peak of the same processes was
+  under 1 GiB. The ceiling still stops a runaway mapping;
 - one Next.js build CPU and no webpack build worker;
 - output-file tracing rooted at the web application, excluding the mutable
   workspace package cache while approved workspace packages are transpiled;
@@ -352,6 +366,23 @@ Missing, stale, forged, skipped, duplicated, unknown, or partial coverage fails 
 The run cannot publish success merely because a handler returns success. The scheduler
 checks required evidence kinds, blocking status, artifact roles, and exact acceptance
 coverage before committing task and run status.
+
+**Persisted state is observed, not inferred.** When the approved architecture has a data
+component, every gate that runs the software — unit, property, acceptance — is preceded
+by a trusted *prepare* step: the engine removes `.rich/runtime/db` on the host, computes
+the migration set from `packages/db/migrations` itself, and runs the protected migrator
+in the sandbox (`pnpm -C packages/db exec tsx src/migrate.ts`). The migrator's
+`RICH_DATABASE_MIGRATIONS` line is a command result, not a claim: its `(file, sha256)`
+set must equal the host's exactly, or the gate is not run and fails as "database
+preparation failed". The set the gate ran against — `{engine, migrations}` — is recorded
+on that gate's evidence, and preview and promotion assert the journal they write equals
+it (§12). After the browser has run every scenario, the read-only *probe*
+(`.rich/verify-database.mjs`) reports the journal and a row count per table in the same
+sandbox; its `RICH_DATABASE_PROBE` line is merged into the acceptance evidence, its
+journal must equal the prepare step's, and **a data component whose tables are all empty
+fails acceptance closed** — `reload` proves a record outlived the request; only the probe
+proves it reached the database. Neither step is an evidence kind of its own, so there is
+nothing a worker could claim in its place.
 
 ### 9. A change costs what it changes
 

@@ -423,6 +423,95 @@ class MigrationRunner(Protocol):
     def migrate(self, source_dir: Path, *, database_url: str) -> None: ...
 
 
+# One rule for what counts as a migration file, shared by the trusted preview
+# runner and the run engine's prepare step: the gate-side migrator applies the
+# same names in the same order, and the engine cross-checks the set the sandbox
+# reports against the set the host computes here.
+_MIGRATION_FILENAME = re.compile(r"[0-9]{4,}_[a-z0-9][a-z0-9_-]*\.sql")
+MIGRATIONS_DIRECTORY = PurePosixPath("packages/db/migrations")
+DEFAULT_MAX_MIGRATION_FILES = 128
+DEFAULT_MAX_MIGRATION_FILE_BYTES = 1_048_576
+DEFAULT_MAX_MIGRATION_TOTAL_BYTES = 8_388_608
+
+
+@dataclass(frozen=True, slots=True)
+class MigrationDigest:
+    """One migration file as the journal records it."""
+
+    file: str
+    sha256: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"file": self.file, "sha256": self.sha256}
+
+
+def migration_files(
+    migrations: Path,
+    *,
+    max_files: int = DEFAULT_MAX_MIGRATION_FILES,
+    max_file_bytes: int = DEFAULT_MAX_MIGRATION_FILE_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_MIGRATION_TOTAL_BYTES,
+) -> tuple[tuple[str, bytes], ...]:
+    """The SQL migrations under one directory, in name order, bounded."""
+
+    if migrations.is_symlink() or not migrations.is_dir():
+        raise PreviewError("migration root must be a regular directory")
+    candidates = sorted(
+        path
+        for path in migrations.iterdir()
+        if path.name.endswith(".sql")
+    )
+    if len(candidates) > max_files:
+        raise PreviewError("too many SQL migration files")
+    result: list[tuple[str, bytes]] = []
+    total = 0
+    for path in candidates:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or not _MIGRATION_FILENAME.fullmatch(path.name)
+        ):
+            raise PreviewError(
+                f"unsafe SQL migration filename {path.name!r}"
+            )
+        payload = path.read_bytes()
+        if len(payload) > max_file_bytes:
+            raise PreviewError(
+                f"SQL migration {path.name!r} exceeds its size limit"
+            )
+        total += len(payload)
+        if total > max_total_bytes:
+            raise PreviewError("SQL migrations exceed their total size limit")
+        try:
+            payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise PreviewError(
+                f"SQL migration {path.name!r} is not UTF-8"
+            ) from exc
+        if b"\x00" in payload:
+            raise PreviewError(
+                f"SQL migration {path.name!r} contains a NUL byte"
+            )
+        result.append((path.name, payload))
+    return tuple(result)
+
+
+def migration_digests(source_dir: str | Path) -> tuple[MigrationDigest, ...]:
+    """The migration set a source tree carries: what a journal must equal.
+
+    Empty when the tree has no migrations directory, which is what a scaffold
+    without a data component looks like.
+    """
+
+    migrations = Path(source_dir).joinpath(*MIGRATIONS_DIRECTORY.parts)
+    if not migrations.exists() and not migrations.is_symlink():
+        return ()
+    return tuple(
+        MigrationDigest(name, hashlib.sha256(payload).hexdigest())
+        for name, payload in migration_files(migrations)
+    )
+
+
 class SqlMigrationRunner:
     """Apply bounded SQL without exposing a database credential to generated code."""
 
@@ -549,49 +638,12 @@ class SqlMigrationRunner:
     def _migration_files(
         self, migrations: Path
     ) -> tuple[tuple[str, bytes], ...]:
-        if migrations.is_symlink() or not migrations.is_dir():
-            raise PreviewError("migration root must be a regular directory")
-        candidates = sorted(
-            path
-            for path in migrations.iterdir()
-            if path.name.endswith(".sql")
+        return migration_files(
+            migrations,
+            max_files=self.max_files,
+            max_file_bytes=self.max_file_bytes,
+            max_total_bytes=self.max_total_bytes,
         )
-        if len(candidates) > self.max_files:
-            raise PreviewError("too many SQL migration files")
-        result: list[tuple[str, bytes]] = []
-        total = 0
-        for path in candidates:
-            if (
-                path.is_symlink()
-                or not path.is_file()
-                or not re.fullmatch(
-                    r"[0-9]{4,}_[a-z0-9][a-z0-9_-]*\.sql",
-                    path.name,
-                )
-            ):
-                raise PreviewError(
-                    f"unsafe SQL migration filename {path.name!r}"
-                )
-            payload = path.read_bytes()
-            if len(payload) > self.max_file_bytes:
-                raise PreviewError(
-                    f"SQL migration {path.name!r} exceeds its size limit"
-                )
-            total += len(payload)
-            if total > self.max_total_bytes:
-                raise PreviewError("SQL migrations exceed their total size limit")
-            try:
-                payload.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise PreviewError(
-                    f"SQL migration {path.name!r} is not UTF-8"
-                ) from exc
-            if b"\x00" in payload:
-                raise PreviewError(
-                    f"SQL migration {path.name!r} contains a NUL byte"
-                )
-            result.append((path.name, payload))
-        return tuple(result)
 
 
 SecretResolver = Callable[[str], str]

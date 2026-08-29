@@ -27,10 +27,11 @@ d. a fresh directory, migrated again, then ``next start`` under Playwright
 
 It measures wall time and the peak virtual size of every process the sandbox
 ran (RLIMIT_AS is per process, so the largest single ``VmPeak`` is the number
-that matters). The two deltas from the pre-M7 gate policy are exactly the two
-step 4 of the milestone makes the runner's own -- ``.rich/runtime/db``
-writable and ``RICH_DATABASE_DIR`` in the environment -- and nothing else is
-loosened.
+that matters). Every command goes through ``BubblewrapCommandRunner`` exactly
+as the engine sends it: the gates as ``VerificationCommand``s, the migrator
+and the probe as ``DatabaseStep``s, so the policy each one sees -- the
+database directory writable and ``RICH_DATABASE_DIR`` set for the kinds that
+run the software, and for no other -- is the runner's own, not a transcript.
 
 It is skipped by default: it downloads the locked dependency graph and
 Chromium (about 2 GiB) into the workspace, or into ``RICH_LIVE_CACHE_ROOT``
@@ -56,18 +57,19 @@ from liveutil import live_cache_root
 
 from richbuild.executor import (
     ExecutionResult,
-    SandboxPolicy,
     SandboxUnavailable,
     WorkspaceBootstrapper,
-    cache_mounts_for,
     trusted_node_pnpm_runtime,
 )
 from richbuild.interview import AdaptiveInterview, InterviewState
 from richbuild.models import NodeKind
 from richbuild.planner import plan_nextjs_architecture
 from richbuild.run_engine import (
+    DATABASE_PREPARE,
+    DATABASE_PROBE,
     AcceptanceCoverageContext,
     BubblewrapCommandRunner,
+    DatabaseStep,
     VerificationCommand,
     _observed_acceptance_coverage,
 )
@@ -86,14 +88,6 @@ PROBE_PREFIX = "RICH_DATABASE_PROBE "
 GATE_TIMEOUT_SECONDS = 900.0
 TODO_REQUIREMENT = "req.todo"
 SCENARIO = "scenario.persist"
-# Mirrors BubblewrapCommandRunner.run, which has no seam for a gate-specific
-# variable today; step 4 gives it one for RICH_DATABASE_DIR.
-GATE_ENVIRONMENT = {
-    "CI": "1",
-    "NEXT_TELEMETRY_DISABLED": "1",
-    "NODE_OPTIONS": "--disable-wasm-trap-handler --max-old-space-size=1536",
-    "RAYON_NUM_THREADS": "2",
-}
 
 
 def spike_project():
@@ -216,40 +210,6 @@ def apply_spike_fixtures(workspace: Path, scope: str) -> str:
         assert (workspace / protected).is_file(), protected
     assert (workspace / DATABASE_PROBE_PATH).is_file()
     return route
-
-
-def gate_policy(
-    runner: BubblewrapCommandRunner, *, acceptance: bool, database: bool
-) -> SandboxPolicy:
-    """Today's gate policy, plus the two deltas step 4 introduces when asked."""
-
-    environment = {
-        **GATE_ENVIRONMENT,
-        "PLAYWRIGHT_BROWSERS_PATH": runner.playwright_browsers_path,
-    }
-    writable = runner.writable_paths
-    if database:
-        environment["RICH_DATABASE_DIR"] = f"/workspace/{DATABASE_DIRECTORY}"
-        writable = (*writable, DATABASE_DIRECTORY)
-    return SandboxPolicy(
-        writable_paths=writable,
-        network=False,
-        environment=environment,
-        cache_mounts=(
-            cache_mounts_for(runner.cache_root, writable=False)
-            if runner.cache_root is not None
-            else ()
-        ),
-        timeout_seconds=runner.timeout_seconds,
-        max_memory_bytes=(
-            runner.acceptance_max_address_space_bytes
-            if acceptance
-            else runner.max_memory_bytes
-        ),
-        max_processes=runner.max_processes,
-        max_cpu_seconds=max(1, int(runner.timeout_seconds)),
-        max_output_bytes=runner.max_output_bytes,
-    )
 
 
 class AddressSpaceWatch:
@@ -419,11 +379,11 @@ def test_the_database_runs_inside_the_gates(tmp_path):
     runner = BubblewrapCommandRunner(
         executor, timeout_seconds=GATE_TIMEOUT_SECONDS, cache_root=cache
     )
-    node = toolchain.node_executable
+    assert runner.database_directory == DATABASE_DIRECTORY
+    assert commands.probe_argv[-1] == DATABASE_PROBE_PATH
     database = workspace / DATABASE_DIRECTORY
-    # What step 4 pins as PinnedRunCommands.database_argv and probe_argv.
-    migrate_argv = toolchain.pnpm_argv("-C", "packages/db", "exec", "tsx", "src/migrate.ts")
-    probe_argv = (node, DATABASE_PROBE_PATH)
+    prepare = DatabaseStep(DATABASE_PREPARE, commands.database_argv)
+    probe = DatabaseStep(DATABASE_PROBE, commands.probe_argv)
 
     # (a) The gates the protected files must pass, exactly as the engine runs
     # them. The typecheck is the first real tsc the factory and migrator face.
@@ -440,9 +400,7 @@ def test_the_database_runs_inside_the_gates(tmp_path):
     # read-only probe over the directory it left behind.
     shutil.rmtree(database, ignore_errors=True)
     with AddressSpaceWatch() as watch:
-        result = executor.run(
-            workspace, migrate_argv, gate_policy(runner, acceptance=False, database=True)
-        )
+        result = runner.run(workspace, prepare)
     migrated = _report(result, MIGRATIONS_PREFIX)
     measurements["migrate"] = {
         **_measured(result, watch),
@@ -456,15 +414,11 @@ def test_the_database_runs_inside_the_gates(tmp_path):
         {"file": "0000_initial.sql", "sha256": expected_digest, "applied": True}
     ], migrated
     # Again over the same directory: nothing to apply, same journal.
-    result = executor.run(
-        workspace, migrate_argv, gate_policy(runner, acceptance=False, database=True)
-    )
+    result = runner.run(workspace, prepare)
     assert _report(result, MIGRATIONS_PREFIX)["migrations"] == [
         {"file": "0000_initial.sql", "sha256": expected_digest, "applied": False}
     ]
-    result = executor.run(
-        workspace, probe_argv, gate_policy(runner, acceptance=False, database=True)
-    )
+    result = runner.run(workspace, probe)
     fresh = _report(result, PROBE_PREFIX)
     measurements["probe"] = {**_measured(result, None), "engine": fresh["engine"]}
     assert fresh["schema_version"] == "rich.database-probe/v1"
@@ -480,33 +434,33 @@ def test_the_database_runs_inside_the_gates(tmp_path):
     assert any("pglite" in request for request in externals["externals"]), externals
     assert not externals["chunks_bundling_pglite"], externals
 
-    # (d) A fresh directory, migrated by the trusted step, then the oracle, then
-    # the probe over what the browser left behind.
+    # (d) A fresh directory, migrated by the trusted step, then the oracle
+    # bound to an attempt the way the engine binds it, then the probe over
+    # what the browser left behind.
     shutil.rmtree(database)
-    result = executor.run(
-        workspace, migrate_argv, gate_policy(runner, acceptance=False, database=True)
+    _report(runner.run(workspace, prepare), MIGRATIONS_PREFIX)
+    context = AcceptanceCoverageContext(
+        run_id="run.spike", task_id="task.spike", attempt=1, nonce="ab" * 32
     )
-    _report(result, MIGRATIONS_PREFIX)
     with AddressSpaceWatch() as watch:
-        result = executor.run(
+        result = runner.run(
             workspace,
-            commands.acceptance_argv,
-            gate_policy(runner, acceptance=True, database=True),
+            VerificationCommand(
+                "acceptance",
+                commands.acceptance_argv,
+                expected_acceptance_scenario_ids=tuple(sorted(project.scenario_index)),
+                acceptance_context=context,
+            ),
         )
     measurements["acceptance"] = _measured(result, watch)
     assert result.passed, f"acceptance gate:\n{result.stdout}\n{result.stderr}"
     coverage = _observed_acceptance_coverage(
         result,
         expected_scenario_ids=tuple(sorted(project.scenario_index)),
-        # No context file was handed in, so the config's standalone context applies.
-        expected_context=AcceptanceCoverageContext(
-            run_id="standalone", task_id="standalone", attempt=1, nonce="0" * 64
-        ),
+        expected_context=context,
     )
     assert SCENARIO in coverage, coverage
-    result = executor.run(
-        workspace, probe_argv, gate_policy(runner, acceptance=False, database=True)
-    )
+    result = runner.run(workspace, probe)
     after = _report(result, PROBE_PREFIX)
     measurements["probe_after_acceptance"] = {
         **_measured(result, None),

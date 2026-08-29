@@ -101,6 +101,12 @@ class PinnedRunCommands:
     property_argv: tuple[str, ...]
     build_argv: tuple[str, ...]
     acceptance_argv: tuple[str, ...]
+    # The two trusted database steps: the prepare step that migrates a fresh
+    # database before each gate that runs the software, and the read-only
+    # probe that reports what the browser left behind. Neither is a gate; both
+    # are recorded on the gate they serve.
+    database_argv: tuple[str, ...]
+    probe_argv: tuple[str, ...]
 
     @classmethod
     def for_toolchain(
@@ -121,6 +127,13 @@ class PinnedRunCommands:
             ),
             build_argv=toolchain.verification_argv("build"),
             acceptance_argv=toolchain.verification_argv("test:e2e"),
+            # The protected migrator, through the data package's own pinned
+            # tsx. The probe is plain Node: it resolves the engine through
+            # packages/db itself.
+            database_argv=toolchain.pnpm_argv(
+                "-C", "packages/db", "exec", "tsx", "src/migrate.ts"
+            ),
+            probe_argv=(toolchain.node_executable, ".rich/verify-database.mjs"),
         )
 
 
