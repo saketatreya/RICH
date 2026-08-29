@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-import subprocess
 import threading
 import time
 from typing import Any, Callable, Mapping
 
-from .executor import BubblewrapExecutor, SandboxUnavailable, trusted_node_pnpm_runtime
+from .executor import SandboxUnavailable, sandbox_availability, trusted_node_pnpm_runtime
 from .run_engine import (
     CancellationToken,
     BubblewrapCommandRunner,
@@ -118,35 +117,9 @@ class DefaultRunExecutor:
         Nothing here is a fallback; a host that fails the probe cannot build.
         """
 
-        executor = BubblewrapExecutor()
-        if not executor.available():
-            return (
-                "Bubblewrap is required and was not found on PATH; install "
-                "bubblewrap and run `rich doctor`"
-            )
-        try:
-            probe = subprocess.run(
-                [
-                    str(executor.executable),
-                    "--ro-bind", "/", "/",
-                    "--unshare-user", "--unshare-pid", "--unshare-net",
-                    "--die-with-parent",
-                    "/bin/true",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return f"Bubblewrap could not be started: {exc}"
-        if probe.returncode != 0:
-            detail = (probe.stderr or probe.stdout).strip().splitlines()
-            return (
-                "this host does not permit the user namespaces Bubblewrap needs"
-                + (f" ({detail[-1][:200]})" if detail else "")
-                + "; a container or an outer sandbox is usually the cause"
-            )
+        reason = sandbox_availability()
+        if reason:
+            return reason
         # The toolchain is resolved the way a run resolves it -- exact Node and
         # pnpm identities, never downloaded -- so a version that drifted is a
         # refusal that names the drift, not a run that dies under a name that

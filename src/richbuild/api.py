@@ -12,6 +12,7 @@ import threading
 from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
+from . import __version__
 from .budget import BudgetExceeded
 from .control_plane import (
     ApprovalRequired,
@@ -270,6 +271,7 @@ class Application:
                 {
                     "status": "ok",
                     "api_version": "v1",
+                    "version": __version__,
                     "store_schema_version": STORE_SCHEMA_VERSION,
                 },
             )

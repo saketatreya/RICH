@@ -86,3 +86,40 @@ def test_omitting_it_leaves_the_default_to_the_caller():
     namespace = _parser().parse_args(["doctor"])
 
     assert getattr(namespace, "state_dir", None) is None
+
+
+def test_doctor_reports_every_check_with_a_remedy(capsys, monkeypatch):
+    """Two findings in one day were a sandbox the host would not run and a
+    Node that had drifted a patch version; both were discovered by a build
+    dying, not by the doctor. The doctor now runs the same probes a build does
+    and says what to do about each miss. Secrets are present or absent, never
+    shown."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("NEON_API_TOKEN", raising=False)
+    monkeypatch.setenv("VERCEL_TOKEN", "a-token-value")
+
+    assert main(["doctor"]) in (0, 1)
+
+    output = json.loads(capsys.readouterr().out)
+    checks = {entry["name"]: entry for entry in output["checks"]}
+    assert {"python", "git", "sandbox", "toolchain", "route claude-code", "route api",
+            "preview neon", "preview vercel", "canvas"} <= set(checks)
+    assert checks["python"]["ok"] and checks["python"]["required"]
+    assert checks["route api"]["ok"] is False and "export ANTHROPIC_API_KEY" in checks["route api"]["remedy"]
+    assert checks["preview neon"]["ok"] is False and "NEON_API_TOKEN" in checks["preview neon"]["remedy"]
+    assert checks["preview vercel"]["ok"] is True
+    assert "a-token-value" not in json.dumps(output)
+    for entry in output["checks"]:
+        if not entry["ok"]:
+            assert entry["remedy"], entry["name"]
+    assert output["ok"] == all(entry["ok"] for entry in output["checks"] if entry["required"])
+
+
+def test_version_is_reported(capsys):
+    from richbuild import __version__
+
+    with pytest.raises(SystemExit) as stop:
+        main(["--version"])
+    assert stop.value.code == 0
+    assert __version__ in capsys.readouterr().out
+    assert __version__ and __version__ != ""

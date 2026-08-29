@@ -7,10 +7,13 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import os
 import shutil
+import subprocess
 import sys
 from typing import Any, Sequence
 
+from . import __version__
 from .control_plane import ControlPlane
 from .api import NO_MODEL_ROUTE, serve
 from .executor import BubblewrapExecutor
@@ -41,6 +44,7 @@ def _parser() -> argparse.ArgumentParser:
         description="RICH — an intent-to-verified-software compiler",
         parents=[shared],
     )
+    parser.add_argument("--version", action="version", version=f"rich {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
     def add_parser(name: str, **kwargs: object) -> argparse.ArgumentParser:
@@ -426,13 +430,125 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _doctor() -> dict[str, Any]:
+    """What this host can do, check by check, with the remedy for each miss.
+
+    Required checks decide `ok`: a build needs Python, git, a sandbox the host
+    permits, and the exact pinned toolchain. Model routes, preview tokens and
+    the built canvas are reported with remedies but do not fail the host --
+    a host with no login can still plan and interview deterministically.
+    Secrets are reported as present or absent, never by value.
+    """
+
+    from .executor import (
+        TRUSTED_NODE_VERSION,
+        TRUSTED_PNPM_VERSION,
+        SandboxUnavailable,
+        sandbox_availability,
+        trusted_node_pnpm_runtime,
+    )
+    from .api import default_web_root
+
+    checks: list[dict[str, Any]] = []
+
+    def check(name: str, ok: bool, detail: str, remedy: str = "", *, required: bool) -> None:
+        entry: dict[str, Any] = {"name": name, "ok": ok, "detail": detail, "required": required}
+        if not ok and remedy:
+            entry["remedy"] = remedy
+        checks.append(entry)
+
+    check(
+        "python", True, f"{sys.version.split()[0]} at {sys.executable}", required=True
+    )
+    git = shutil.which("git")
+    check("git", bool(git), git or "not on PATH", "install git", required=True)
+
+    sandbox_reason = sandbox_availability()
+    check(
+        "sandbox",
+        sandbox_reason is None,
+        "Bubblewrap runs with user namespaces" if sandbox_reason is None else sandbox_reason,
+        "install bubblewrap and run RICH outside any container or sandbox that "
+        "blocks unprivileged user namespaces",
+        required=True,
+    )
+
+    def tool_version(name: str) -> str:
+        path = shutil.which(name)
+        if not path:
+            return "not on PATH"
+        try:
+            out = subprocess.run(
+                [path, "--version"], capture_output=True, text=True, timeout=10, check=False
+            ).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            out = "?"
+        return f"{out.lstrip('v')} at {path}"
+
+    try:
+        trusted_node_pnpm_runtime()
+        check(
+            "toolchain",
+            True,
+            f"node {TRUSTED_NODE_VERSION} and pnpm {TRUSTED_PNPM_VERSION}, identity-checked",
+            required=True,
+        )
+    except SandboxUnavailable as exc:
+        check(
+            "toolchain",
+            False,
+            f"{exc} (node: {tool_version('node')}; pnpm: {tool_version('pnpm')})",
+            f"install Node {TRUSTED_NODE_VERSION} exactly and pnpm {TRUSTED_PNPM_VERSION} "
+            "via Corepack (`corepack prepare pnpm@" + TRUSTED_PNPM_VERSION + " --activate`); "
+            "RICH never downloads a toolchain",
+            required=True,
+        )
+
+    claude = shutil.which("claude")
+    login = (Path.home() / ".claude" / ".credentials.json").is_file()
+    check(
+        "route claude-code",
+        bool(claude) and login,
+        (
+            "claude is on PATH and logged in"
+            if claude and login
+            else ("claude is on PATH but not logged in" if claude else "claude is not on PATH")
+        ),
+        "install Claude Code and run `claude` once to log in, or use --route api",
+        required=False,
+    )
+    check(
+        "route api",
+        bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "ANTHROPIC_API_KEY is set" if os.environ.get("ANTHROPIC_API_KEY") else "ANTHROPIC_API_KEY is not set",
+        "export ANTHROPIC_API_KEY, or use --route claude-code",
+        required=False,
+    )
+    for variable, what in (("NEON_API_TOKEN", "Neon"), ("VERCEL_TOKEN", "Vercel")):
+        present = bool(os.environ.get(variable))
+        check(
+            f"preview {what.lower()}",
+            present,
+            f"{variable} is set" if present else f"{variable} is not set",
+            f"export {variable} to deploy previews to {what}",
+            required=False,
+        )
+    canvas = default_web_root() / "index.html"
+    check(
+        "canvas",
+        canvas.is_file(),
+        str(canvas) if canvas.is_file() else f"not built at {canvas}",
+        "npm --prefix web ci && npm --prefix web run build",
+        required=False,
+    )
+
     executor = BubblewrapExecutor()
     tools = {
         name: shutil.which(name)
-        for name in ("python", "node", "pnpm", "npm", "git", "bwrap")
+        for name in ("python", "node", "pnpm", "npm", "git", "bwrap", "claude")
     }
     return {
-        "ok": executor.available() and bool(tools["python"]) and bool(tools["git"]),
+        "ok": all(entry["ok"] for entry in checks if entry["required"]),
+        "checks": checks,
         "sandbox": {
             "provider": "bubblewrap",
             "available": executor.available(),

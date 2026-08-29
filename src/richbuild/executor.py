@@ -497,6 +497,46 @@ class WorkspaceBootstrapper:
         return self.runtime.executor.wait_for_idle(timeout)
 
 
+def sandbox_availability() -> str | None:
+    """Why this host cannot run a sandbox right now, or None if it can.
+
+    Bubblewrap on PATH, and a user namespace the kernel and any outer sandbox
+    permit -- probed by running it, because that is the only honest test. Asked
+    by `rich doctor` and before a run is accepted; nothing here is a fallback.
+    """
+
+    executor = BubblewrapExecutor()
+    if not executor.available():
+        return (
+            "Bubblewrap is required and was not found on PATH; install "
+            "bubblewrap and run `rich doctor`"
+        )
+    try:
+        probe = subprocess.run(
+            [
+                str(executor.executable),
+                "--ro-bind", "/", "/",
+                "--unshare-user", "--unshare-pid", "--unshare-net",
+                "--die-with-parent",
+                "/bin/true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"Bubblewrap could not be started: {exc}"
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout).strip().splitlines()
+        return (
+            "this host does not permit the user namespaces Bubblewrap needs"
+            + (f" ({detail[-1][:200]})" if detail else "")
+            + "; a container or an outer sandbox is usually the cause"
+        )
+    return None
+
+
 @contextlib.contextmanager
 def _cache_lock(cache_root: str | Path | None) -> Iterator[None]:
     if cache_root is None:

@@ -1505,3 +1505,11 @@ def test_an_execution_that_dies_records_why(tmp_path):
         "RuntimeError: the lease could not be claimed" in line["text"]
         for line in timeline.body["lines"]
     )
+
+
+def test_health_names_the_version_that_answers(tmp_path):
+    from richbuild import __version__
+
+    application = Application(RichStore(tmp_path))
+    health = application.handle("GET", "/v1/health")
+    assert health.body["version"] == __version__

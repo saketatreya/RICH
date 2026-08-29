@@ -1,5 +1,19 @@
 """RICH: typed foundations for intent-to-software compilation."""
 
+from importlib import metadata as _metadata
+
+
+def _version() -> str:
+    """The installed distribution's version, or an honest marker for a checkout."""
+
+    try:
+        return _metadata.version("rich-agent-build-system")
+    except _metadata.PackageNotFoundError:
+        return "0.0.0+source"
+
+
+__version__ = _version()
+
 from .models import (
     SCHEMA_VERSION,
     AcceptanceAction,
