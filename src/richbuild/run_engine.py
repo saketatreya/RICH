@@ -534,11 +534,14 @@ class RunEngineConfig:
     """Bounded model, scheduler, and verification policy."""
 
     max_workers: int = 1
-    # Three, not two. A first attempt cannot have seen any gate output; the
-    # second is the first that can, and the first live build needed a third to
-    # act on property-gate output it had only just been shown. Two attempts
-    # gave a task exactly one chance to read what failed it.
-    max_task_attempts: int = 3
+    # Four. A first attempt cannot have seen any gate output; the second is
+    # the first that can, and the first live build needed a third to act on
+    # property-gate output it had only just been shown. Then reopening
+    # arrived: a browser scenario that fails on a page a component owns
+    # spends that component's own attempts, and the first live build to
+    # exercise it lost one answer to the bundle validator, wrote the page on
+    # its third, and failed one step short with none left.
+    max_task_attempts: int = 4
     max_provider_attempts: int = 1
     task_timeout_seconds: float = 600.0
     retry_backoff_seconds: float = 0.0

@@ -1129,7 +1129,9 @@ def test_a_protected_input_is_not_offered_as_one_of_your_current_files(tmp_path)
     )
 
     assert "export const mine" in prompt.user_prompt
-    assert "product-intent.ts" not in prompt.user_prompt, (
+    offered = json.loads(prompt.user_prompt[prompt.user_prompt.index("{"):])["current_files"]
+    paths = [f["path"] if isinstance(f, dict) else f for f in (offered if isinstance(offered, list) else list(offered))]
+    assert not any("product-intent.ts" in path for path in paths), (
         "a compiled-from-intent module is context, not workspace"
     )
     assert prompt.current_file_count == 1
@@ -1392,6 +1394,10 @@ def test_a_scenario_names_the_pages_the_task_owns(tmp_path):
         dependency_summaries={"domain": "Exposes a stable getNote operation."},
     )
     plain = json.loads(without.user_prompt[without.user_prompt.index("{"):])
+    protected = plain["write_authority"]["protected"]
+    assert "package.json" in protected["file_names"] and "tests" in protected["directory_names"]
+    assert any(".d.ts" in rule for rule in protected["rules"])
+    assert "Never write a path that write_authority.protected describes" in without.system_prompt
     assert all("pages" not in s for s in plain["approved_intent"]["acceptance_scenarios"])
     assert plain["pages_to_write"] == []
     assert without.user_prompt.startswith("Produce the smallest")
