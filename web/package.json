@@ -12,7 +12,8 @@
     "drive:m2": "node drive/m2-interview.mjs",
     "drive:m3": "node drive/m3-build.mjs",
     "drive:m6": "node drive/m6-release.mjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "drive:m4": "node drive/m4-amend.mjs"
   },
   "dependencies": {
     "@xyflow/react": "^12.3.5",
