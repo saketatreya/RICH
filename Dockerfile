@@ -20,7 +20,7 @@ ARG PNPM_VERSION
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive \
     COREPACK_HOME=/opt/corepack \
-    PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bubblewrap git curl ca-certificates xz-utils \
       python3 python3-venv python3-pip \
@@ -57,7 +57,7 @@ RUN set -eu; \
 FROM toolchain AS builder
 WORKDIR /src
 COPY . .
-RUN npm --prefix web ci && python3 tools/build_wheel.py --skip-npm
+RUN npm --prefix web ci && python3 tools/build_wheel.py --skip-install
 
 # ---- runtime -----------------------------------------------------------------
 FROM toolchain

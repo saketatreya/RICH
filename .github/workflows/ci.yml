@@ -27,6 +27,11 @@ jobs:
       # The runner image does not ship it, and skipping those tests would drop
       # the sandbox-policy coverage that matters most.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
+      # Ubuntu 24.04 confines unprivileged user namespaces through AppArmor;
+      # the runner is one such host. Lifting it lets sandbox_availability()
+      # pass here, which is what an operator on 24.04 has to do too -- and
+      # what `rich doctor` tells them.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: python -m pip install -e ".[test]"
       - run: ruff check .
       - run: python -m pytest
@@ -55,7 +60,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
-      - run: python tools/build_wheel.py --skip-npm
+      - run: python tools/build_wheel.py --skip-install
       - run: test ! -e src/richbuild/canvas
       - run: python -m venv "$VENV"
       - run: |
@@ -82,6 +87,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: docker build -t rich:ci .
       - run: |
           docker run -d --name rich-default -p 127.0.0.1:8767:8767 -v rich-ci-state:/rich rich:ci

@@ -510,7 +510,10 @@ def _doctor() -> dict[str, Any]:
         sandbox_reason is None,
         "Bubblewrap runs with user namespaces" if sandbox_reason is None else sandbox_reason,
         "install bubblewrap and run RICH outside any container or sandbox that "
-        "blocks unprivileged user namespaces",
+        "blocks unprivileged user namespaces; on Ubuntu 24.04 and later: "
+        "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 (persist "
+        "it in /etc/sysctl.d/); in Docker: --security-opt seccomp=unconfined "
+        "--security-opt apparmor=unconfined",
         required=True,
     )
 

@@ -26,7 +26,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
-      - run: python tools/build_wheel.py --skip-npm
+      - run: python tools/build_wheel.py --skip-install
       - run: |
           echo "TAG=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - run: |

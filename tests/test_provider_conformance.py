@@ -132,8 +132,17 @@ def _openai(text='{"summary":"ok"}'):
 
 
 def _claude_code(text='{"summary":"ok"}', credential_path=None):
+    import tempfile
+    from pathlib import Path
+
     from richbuild.claude_code_provider import ClaudeCodeResult
 
+    if credential_path is None:
+        # A file that exists is all the adapter checks before it symlinks it
+        # into the throwaway HOME; a login on the test machine is not assumed
+        # (a CI runner has none), and nothing here is a credential.
+        credential_path = Path(tempfile.mkdtemp(prefix="rich-fake-claude-")) / ".credentials.json"
+        credential_path.write_text("{}")
     envelope = {
         "type": "result",
         "subtype": "success",

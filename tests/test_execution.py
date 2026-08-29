@@ -137,6 +137,10 @@ def test_availability_names_a_toolchain_that_drifted(tmp_path, monkeypatch):
     def drifted():
         raise SandboxUnavailable("trusted Node version mismatch: expected 22.23.2, found 23.0.0")
 
+    # The sandbox is probed first; on a host that refuses user namespaces (a
+    # CI runner did) its reason would be the one returned, and this test is
+    # about the toolchain's.
+    monkeypatch.setattr(execution_module, "sandbox_availability", lambda: None)
     monkeypatch.setattr(execution_module, "trusted_node_pnpm_runtime", drifted)
     reason = DefaultRunExecutor(RichStore(tmp_path)).availability()
     assert reason is not None

@@ -8,8 +8,9 @@ serving its own fresh build (`default_web_root` prefers web/dist when the
 repository is present).  Every step is a real command with its exit code
 honoured; nothing here is skipped quietly.
 
-    python tools/build_wheel.py            # → dist/rich_agent_build_system-*.whl
-    python tools/build_wheel.py --keep     # leave src/richbuild/canvas in place
+    python tools/build_wheel.py                 # → dist/rich_agent_build_system-*.whl
+    python tools/build_wheel.py --keep          # leave src/richbuild/canvas in place
+    python tools/build_wheel.py --skip-install  # web/node_modules is already there (CI)
 """
 
 from __future__ import annotations
@@ -35,13 +36,16 @@ def run(argv: list[str], **kwargs) -> None:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--keep", action="store_true", help="keep src/richbuild/canvas after building")
-    parser.add_argument("--skip-npm", action="store_true", help="use web/dist as it is (CI builds it first)")
+    parser.add_argument(
+        "--skip-install", action="store_true", help="web/node_modules is already installed (CI)"
+    )
     args = parser.parse_args(argv[1:])
 
-    if not args.skip_npm:
-        if not (WEB / "node_modules").is_dir():
-            run(["npm", "--prefix", str(WEB), "ci"])
-        run(["npm", "--prefix", str(WEB), "run", "build"])
+    # The canvas is always built here: a wheel assembled from a stale or
+    # absent web/dist would ship the wrong product without a word.
+    if not args.skip_install and not (WEB / "node_modules").is_dir():
+        run(["npm", "--prefix", str(WEB), "ci"])
+    run(["npm", "--prefix", str(WEB), "run", "build"])
     if not (DIST / "index.html").is_file():
         print(f"no canvas at {DIST}; build it first", file=sys.stderr)
         return 1
