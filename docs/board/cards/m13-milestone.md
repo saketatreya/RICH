@@ -1,13 +1,13 @@
 ---
 id: m13-milestone
-title: "Vertical decomposition"
+title: Vertical decomposition
 kind: milestone
-status: backlog
+status: next
 track: E
 milestone: M13
-release: "2.0"
+release: '2.0'
 size: XL
-drive: "step 4 · graph"
+drive: step 4 · graph
 order: 6
 ---
 
