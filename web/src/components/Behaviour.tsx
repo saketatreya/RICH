@@ -23,6 +23,11 @@ interface ValueTypeDoc {
   minimum?: number
   maximum?: number
   char_set?: string
+  // The persistence kinds: an identifier may name the entity it refers to,
+  // and a decimal declares how many digits it carries.
+  entity?: string
+  precision?: number
+  scale?: number
 }
 
 interface OperationDoc {
@@ -80,6 +85,21 @@ function describe(type: ValueTypeDoc | null | undefined): string {
     }
     case 'boolean':
       return 'true or false'
+    case 'identifier':
+      return type.entity ? `${type.entity} id` : 'id'
+    case 'timestamp':
+      return 'instant (UTC)'
+    case 'date':
+      return 'calendar date'
+    case 'decimal': {
+      // "decimal(18,2)": the spelling a database column would have, which is
+      // where such a value is going.
+      const digits =
+        type.precision !== undefined && type.scale !== undefined
+          ? `(${type.precision},${type.scale})`
+          : ''
+      return `decimal${digits}`
+    }
     default:
       return type.kind
   }

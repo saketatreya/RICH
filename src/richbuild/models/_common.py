@@ -279,6 +279,13 @@ class ValueTypeKind(_StringEnum):
     LIST = "list"
     RECORD = "record"
     OPTIONAL = "optional"
+    # The value language of persistence: an opaque record id, an instant, a
+    # calendar date, and an exact number carried as a string. Nothing else
+    # until a scenario needs it.
+    IDENTIFIER = "identifier"
+    TIMESTAMP = "timestamp"
+    DATE = "date"
+    DECIMAL = "decimal"
 
 
 class CharSet(_StringEnum):

@@ -93,16 +93,17 @@ def test_example_compiles_to_a_single_ground_assertion():
         _contract((operation,), (_example("op.clamp", "clamp", 4, 2),))
     )
 
-    assert "operations.clamp(4)" in suite
+    assert "await operations.clamp(4)" in suite
+    assert "async () => {" in suite
     assert "expect(actual).toEqual(2)" in suite, (
         "a failing check has to say what it got, not just that it was false"
     )
     # A single ground fact needs no case list -- and an import of the case
     # drawer it never calls would fail the typecheck gate this file runs beside.
     assert "casesFor" not in suite
-    assert 'import { equals }' not in suite, (
+    assert 'from "./rich-value-generator"' not in suite, (
         "an example suite draws no cases and compares no structures, so it "
-        "imports nothing from the generator"
+        "imports nothing from the generator -- not even an empty import"
     )
 
 
@@ -125,8 +126,8 @@ def test_idempotence_applies_the_operation_twice():
         )
     )
 
-    assert "const once = operations.normalize(value)" in suite
-    assert "expect(operations.normalize(once)).toEqual(once)" in suite
+    assert "const once = await operations.normalize(value)" in suite
+    assert "expect(await operations.normalize(once)).toEqual(once)" in suite
     assert (
         'import { casesFor, type ValueType } from "./rich-value-generator";'
         in suite
@@ -158,7 +159,7 @@ def test_round_trip_pipes_the_subject_through_its_witness():
         )
     )
 
-    assert "operations.decode(operations.encode(value))" in suite
+    assert "await operations.decode(await operations.encode(value))" in suite
     assert "expect(restored).toEqual(value)" in suite
 
 
@@ -191,8 +192,11 @@ def test_preservation_skips_cases_the_predicate_rejects():
 
     # p x -> p (f x): a case where the hypothesis is false says nothing, so it
     # is skipped rather than counted as a pass of the interesting claim.
-    assert "if (!operations.isSorted(value)) continue;" in suite
-    assert "expect(operations.isSorted(operations.insert(value))).toBe(true)" in suite
+    assert "if (!(await operations.isSorted(value))) continue;" in suite
+    assert (
+        "expect(await operations.isSorted(await operations.insert(value))).toBe(true)"
+        in suite
+    )
 
 
 def test_establishment_judges_the_output_unconditionally():
@@ -220,7 +224,10 @@ def test_establishment_judges_the_output_unconditionally():
         )
     )
 
-    assert "expect(operations.isLower(operations.render(value))).toBe(true)" in suite
+    assert (
+        "expect(await operations.isLower(await operations.render(value))).toBe(true)"
+        in suite
+    )
     assert "continue;" not in suite
 
 
@@ -255,13 +262,16 @@ def test_totality_asserts_no_throw_and_honours_its_guard():
     guard_anchor = _example("op.nonzero", "isNonZero", 1, True)
 
     plain = compile_obligation_suite(_contract((subject, guard), (unguarded, anchor)))
-    assert "expect(() => operations.divide(value)).not.toThrow()" in plain
+    # One value that reads the same whether the operation answered or
+    # rejected: what it threw, or null.
+    assert "expect(await thrown(() => operations.divide(value))).toBeNull()" in plain
+    assert "import { casesFor, thrown, type ValueType }" in plain
     assert "isNonZero" not in plain
 
     fenced = compile_obligation_suite(
         _contract((subject, guard), (guarded, anchor, guard_anchor))
     )
-    assert "if (!operations.isNonZero(value)) continue;" in fenced
+    assert "if (!(await operations.isNonZero(value))) continue;" in fenced
 
 
 # --------------------------------------------------------------------------
@@ -370,12 +380,15 @@ def test_the_pinned_surface_renders_every_type_kind():
         )
     )
 
+    # Async-tolerant uniformly: a component that reaches a database answers
+    # with promises, one that does not need not, and the gate awaits both.
     assert (
         "shape(input: { flag: boolean, count: number, note: string | null }): "
-        '"red" | "green" | "blue";' in rendered
+        '"red" | "green" | "blue" | Promise<"red" | "green" | "blue">;' in rendered
     )
-    assert "listing(input: Array<number>): boolean;" in rendered
+    assert "listing(input: Array<number>): boolean | Promise<boolean>;" in rendered
     assert "Operations" in rendered and "implement" in rendered.lower()
+    assert "export type Decimal" not in rendered, "no decimal, no brand"
 
 
 # --------------------------------------------------------------------------
@@ -405,7 +418,7 @@ def _draw(node, tmp_path, cases):
     # Raw Node ESM needs the extension; vitest resolves the suite's
     # extensionless import itself, which is why only the driver differs.
     driver.write_text(
-        "import { casesFor, equals, type ValueType } "
+        "import { casesFor, equals, normalize, thrown, type ValueType } "
         'from "./rich-value-generator.ts";\n'
         f"const requested = {json.dumps(cases)};\n"
         "const out = requested.map((item: any) => ({\n"
@@ -420,7 +433,24 @@ def _draw(node, tmp_path, cases):
         '  equals({ a: 1, b: 2 }, { b: 2, a: 1 }),\n'
         "  equals([1], [1, 1]),\n"
         "];\n"
-        "console.log(JSON.stringify({ out, equalityChecks }));\n"
+        'const money = { kind: "decimal", precision: 5, scale: 2 } as ValueType;\n'
+        "const normalizeChecks = [\n"
+        '  normalize(money, "01.50"),\n'
+        '  normalize(money, "-0.0"),\n'
+        '  normalize(money, "-12.30"),\n'
+        '  normalize(money, "100"),\n'
+        '  normalize({ kind: "list", element: money } as ValueType, ["1.50", "2"]),\n'
+        '  normalize({ kind: "record", record_fields: [{ name: "amount", value_type: money }] } as ValueType,\n'
+        '    { amount: "2.0", extra: "2.0" }),\n'
+        '  normalize({ kind: "string" } as ValueType, "01.50"),\n'
+        "];\n"
+        "const thrownChecks = [\n"
+        "  (await thrown(() => 1)) === null,\n"
+        '  (await thrown(() => { throw new Error("boom"); })) instanceof Error,\n'
+        '  (await thrown(async () => { throw new Error("later"); })) instanceof Error,\n'
+        "  (await thrown(async () => 1)) === null,\n"
+        "];\n"
+        "console.log(JSON.stringify({ out, equalityChecks, normalizeChecks, thrownChecks }));\n"
     )
     result = subprocess.run(
         [node, "--experimental-strip-types", str(driver)],
@@ -471,6 +501,11 @@ def _draw(node, tmp_path, cases):
                 max_length=3,
             ),
         ),
+        ("identifier", ValueType(kind=ValueTypeKind.IDENTIFIER, entity="Todo")),
+        ("timestamp", ValueType(kind=ValueTypeKind.TIMESTAMP)),
+        ("date", ValueType(kind=ValueTypeKind.DATE)),
+        ("decimal", ValueType(kind=ValueTypeKind.DECIMAL, precision=7, scale=3)),
+        ("money", ValueType(kind=ValueTypeKind.DECIMAL, precision=2, scale=2)),
     ],
 )
 def test_generated_values_inhabit_the_type_python_validated(
@@ -501,6 +536,14 @@ def test_generated_values_inhabit_the_type_python_validated(
             any(ord(character) > 0xFFFF for character in value)
             for value in values
         )
+    if label == "decimal":
+        # Both signs, both spellings, never a float: the sampler must reach the
+        # corners the checker admits, or the gate tests a narrower domain than
+        # the contract declares.
+        assert any(value.startswith("-") for value in values)
+        assert any("." in value for value in values)
+        assert any("." not in value for value in values)
+        assert all(isinstance(value, str) for value in values)
 
 
 @pytest.mark.live
@@ -537,8 +580,15 @@ def test_the_generator_source_is_shipped_where_the_suite_imports_it():
         "op.clamp", "clamp", input_type=SMALL_INT, output_type=SMALL_INT
     )
 
+    drawn = ProofObligation(
+        id="obl.clamp.idempotent",
+        relation=ObligationRelation.IDEMPOTENT,
+        subject_operation_id="op.clamp",
+        requirement_ids=("req.core",),
+        sample_size=4,
+    )
     suite = compile_obligation_suite(
-        _contract((operation,), (_example("op.clamp", "clamp", 1, 1),))
+        _contract((operation,), (_example("op.clamp", "clamp", 1, 1), drawn))
     )
 
     assert suite_import in suite
@@ -606,7 +656,9 @@ def _sorting_contract():
 
 CORRECT_OPERATIONS = """\
 export const operations = {
-  sortList(input: number[]): number[] {
+  // Async on purpose, beside synchronous siblings: the interface allows
+  // either, and the gate has to await this one and not choke on the others.
+  async sortList(input: number[]): Promise<number[]> {
     return [...input].sort((a, b) => a - b);
   },
   isSorted(input: number[]): boolean {
@@ -653,15 +705,26 @@ let suite = null;
 export function describe(name, body) {
   suite = name;
   body();
+  void runQueued();
 }
 
+// Bodies are async now -- every call in a compiled suite is awaited -- so
+// they are queued and run one after another once the suite has registered.
+const queued = [];
+
 export function it(name, body) {
-  try {
-    body();
-    passes.push(name);
-  } catch (error) {
-    failures.push({ name, message: String(error && error.message ? error.message : error) });
-  }
+  queued.push(async () => {
+    try {
+      await body();
+      passes.push(name);
+    } catch (error) {
+      failures.push({ name, message: String(error && error.message ? error.message : error) });
+    }
+  });
+}
+
+async function runQueued() {
+  for (const run of queued) await run();
 }
 
 function fail(message) {
@@ -697,6 +760,9 @@ export function expect(actual) {
       if (!Object.is(actual, expected)) {
         fail(`expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
       }
+    },
+    toBeNull() {
+      if (actual !== null) fail(`expected null, got ${String(actual)}`);
     },
     toThrow() {
       let threw = false;
@@ -864,3 +930,142 @@ def test_idempotence_alone_cannot_tell_identity_from_a_real_sort(tmp_path):
         name.split(":")[0] for name in report["passes"]
     }
     assert _failed_obligations(report) == {"obl.sortList.example"}
+
+
+# --------------------------------------------------------------------------
+# The persistence kinds: rendered, sampled, and compared after normalisation
+# --------------------------------------------------------------------------
+
+
+MONEY = ValueType(kind=ValueTypeKind.DECIMAL, precision=12, scale=2)
+LINE = ValueType(
+    kind=ValueTypeKind.RECORD,
+    record_fields=(
+        RecordField("id", ValueType(kind=ValueTypeKind.IDENTIFIER, entity="Order")),
+        RecordField("at", ValueType(kind=ValueTypeKind.TIMESTAMP)),
+        RecordField("on", ValueType(kind=ValueTypeKind.DATE)),
+        RecordField("amount", MONEY),
+    ),
+)
+
+
+def test_the_pinned_surface_renders_the_persistence_kinds_and_brands_the_decimal():
+    operations = (
+        _operation("op.total", "total", input_type=LINE, output_type=MONEY),
+        _operation("op.name", "nameOf", input_type=LINE, output_type=WORD),
+    )
+
+    rendered = compile_operations_interface(
+        (
+            _contract(
+                operations,
+                (
+                    _example(
+                        "op.total",
+                        "total",
+                        {"id": "o-1", "at": "2026-08-29T12:00:00Z", "on": "2026-08-29", "amount": "1.50"},
+                        "1.50",
+                    ),
+                ),
+            ),
+        )
+    )
+
+    # An identifier, an instant and a date are strings with a grammar the gate
+    # checks; only the decimal is branded, because a plain string there would
+    # invite a float on the way in.
+    assert (
+        "total(input: { id: string, at: string, on: string, amount: Decimal }): "
+        "Decimal | Promise<Decimal>;" in rendered
+    )
+    assert "export type Decimal = string & { readonly __rich_decimal: never };" in rendered
+    assert "never a float" in rendered
+    assert "synchronously or with a promise" in rendered
+
+
+def test_a_type_that_carries_a_decimal_is_compared_after_normalisation():
+    subject = _operation("op.round", "roundUp", input_type=MONEY, output_type=MONEY)
+    codec = (
+        _operation("op.enc", "encodeLine", input_type=LINE, output_type=WORD),
+        _operation("op.dec", "decodeLine", input_type=WORD, output_type=LINE),
+    )
+    obligations = (
+        _example("op.round", "roundUp", "1.50", "2"),
+        ProofObligation(
+            id="obl.round.idempotent",
+            relation=ObligationRelation.IDEMPOTENT,
+            subject_operation_id="op.round",
+            requirement_ids=("req.core",),
+            sample_size=8,
+        ),
+        _example("op.enc", "encodeLine", {"id": "o", "at": "2026-08-29T12:00:00Z", "on": "2026-08-29", "amount": "1"}, "o"),
+        _example("op.dec", "decodeLine", "o", {"id": "o", "at": "2026-08-29T12:00:00Z", "on": "2026-08-29", "amount": "1"}),
+        ProofObligation(
+            id="obl.line.round_trip",
+            relation=ObligationRelation.ROUND_TRIP,
+            subject_operation_id="op.enc",
+            witness_operation_id="op.dec",
+            requirement_ids=("req.core",),
+            sample_size=8,
+        ),
+    )
+
+    suite = compile_obligation_suite(_contract((subject, *codec), obligations))
+
+    # "1.5" and "1.50" are one value, so an implementation is right to answer
+    # either; the assertion binds the type it compares under and normalises
+    # both sides. The round trip compares the *input* type, which is the one
+    # the witness must give back.
+    assert (
+        'const shape = {"kind": "decimal", "precision": 12, "scale": 2} as ValueType;'
+        in suite
+    )
+    assert 'expect(normalize(shape, actual)).toEqual(normalize(shape, "2"))' in suite
+    assert (
+        "expect(normalize(shape, await operations.roundUp(once)))"
+        ".toEqual(normalize(shape, once))" in suite
+    )
+    assert "expect(normalize(shape, restored)).toEqual(normalize(shape, value))" in suite
+    assert '"record_fields": [{"name": "id"' in suite
+    assert "import { casesFor, normalize, type ValueType }" in suite
+    # And a decimal-free suite is byte-for-byte free of it.
+    plain = compile_obligation_suite(
+        _contract(
+            (_operation("op.clamp", "clamp", input_type=SMALL_INT, output_type=SMALL_INT),),
+            (_example("op.clamp", "clamp", 1, 1),),
+        )
+    )
+    assert "normalize" not in plain and "shape" not in plain
+
+
+def test_an_operation_named_like_a_generator_helper_does_not_import_it():
+    # `operations.normalize(` and `operations.equals(` are the model's; only
+    # a bare call pulls the generator's function in.
+    operation = _operation("op.n", "normalize", input_type=SMALL_INT, output_type=SMALL_INT)
+    suite = compile_obligation_suite(
+        _contract((operation,), (_example("op.n", "normalize", 1, 1),))
+    )
+    assert 'from "./rich-value-generator"' not in suite, suite
+    assert "await operations.normalize(1)" in suite
+
+
+@pytest.mark.live
+def test_normalisation_and_totality_helpers_answer_as_the_suite_assumes(tmp_path):
+    node = _node()
+
+    drawn = _draw(node, tmp_path, [{"id": "obl.eq", "type": BOOLEAN.to_dict(), "count": 1}])
+
+    # Leading and trailing zeros go, "-0" is "0", a list and a declared record
+    # field are normalised inside, an undeclared field and a plain string are
+    # left exactly as they were.
+    assert drawn["normalizeChecks"] == [
+        "1.5",
+        "0",
+        "-12.3",
+        "100",
+        ["1.5", "2"],
+        {"amount": "2", "extra": "2.0"},
+        "01.50",
+    ]
+    # Sync or async, answered or rejected: the same one value.
+    assert drawn["thrownChecks"] == [True, True, True, True]

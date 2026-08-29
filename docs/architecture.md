@@ -150,6 +150,20 @@ None of this weakens what is checked. Anti-vacuity, endomorphism, predicate typi
 example inhabitation all still hold on the assembled architecture, and every surviving
 obligation must still compile to a runnable check.
 
+**The value language has four kinds for state that outlives a request**, beside the
+seven structural ones: `identifier` (an opaque slug of at most 64 letters, digits, `-`
+and `_`, optionally naming the `entity` it refers to), `timestamp` (an RFC 3339 UTC
+instant ending in `Z`), `date` (an ISO calendar date), and `decimal` — an exact number
+carried as a *string* with a declared `precision` and `scale`, checked with Python's
+`Decimal` after normalisation, rendered as a branded string in TypeScript, and compared
+by the property gate after normalisation, so that "1.5" and "1.50" are one value and an
+implementation is right to answer either. That is how "money is a decimal string, never a
+float" reaches generated software. Each has one fixed grammar, so none adds a bound to
+derive; a decimal's precision and scale are asked for (a declaration about the quantity,
+not a guess at a bound), default to `(18, 2)` when omitted, and are widened by
+`fitted_to` to admit the examples the same answer supplies. Nothing else, until a
+scenario needs it.
+
 ### 4. The scaffold freezes the verifier
 
 The target pack emits:
@@ -461,6 +475,18 @@ and a passing check that checked nothing is the precise failure this design exis
 avoid — the same reason `ContractV2` refuses a contract whose only claims are unanchored,
 and the same reason the obligation compiler refuses a `PROOF`-tier claim it can only
 sample.
+
+**Operations are async-tolerant uniformly.** The pinned interface renders every
+operation as `name(input): O | Promise<O>` and the compiled suite awaits every call — a
+totality claim reads `expect(await thrown(() => op(value))).toBeNull()`, which reports
+the same whether the operation answered or rejected. PGlite is asynchronous and the
+domain awaits the data layer, so a kind-scoped async would not have stayed scoped; and
+`await` of a plain value is that value, so a component with no database pays nothing for
+the uniformity. When the type an assertion compares carries a `decimal`, the suite binds
+its `shape` and compares `normalize(shape, actual)` to `normalize(shape, expected)`;
+every other suite compares structurally, unchanged. The suite, the generator and the
+interface are protected inputs, so this change to what a worker is held to is exactly
+what the pack version bump announces.
 
 ### 11. Evidence flows forward into the retry
 

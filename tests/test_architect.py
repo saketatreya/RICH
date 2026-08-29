@@ -301,8 +301,8 @@ def test_proposed_obligations_compile_into_checks_a_wrong_answer_would_fail():
 
     suite = compile_obligation_suite(architecture.contract_index["contract:domain"])
 
-    assert "expect(operations.normalizeTasks(once)).toEqual(once)" in suite
-    assert "operations.isNormalized(operations.normalizeTasks(value))" in suite
+    assert "expect(await operations.normalizeTasks(once)).toEqual(once)" in suite
+    assert "await operations.isNormalized(await operations.normalizeTasks(value))" in suite
     # Sampled over a domain the generator can actually draw from, which is only
     # true because the architect was required to bound every string and list.
     assert ", 64)" in suite
@@ -572,6 +572,10 @@ def test_the_innermost_type_level_offers_only_scalars_so_unrolling_terminates():
         "integer",
         "string",
         "enum",
+        "identifier",
+        "timestamp",
+        "date",
+        "decimal",
     ]
     assert "element" not in innermost["properties"]
     assert "record_fields" not in innermost["properties"]
@@ -1036,6 +1040,10 @@ def test_the_schema_no_longer_asks_for_anything_derivable():
     for derivable in ("minimum", "maximum", "min_length", "max_length", "char_set"):
         assert derivable not in slots
     assert "kind" in slots and "members" in slots
+    # Declared, not derived: an identifier's entity is a name only the author
+    # knows, and a decimal's precision and scale say what the quantity is.
+    for declared in ("entity", "precision", "scale"):
+        assert declared in slots
 
 
 def test_every_surviving_obligation_is_still_fully_checked():
@@ -1170,3 +1178,55 @@ def test_the_redraft_prompt_shows_the_previous_design_and_the_rule():
     assert '"unchanged": true' in system_prompt and "unchanged" not in fresh_system
     assert "previous_components" in user_prompt and "previous_components" not in fresh_user
     assert "normalizeTasks" in user_prompt
+
+
+def test_a_decimal_answer_gets_the_money_default_and_its_bounds_are_clamped():
+    from richbuild.models import value_type_from_request
+
+    # Omitted, not refused: two places because money has two, widened later by
+    # the example the same answer supplies.
+    assert value_type_from_request({"kind": "decimal"}) == ValueType(
+        kind=ValueTypeKind.DECIMAL, precision=18, scale=2
+    )
+    clamped = value_type_from_request({"kind": "decimal", "precision": 60, "scale": 70})
+    assert (clamped.precision, clamped.scale) == (38, 38)
+    assert value_type_from_request(
+        {"kind": "identifier", "entity": "Todo", "max_length": 3}
+    ) == ValueType(kind=ValueTypeKind.IDENTIFIER, entity="Todo")
+    # A malformed entity is a bookkeeping slip, dropped rather than fatal.
+    assert value_type_from_request({"kind": "identifier", "entity": "not a name"}) == (
+        ValueType(kind=ValueTypeKind.IDENTIFIER)
+    )
+    assert value_type_from_request({"kind": "timestamp", "precision": 2}) == ValueType(
+        kind=ValueTypeKind.TIMESTAMP
+    )
+
+
+def test_a_decimal_example_widens_the_declared_scale_through_assembly():
+    money = _type(kind="decimal", precision=10, scale=2)
+    proposal = copy.deepcopy(_proposal())
+    for component in proposal["components"]:
+        if component["layer"] == "domain":
+            component["operations"] = [
+                {
+                    "name": "total",
+                    "description": "Sum the line amounts.",
+                    "input_type": _type(kind="list", element=money, max_length=8),
+                    "output_type": money,
+                    "errors": [],
+                }
+            ]
+            component["obligations"] = [
+                _obligation("example", "total", argument=["1.005", "2"], result="3.005"),
+            ]
+
+    architecture = assemble(_project(), proposal, target_pack=TARGET_PACK)
+
+    total = architecture.contract_index["contract:domain"].operation_index[
+        "operation:domain:total"
+    ]
+    assert total.output_type.kind is ValueTypeKind.DECIMAL
+    assert (total.output_type.precision, total.output_type.scale) == (11, 3)
+    assert total.input_type.element.scale == 3
+    suite = compile_obligation_suite(architecture.contract_index["contract:domain"])
+    assert "normalize(shape" in suite

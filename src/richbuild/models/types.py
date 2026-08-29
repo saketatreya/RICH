@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
+from datetime import date as _date, datetime as _datetime
+from decimal import Decimal, InvalidOperation
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -79,6 +81,24 @@ DEFAULT_SAMPLED_INTEGER = 1_000_000
 # The intersection of what a JSON object key, a TypeScript property and a Lean
 # structure field all accept without quoting.
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+# The persistence kinds. An identifier is an opaque slug of bounded length,
+# the shape ids take in running software (uuids, "task-1"); it may name the
+# entity it refers to, which is documentation for a reader and a hook for a
+# later relation, not a check performed here. A timestamp is an RFC 3339 UTC
+# instant ending in Z, a date an ISO calendar date. A decimal is a string --
+# never a float -- with a declared precision and scale, so the invariant
+# "money is a decimal string" reaches generated software: the checker counts
+# digits after normalisation, and the property gate compares after it too.
+MAX_IDENTIFIER_LENGTH = 64
+MAX_DECIMAL_PRECISION = 38
+DEFAULT_DECIMAL_PRECISION = 18
+DEFAULT_DECIMAL_SCALE = 2
+_ENTITY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_DECIMAL_RE = re.compile(r"^-?[0-9]+(?:\.[0-9]+)?$")
+_TIMESTAMP_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$"
+)
+_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,12 +141,18 @@ _VALUE_TYPE_SLOTS: dict[ValueTypeKind, frozenset[str]] = {
     ValueTypeKind.LIST: frozenset({"min_length", "max_length", "element"}),
     ValueTypeKind.RECORD: frozenset({"record_fields"}),
     ValueTypeKind.OPTIONAL: frozenset({"element"}),
+    ValueTypeKind.IDENTIFIER: frozenset({"entity"}),
+    ValueTypeKind.TIMESTAMP: frozenset(),
+    ValueTypeKind.DATE: frozenset(),
+    ValueTypeKind.DECIMAL: frozenset({"precision", "scale"}),
 }
 _VALUE_TYPE_REQUIRED_SLOTS: dict[ValueTypeKind, frozenset[str]] = {
     ValueTypeKind.ENUM: frozenset({"members"}),
     ValueTypeKind.LIST: frozenset({"element"}),
     ValueTypeKind.RECORD: frozenset({"record_fields"}),
     ValueTypeKind.OPTIONAL: frozenset({"element"}),
+    # A decimal without a precision and scale is a float with extra steps.
+    ValueTypeKind.DECIMAL: frozenset({"precision", "scale"}),
 }
 _VALUE_TYPE_EMPTY: dict[str, Any] = {
     "minimum": None,
@@ -137,6 +163,9 @@ _VALUE_TYPE_EMPTY: dict[str, Any] = {
     "members": (),
     "element": None,
     "record_fields": (),
+    "entity": None,
+    "precision": None,
+    "scale": None,
 }
 
 
@@ -147,9 +176,11 @@ class ValueType:
     JSON Schema is expressive enough to describe almost anything and therefore
     cannot be quantified over: you cannot compile ``forall x`` against a schema
     without a nameable type, nor sample from it without a generatable domain.
-    This language is small on purpose -- seven kinds, bounded nesting, no
+    This language is small on purpose -- eleven kinds, bounded nesting, no
     regular expressions, no recursion -- because every construct here has to
     have one meaning in a property test and the same meaning in a theorem.
+    The four persistence kinds (identifier, timestamp, date, decimal) are
+    scalars with a fixed grammar each, so they add no bounds to derive.
 
     Bounded nesting is also what keeps the type describable to a
     structured-output model later: a recursive schema cannot be expressed, but
@@ -165,6 +196,9 @@ class ValueType:
     members: tuple[str, ...] = ()
     element: "ValueType | None" = None
     record_fields: tuple[RecordField, ...] = ()
+    entity: str | None = None
+    precision: int | None = None
+    scale: int | None = None
 
     def __post_init__(self) -> None:
         kind = _enum(self.kind, ValueTypeKind, "value_type.kind")
@@ -175,6 +209,31 @@ class ValueType:
                 isinstance(value, bool) or not isinstance(value, int)
             ):
                 raise ModelValidationError(f"value_type.{name} must be an integer")
+        if self.entity is not None and (
+            not isinstance(self.entity, str) or not _ENTITY_RE.fullmatch(self.entity)
+        ):
+            raise ModelValidationError(
+                "value_type.entity must be a 1-64 character name starting with a "
+                "letter and containing only letters, digits or '_'"
+            )
+        for name in ("precision", "scale"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self, name, _non_negative_int(value, f"value_type.{name}")
+                )
+        if self.precision is not None and not (
+            1 <= self.precision <= MAX_DECIMAL_PRECISION
+        ):
+            raise ModelValidationError(
+                f"value_type.precision must be between 1 and {MAX_DECIMAL_PRECISION}"
+            )
+        if (
+            self.scale is not None
+            and self.precision is not None
+            and self.scale > self.precision
+        ):
+            raise ModelValidationError("value_type.scale cannot exceed precision")
         for name in ("min_length", "max_length"):
             value = getattr(self, name)
             if value is not None:
@@ -273,7 +332,10 @@ class ValueType:
         """
 
         kind = self.kind
-        if kind in (ValueTypeKind.BOOLEAN, ValueTypeKind.ENUM):
+        if kind in (ValueTypeKind.BOOLEAN, ValueTypeKind.ENUM) or kind in _SCALAR_GRAMMARS:
+            # The persistence kinds are bounded by their grammar: an identifier
+            # by its length, a decimal by its precision, an instant and a date
+            # by the range the sampler draws from.
             return True
         if kind is ValueTypeKind.INTEGER:
             return self.minimum is not None and self.maximum is not None
@@ -299,6 +361,10 @@ class ValueType:
             return 2
         if kind is ValueTypeKind.ENUM:
             return len(self.members)
+        if kind in _SCALAR_GRAMMARS:
+            # Finite, but nowhere near enumerable: 64 slug characters, every
+            # instant, every decimal of a given precision.
+            return None
         if kind is ValueTypeKind.INTEGER:
             if self.minimum is None or self.maximum is None:
                 return None
@@ -395,6 +461,37 @@ class ValueType:
                     f"{value!r}"
                 )
             return None
+        if kind is ValueTypeKind.IDENTIFIER:
+            if not isinstance(value, str):
+                return f"{path} must be an identifier string, got {_type_name(value)}"
+            if not 1 <= len(value) <= MAX_IDENTIFIER_LENGTH:
+                return (
+                    f"{path} is {len(value)} characters; an identifier is 1 to "
+                    f"{MAX_IDENTIFIER_LENGTH}"
+                )
+            stray = sorted(set(value) - set(CharSet.ASCII_SLUG.alphabet))
+            if stray:
+                return (
+                    f"{path} contains characters an identifier cannot: "
+                    f"{''.join(stray)!r} (letters, digits, '-' and '_' only)"
+                )
+            return None
+        if kind is ValueTypeKind.TIMESTAMP:
+            if not isinstance(value, str):
+                return f"{path} must be a timestamp string, got {_type_name(value)}"
+            return _explain_timestamp(value, path)
+        if kind is ValueTypeKind.DATE:
+            if not isinstance(value, str):
+                return f"{path} must be a date string, got {_type_name(value)}"
+            return _explain_date(value, path)
+        if kind is ValueTypeKind.DECIMAL:
+            assert self.precision is not None and self.scale is not None
+            if not isinstance(value, str):
+                return (
+                    f"{path} must be a decimal string such as '12.50', got "
+                    f"{_type_name(value)}"
+                )
+            return _explain_decimal(value, path, self.precision, self.scale)
         if kind is ValueTypeKind.OPTIONAL:
             assert self.element is not None
             if value is None:
@@ -533,8 +630,26 @@ class ValueType:
                     for record_field in self.record_fields
                 ),
             )
-        # boolean and enum carry no bounds; an enum's members are the author's
-        # own vocabulary and widening them would invent product meaning.
+        if kind is ValueTypeKind.DECIMAL:
+            # Widen the scale to the most decimal places any example carries
+            # and the precision to fit the widest integer part beside it. An
+            # example that would need more than the language allows is left to
+            # inhabitation to refuse, with its reason.
+            assert self.precision is not None and self.scale is not None
+            scale, integer_digits = self.scale, self.precision - self.scale
+            for text in samples:
+                digits = _decimal_digits(text)
+                if digits is None:
+                    continue
+                whole, fraction = digits
+                scale = max(scale, fraction)
+                integer_digits = max(integer_digits, whole)
+            if scale + integer_digits > MAX_DECIMAL_PRECISION:
+                return self
+            return replace(self, precision=scale + integer_digits, scale=scale)
+        # boolean, enum, identifier, timestamp and date carry no bounds to
+        # derive; an enum's members are the author's own vocabulary and
+        # widening them would invent product meaning.
         return self
 
     def json_schema(self) -> dict[str, Any]:
@@ -565,6 +680,22 @@ class ValueType:
             return schema
         if kind is ValueTypeKind.ENUM:
             return {"type": "string", "enum": list(self.members)}
+        if kind is ValueTypeKind.IDENTIFIER:
+            return {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_IDENTIFIER_LENGTH,
+                "pattern": "^[A-Za-z0-9_-]+$",
+            }
+        if kind is ValueTypeKind.TIMESTAMP:
+            return {"type": "string", "format": "date-time"}
+        if kind is ValueTypeKind.DATE:
+            return {"type": "string", "format": "date"}
+        if kind is ValueTypeKind.DECIMAL:
+            # The precision and scale are the type's, not the schema's: JSON
+            # Schema has no spelling for them that is not a regular
+            # expression, and this type is the source of truth.
+            return {"type": "string", "pattern": _DECIMAL_RE.pattern}
         if kind is ValueTypeKind.OPTIONAL:
             assert self.element is not None
             return {"anyOf": [self.element.json_schema(), {"type": "null"}]}
@@ -620,6 +751,9 @@ class ValueType:
                 "members",
                 "element",
                 "record_fields",
+                "entity",
+                "precision",
+                "scale",
             },
         )
         return cls(
@@ -632,7 +766,87 @@ class ValueType:
             members=doc.get("members", ()),
             element=doc.get("element"),
             record_fields=doc.get("record_fields", ()),
+            entity=doc.get("entity"),
+            precision=doc.get("precision"),
+            scale=doc.get("scale"),
         )
+
+
+# Kinds whose values have one fixed grammar: nothing to bound, nothing to
+# derive, and a sampler that draws from a representative range.
+_SCALAR_GRAMMARS = frozenset(
+    {
+        ValueTypeKind.IDENTIFIER,
+        ValueTypeKind.TIMESTAMP,
+        ValueTypeKind.DATE,
+        ValueTypeKind.DECIMAL,
+    }
+)
+
+
+def _explain_timestamp(value: str, path: str) -> str | None:
+    match = _TIMESTAMP_RE.fullmatch(value)
+    if match is None:
+        return (
+            f"{path} must be an RFC 3339 UTC instant such as "
+            f"'2026-08-29T12:00:00Z', got {value!r}"
+        )
+    year, month, day, hour, minute, second = (int(part) for part in match.groups()[:6])
+    try:
+        _datetime(year, month, day, hour, minute, second)
+    except ValueError:
+        return f"{path} is not a real instant: {value!r}"
+    return None
+
+
+def _explain_date(value: str, path: str) -> str | None:
+    match = _DATE_RE.fullmatch(value)
+    if match is None:
+        return f"{path} must be an ISO calendar date such as '2026-08-29', got {value!r}"
+    try:
+        _date(*(int(part) for part in match.groups()))
+    except ValueError:
+        return f"{path} is not a real calendar date: {value!r}"
+    return None
+
+
+def _decimal_digits(value: Any) -> tuple[int, int] | None:
+    """(integer digits, fractional digits) of a decimal string after
+    normalisation, or ``None`` when it is not one."""
+
+    if not isinstance(value, str) or not _DECIMAL_RE.fullmatch(value):
+        return None
+    try:
+        number = Decimal(value)
+    except InvalidOperation:
+        return None
+    if number == 0:
+        return 0, 0
+    _, digits, exponent = number.normalize().as_tuple()
+    assert isinstance(exponent, int)
+    fraction = max(0, -exponent)
+    whole = max(0, len(digits) + exponent)
+    return whole, fraction
+
+
+def _explain_decimal(value: str, path: str, precision: int, scale: int) -> str | None:
+    digits = _decimal_digits(value)
+    if digits is None:
+        return (
+            f"{path} must be a decimal string of digits with one optional '.' "
+            f"and an optional leading '-', such as '12.50', got {value!r}"
+        )
+    whole, fraction = digits
+    if fraction > scale:
+        return (
+            f"{path} has {fraction} decimal places, over the scale of {scale}"
+        )
+    if whole > precision - scale:
+        return (
+            f"{path} has {whole} integer digits, over the {precision - scale} "
+            f"that precision {precision} and scale {scale} allow"
+        )
+    return None
 
 
 def _type_name(value: Any) -> str:
@@ -719,13 +933,27 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def _value_type_level(depth: int) -> dict[str, Any]:
-    scalar_kinds = ["boolean", "integer", "string", "enum"]
+    scalar_kinds = [
+        "boolean",
+        "integer",
+        "string",
+        "enum",
+        "identifier",
+        "timestamp",
+        "date",
+        "decimal",
+    ]
     compound_kinds = ["list", "record", "optional"] if depth > 1 else []
     # Deliberately absent: minimum, maximum, min_length, max_length, char_set.
     # Every one is derived by ``ValueType.fitted_to`` from the examples the
     # same answer supplies, because a declared bound and a declared example are
     # two guesses at one intent and the example is the one carrying meaning.
     # Five of six measured live failures were a bound refusing its own example.
+    # Present: entity, precision and scale. An identifier's entity is a name
+    # only the author knows, and a decimal's precision and scale are a
+    # declaration about the quantity -- money has two places because it is
+    # money -- which fitting can widen to admit an example but should not
+    # have to invent.
     properties: dict[str, Any] = {
         "kind": {"type": "string", "enum": scalar_kinds + compound_kinds},
         "members": {
@@ -733,6 +961,13 @@ def _value_type_level(depth: int) -> dict[str, Any]:
             "items": {"type": "string"},
             "maxItems": MAX_ENUM_MEMBERS,
         },
+        "entity": _nullable({"type": "string"}),
+        "precision": _nullable(
+            {"type": "integer", "minimum": 1, "maximum": MAX_DECIMAL_PRECISION}
+        ),
+        "scale": _nullable(
+            {"type": "integer", "minimum": 0, "maximum": MAX_DECIMAL_PRECISION}
+        ),
     }
     if depth > 1:
         inner = _value_type_level(depth - 1)
@@ -805,8 +1040,22 @@ def value_type_from_request(document: Mapping[str, Any]) -> ValueType:
             )
         elif name in ("min_length", "max_length") and isinstance(value, int):
             trimmed[name] = max(0, min(int(value), MAX_VALUE_LENGTH))
+        elif name in ("precision", "scale"):
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            trimmed[name] = max(0, min(int(value), MAX_DECIMAL_PRECISION))
+        elif name == "entity":
+            if isinstance(value, str) and _ENTITY_RE.fullmatch(value):
+                trimmed[name] = value
         else:
             trimmed[name] = value
+    if resolved is ValueTypeKind.DECIMAL:
+        # An omitted declaration gets the money default, not a refusal; the
+        # example the same answer supplies widens it through ``fitted_to``.
+        trimmed.setdefault("precision", DEFAULT_DECIMAL_PRECISION)
+        trimmed.setdefault("scale", DEFAULT_DECIMAL_SCALE)
+        trimmed["precision"] = max(1, trimmed["precision"])
+        trimmed["scale"] = min(trimmed["scale"], trimmed["precision"])
     # An inverted range is a transposition, and swapping preserves the intent
     # exactly; refusing it does not.
     for low, high in (("minimum", "maximum"), ("min_length", "max_length")):
