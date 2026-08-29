@@ -109,3 +109,19 @@ def test_executor_refuses_an_unknown_route_and_a_wrong_store(tmp_path):
         DefaultRunExecutor(object())  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="runtime_builder must be callable"):
         DefaultRunExecutor(store, runtime_builder="not callable")  # type: ignore[arg-type]
+
+
+def test_availability_reports_a_reason_or_none_and_never_raises(tmp_path, monkeypatch):
+    """The probe is asked before a run is accepted, so it must answer, not
+    raise: None when this host can run a sandbox, a sentence that names the
+    remedy when it cannot. The first version raised NameError at runtime
+    because no test ever called the real thing."""
+    from richbuild import executor as executor_module
+
+    store = RichStore(tmp_path)
+    verdict = DefaultRunExecutor(store).availability()
+    assert verdict is None or (isinstance(verdict, str) and verdict)
+
+    monkeypatch.setattr(executor_module.BubblewrapExecutor, "available", lambda self: False)
+    reason = DefaultRunExecutor(store).availability()
+    assert reason is not None and "Bubblewrap" in reason and "rich doctor" in reason

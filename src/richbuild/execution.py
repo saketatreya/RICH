@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
+from .executor import BubblewrapExecutor
 from .run_engine import (
     CancellationToken,
     BubblewrapCommandRunner,
