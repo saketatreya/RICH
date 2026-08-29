@@ -31,6 +31,32 @@ jobs:
       - run: ruff check .
       - run: python -m pytest
 
+  package:
+    # The wheel is what an operator installs, and it is not what the python
+    # job tests: an editable install resolves from src/, so a package list
+    # that omitted richbuild.models passed every test while the built wheel
+    # could not `import richbuild`. Build the wheel, install it into a venv
+    # holding nothing else, and import from a directory where src/ cannot be
+    # found by accident. `rich --help` stands in for a version flag the CLI
+    # does not have yet.
+    runs-on: ubuntu-24.04
+    env:
+      WHEELS: ${{ runner.temp }}/wheel
+      VENV: ${{ runner.temp }}/venv
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip wheel . --no-deps -w "$WHEELS"
+      - run: python -m venv "$VENV"
+      - run: |
+          "$VENV/bin/python" -m pip install "$WHEELS"/*.whl
+      - run: |
+          "$VENV/bin/python" -c "import richbuild, richbuild.models, richbuild.target_packs"
+          "$VENV/bin/rich" --help
+        working-directory: ${{ runner.temp }}
+
   web:
     runs-on: ubuntu-24.04
     steps:

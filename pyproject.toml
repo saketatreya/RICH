@@ -25,12 +25,11 @@ test = [
 [project.scripts]
 rich = "richbuild.cli:main"
 
-[tool.setuptools]
-packages = ["richbuild", "richbuild.target_packs"]
-
-[tool.setuptools.package-dir]
-richbuild = "src/richbuild"
-"richbuild.target_packs" = "src/richbuild/target_packs"
+# Discovered, not listed: an explicit list once named richbuild and
+# richbuild.target_packs and omitted richbuild.models, so the built wheel
+# could not even `import richbuild`. Every package under src/ ships.
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
