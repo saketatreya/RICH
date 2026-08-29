@@ -17,6 +17,7 @@ from .control_plane import (
     ApprovalRequired,
     ArchitectProposer,
     ControlPlane,
+    InterviewerProposer,
     RunExecutionUnavailable,
     RunExecutor,
 )
@@ -27,7 +28,7 @@ from .preview import (
     PreviewOrchestrator,
     default_preview_orchestrator,
 )
-from .runtime import CLAUDE_CODE_ROUTE, default_architect
+from .runtime import CLAUDE_CODE_ROUTE, default_architect, default_interviewer
 from .store import (
     STORE_SCHEMA_VERSION,
     IdempotencyReplay,
@@ -147,6 +148,7 @@ class Application:
         workspace_root: str | Path | None = None,
         run_executor: RunExecutor | None = None,
         architect: ArchitectProposer | None = None,
+        interviewer: InterviewerProposer | None = None,
         route: str = CLAUDE_CODE_ROUTE,
     ):
         self.store = store
@@ -164,6 +166,7 @@ class Application:
             ),
             run_executor=trusted_run_executor,
             architect=architect,
+            interviewer=interviewer,
             # The boundary belongs to the control plane, not to this dispatch
             # table: an HTTP caller names a directory over the network, and
             # every path into the engine has to refuse the same escapes.
@@ -304,6 +307,25 @@ class Application:
         ):
             return ApiResponse(
                 200, {"draft": self.control_plane.get_interview_draft(parts[2])}
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v1", "projects"]
+            and parts[3] == "interview-turns"
+            and method == "POST"
+        ):
+            # 200, not 201: a turn revises the draft; nothing approvable is
+            # created until spec-submissions, and only from answers a person
+            # has read.
+            return ApiResponse(
+                200,
+                self.control_plane.interview_turn(
+                    parts[2],
+                    message=_required(body, "message"),
+                    expected_draft_revision=_required_int(
+                        body, "expected_draft_revision"
+                    ),
+                ),
             )
         if (
             len(parts) == 4
@@ -1197,14 +1219,16 @@ def serve(
     port: int = 8767,
     web_root: str | Path | None = None,
     architect: Any | None = None,
+    interviewer: Any | None = None,
     route: str = CLAUDE_CODE_ROUTE,
 ) -> None:
     """Serve the API and the canvas on one port.
 
-    The architect is built here rather than left to the caller, because a
-    server that silently plans deterministically is a server whose headline
-    feature is unreachable. `default_architect` returns None when no model
-    route is available, so a host with no login still starts and still plans
+    The architect and the interviewer are built here rather than left to the
+    caller, because a server that silently plans deterministically or silently
+    asks the fixed questions is a server whose headline features are
+    unreachable. Both default builders return None when no model route is
+    available, so a host with no login still starts, still plans, still asks
     -- and every draft says which one answered.
     """
 
@@ -1213,8 +1237,13 @@ def serve(
     root = Path(web_root) if web_root is not None else default_web_root()
     if architect is None:
         architect = default_architect(route=route)
+    if interviewer is None:
+        interviewer = default_interviewer(route=route)
     application = Application(
-        RichStore(state_dir), architect=architect, route=route
+        RichStore(state_dir),
+        architect=architect,
+        interviewer=interviewer,
+        route=route,
     )
     server = ThreadingHTTPServer((host, port), handler_for(application, root))
     # flush: stdout is block-buffered when piped, and a server that runs
@@ -1225,6 +1254,12 @@ def serve(
         "  architect  model-backed"
         if architect is not None
         else "  architect  deterministic planner (that route is unavailable)",
+        flush=True,
+    )
+    print(
+        "  interviewer  model-backed"
+        if interviewer is not None
+        else "  interviewer  fixed questions (that route is unavailable)",
         flush=True,
     )
     print(f"  api    http://{host}:{port}/v1/health", flush=True)

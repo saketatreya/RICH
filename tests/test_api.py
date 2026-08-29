@@ -1282,3 +1282,73 @@ def test_release_snapshot_is_served_as_zip_bytes(tmp_path):
         f'attachment; filename="rich-release-{release.digest[:12]}.zip"'
     )
     assert headers["X-RICH-Release-Digest"] == release.digest
+
+
+def test_interview_turns_route_revises_the_draft_and_needs_a_key(tmp_path):
+    from richbuild.interviewer import InterviewOutcome
+
+    class Interviewer:
+        def turn(self, *, project_id, project_name, transcript, answers):
+            return InterviewOutcome(
+                status="questions",
+                summary="One thing first.",
+                questions=({"prompt": "Who uses it?", "why": "Audiences shape the journeys."},),
+                answers=None,
+                rejections=(),
+                attempts=1,
+                source="model",
+            )
+
+    application = Application(RichStore(tmp_path), interviewer=Interviewer())
+    application.handle(
+        "POST",
+        "/v1/projects",
+        body={"project_id": "project.demo", "name": "Demo"},
+        headers=_headers("create-demo"),
+    )
+
+    denied = application.handle(
+        "POST",
+        "/v1/projects/project.demo/interview-turns",
+        body={"message": "A todo list.", "expected_draft_revision": 0},
+    )
+    assert denied.status == 428
+
+    turn = application.handle(
+        "POST",
+        "/v1/projects/project.demo/interview-turns",
+        body={"message": "A todo list.", "expected_draft_revision": 0},
+        headers=_headers("turn-1"),
+    )
+    assert turn.status == 200
+    assert turn.body["outcome"]["status"] == "questions"
+    assert turn.body["draft"]["draft_revision"] == 1
+    assert turn.body["draft"]["document"]["transcript"][1]["text"] == "One thing first."
+
+    stale = application.handle(
+        "POST",
+        "/v1/projects/project.demo/interview-turns",
+        body={"message": "Everyone.", "expected_draft_revision": 0},
+        headers=_headers("turn-2"),
+    )
+    assert stale.status == 409
+
+
+def test_interview_turns_route_falls_back_to_the_fixed_questions(tmp_path):
+    application = Application(RichStore(tmp_path))
+    application.handle(
+        "POST",
+        "/v1/projects",
+        body={"project_id": "project.demo", "name": "Demo"},
+        headers=_headers("create-demo"),
+    )
+
+    turn = application.handle(
+        "POST",
+        "/v1/projects/project.demo/interview-turns",
+        body={"message": "A todo list.", "expected_draft_revision": 0},
+        headers=_headers("turn-1"),
+    )
+
+    assert turn.status == 200
+    assert turn.body["outcome"]["source"] == "form-fallback"

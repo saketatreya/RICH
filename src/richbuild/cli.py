@@ -16,7 +16,7 @@ from .api import serve
 from .executor import BubblewrapExecutor
 from .execution import DefaultRunExecutor
 from .preview import default_preview_orchestrator
-from .runtime import CLAUDE_CODE_ROUTE, MODEL_ROUTES
+from .runtime import CLAUDE_CODE_ROUTE, MODEL_ROUTES, default_interviewer
 from .runlog import follow_run, run_is_settled
 from .store import RichStore
 
@@ -77,6 +77,15 @@ def _parser() -> argparse.ArgumentParser:
     interview.add_argument("project_name")
     interview.add_argument("answers", type=Path)
     interview.add_argument("--expected-revision", type=int, required=True)
+
+    turn = add_parser(
+        "interview-turn",
+        help="one interview turn: say what you want; get questions back, or a draft specification",
+    )
+    turn.add_argument("project_id")
+    turn.add_argument("message")
+    turn.add_argument("--expected-draft-revision", type=int, default=0)
+    turn.add_argument("--route", choices=sorted(MODEL_ROUTES), default=CLAUDE_CODE_ROUTE)
 
     approve = add_parser("approve", help="decide a requested approval gate")
     approve.add_argument("approval_id")
@@ -233,6 +242,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "revision": asdict(submission.revision),
                     "approval": submission.approval,
                 }
+            )
+        elif args.command == "interview-turn":
+            # Its own control plane: the interviewer is built for the route the
+            # person chose, and nothing else on this path needs a model.
+            interviewing = ControlPlane(
+                store, interviewer=default_interviewer(route=args.route)
+            )
+            _print_json(
+                interviewing.interview_turn(
+                    args.project_id,
+                    message=args.message,
+                    expected_draft_revision=args.expected_draft_revision,
+                )
             )
         elif args.command == "approve":
             _print_json(

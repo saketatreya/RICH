@@ -592,3 +592,105 @@ def test_submitting_the_interview_marks_its_draft_but_keeps_it(tmp_path):
     draft = control_plane.get_interview_draft(project["id"])
     assert draft["submitted_revision_id"] == spec.revision.id
     assert draft["document"] == {"form": _answers()}
+
+
+class _ScriptedInterviewer:
+    """Answers each turn with the next scripted outcome."""
+
+    def __init__(self, *outcomes):
+        from richbuild.interviewer import InterviewOutcome
+
+        self.outcomes = list(outcomes)
+        self.calls = []
+        self._outcome_type = InterviewOutcome
+
+    def turn(self, *, project_id, project_name, transcript, answers):
+        self.calls.append({"transcript": list(transcript), "answers": answers})
+        return self.outcomes.pop(0)
+
+
+def _outcome(status, **fields):
+    from richbuild.interviewer import InterviewOutcome
+
+    base = {
+        "summary": "",
+        "questions": (),
+        "answers": None,
+        "rejections": (),
+        "attempts": 1,
+        "source": "model",
+    }
+    base.update(fields)
+    return InterviewOutcome(status=status, **base)
+
+
+def test_interview_turn_records_the_conversation_and_the_answers_on_the_draft(tmp_path):
+    interviewer = _ScriptedInterviewer(
+        _outcome(
+            "questions",
+            summary="Two things first.",
+            questions=({"prompt": "Who can see whose items?", "why": "Roles decide isolation."},),
+        ),
+        _outcome("complete", summary="A todo list.", answers=_answers()),
+    )
+    control_plane = ControlPlane(RichStore(tmp_path), interviewer=interviewer)
+    project = control_plane.create_project(project_id="project.todo", name="Todo")
+
+    first = control_plane.interview_turn(
+        project["id"], message="A todo list for my team.", expected_draft_revision=0
+    )
+
+    assert first["outcome"]["status"] == "questions"
+    assert first["outcome"]["questions"][0]["prompt"] == "Who can see whose items?"
+    assert first["draft"]["draft_revision"] == 1
+    transcript = first["draft"]["document"]["transcript"]
+    assert [turn["role"] for turn in transcript] == ["user", "interviewer"]
+    assert transcript[0]["text"] == "A todo list for my team."
+    assert first["draft"]["document"]["answers"] is None
+    assert interviewer.calls[0]["answers"] is None
+
+    second = control_plane.interview_turn(
+        project["id"], message="Everyone on the team sees everything.", expected_draft_revision=1
+    )
+
+    assert second["outcome"]["status"] == "complete"
+    assert second["draft"]["draft_revision"] == 2
+    assert second["draft"]["document"]["answers"] == _answers()
+    # The interviewer saw the whole conversation, including its own question.
+    assert [turn["role"] for turn in interviewer.calls[1]["transcript"]] == [
+        "user", "interviewer", "user",
+    ]
+    # And what it produced compiles into a spec exactly as the form's answers do.
+    spec = control_plane.submit_interview(
+        project_id=project["id"],
+        project_name=project["name"],
+        answers=second["draft"]["document"]["answers"],
+        expected_revision=0,
+    )
+    assert spec.spec.requirements
+
+
+def test_interview_turn_without_an_interviewer_asks_the_fixed_questions(tmp_path):
+    control_plane = ControlPlane(RichStore(tmp_path))
+    project = control_plane.create_project(project_id="project.todo", name="Todo")
+
+    result = control_plane.interview_turn(
+        project["id"], message="A todo list.", expected_draft_revision=0
+    )
+
+    assert result["outcome"]["source"] == "form-fallback"
+    assert result["outcome"]["status"] == "questions"
+    assert result["outcome"]["questions"]
+
+
+def test_interview_turn_guards_the_draft_revision_and_the_message(tmp_path):
+    from richbuild.store import RevisionConflict
+
+    control_plane = ControlPlane(RichStore(tmp_path))
+    project = control_plane.create_project(project_id="project.todo", name="Todo")
+    control_plane.interview_turn(project["id"], message="Hello.", expected_draft_revision=0)
+
+    with pytest.raises(RevisionConflict):
+        control_plane.interview_turn(project["id"], message="Again.", expected_draft_revision=0)
+    with pytest.raises(ValueError, match="needs a message"):
+        control_plane.interview_turn(project["id"], message="   ", expected_draft_revision=1)

@@ -15,6 +15,7 @@ import os
 from typing import Any
 
 from .architect import ModelArchitect
+from .interviewer import ModelInterviewer
 from .anthropic_provider import (
     AnthropicMessagesProvider,
     AnthropicTokenRates,
@@ -354,6 +355,67 @@ def default_architect(
         )
 
     return ModelArchitect(
+        gateway_factory=gateway_factory,
+        provider=MODEL_ROUTES[route],
+        model=DEFAULT_MODEL,
+        max_cost_usd=max_cost_usd,
+    )
+
+
+# One interview turn is smaller than an architecture proposal: a bounded prose
+# exchange plus one structured answer.
+INTERVIEWER_MAX_COST_USD = Decimal("1.00")
+
+
+def default_interviewer(
+    *,
+    route: str = CLAUDE_CODE_ROUTE,
+    event_sink: EventSink | None = None,
+    max_cost_usd: Decimal = INTERVIEWER_MAX_COST_USD,
+    provider_factory: Callable[[], Any] | None = None,
+) -> ModelInterviewer | None:
+    """Build the interviewer a surface should offer, or ``None`` if it cannot.
+
+    Same shape and same reasoning as ``default_architect``: a canvas with no
+    model route still starts, still asks the deterministic questions, and says
+    which one answered.
+    """
+
+    if route not in MODEL_ROUTES:
+        raise ValueError(f"route must be one of {sorted(MODEL_ROUTES)}")
+    try:
+        provider = (
+            provider_factory()
+            if provider_factory is not None
+            else (
+                ClaudeCodeCliProvider()
+                if route == CLAUDE_CODE_ROUTE
+                else AnthropicMessagesProvider(
+                    _environment_anthropic_api_key,
+                    rates={DEFAULT_MODEL: DEFAULT_MODEL_RATES},
+                )
+            )
+        )
+    except Exception:
+        return None
+    sink = event_sink or (lambda _kind, _payload: None)
+
+    def gateway_factory() -> ModelGateway:
+        return ModelGateway(
+            [_ExactModelProvider(provider, MODEL_ROUTES[route])],
+            BudgetLedger(
+                RunBudget(
+                    max_model_attempts=4,
+                    max_input_tokens=200_000,
+                    max_output_tokens=100_000,
+                    max_cost_usd=max_cost_usd,
+                    max_execution_seconds=3_600,
+                )
+            ),
+            event_sink=sink,
+        )
+
+    return ModelInterviewer(
         gateway_factory=gateway_factory,
         provider=MODEL_ROUTES[route],
         model=DEFAULT_MODEL,

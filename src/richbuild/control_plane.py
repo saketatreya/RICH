@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
-from typing import Any, Iterable, Mapping, Protocol
+from typing import Any, Iterable, Mapping, Protocol, Sequence
 from uuid import uuid4
 
 from .budget import RunBudget
 from .compiler import CompiledArchitecture, compile_architecture
 from .interview import AdaptiveInterview, InterviewState
+from .interviewer import InterviewOutcome, form_fallback
 from .change import compile_change
 from .models import ApprovalGate, ArchitectureSpec, ProjectSpec
 from .planner import ArchitectureProposal, plan_nextjs_architecture
@@ -32,6 +33,10 @@ from .target_packs.nextjs import (
     NextJsTargetPackConfig,
     ScaffoldManifest,
 )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class ApprovalRequired(PermissionError):
@@ -66,6 +71,18 @@ class ArchitectProposer(Protocol):
         repair: str | None = None,
     ) -> ArchitectureProposal:
         """Propose one decomposition. May raise; the caller decides what next."""
+
+
+class InterviewerProposer(Protocol):
+    def turn(
+        self,
+        *,
+        project_id: str,
+        project_name: str,
+        transcript: Sequence[Mapping[str, Any]],
+        answers: Mapping[str, Any] | None,
+    ) -> InterviewOutcome:
+        """One interview turn: questions, a complete candidate, or a partial one."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,12 +153,14 @@ class ControlPlane:
         preview_orchestrator: PreviewOrchestrator | None = None,
         run_executor: RunExecutor | None = None,
         architect: ArchitectProposer | None = None,
+        interviewer: InterviewerProposer | None = None,
         workspace_root: str | Path | None = None,
     ):
         self.store = store
         self.preview_orchestrator = preview_orchestrator
         self.run_executor = run_executor
         self.architect = architect
+        self.interviewer = interviewer
         # Confinement belongs to whoever built this control plane, because
         # whether it is needed depends on who supplies the path. A network
         # caller must never name a directory outside the root the operator
@@ -407,6 +426,75 @@ class ControlPlane:
             "node_id": node_id,
             "forgotten_generations": forgotten,
         }
+
+    def interview_turn(
+        self,
+        project_id: str,
+        *,
+        message: str,
+        expected_draft_revision: int,
+    ) -> dict[str, Any]:
+        """One turn of the interview, recorded on the project's draft.
+
+        The draft document holds the conversation (``transcript``) and the
+        structured answers so far (``answers``); the turn appends the person's
+        message, asks the interviewer, and saves what came back under the
+        revision the caller last saw. Nothing here is a revision or an
+        approval: the spec is still created only by ``submit_interview``, from
+        answers a person has read.
+        """
+
+        text = message.strip() if isinstance(message, str) else ""
+        if not text:
+            raise ValueError("an interview turn needs a message")
+        project = self.store.get_project(project_id)
+        draft = self.store.get_interview_draft(project_id)
+        document = dict(draft["document"]) if draft else {}
+        transcript = [
+            dict(turn) for turn in document.get("transcript", []) if isinstance(turn, Mapping)
+        ]
+        answers = document.get("answers")
+        answers = dict(answers) if isinstance(answers, Mapping) else None
+        transcript.append({"role": "user", "text": text, "at": _now_iso()})
+        if self.interviewer is None:
+            outcome = form_fallback(
+                project_id=project_id, project_name=project["name"], answers=answers
+            )
+        else:
+            outcome = self.interviewer.turn(
+                project_id=project_id,
+                project_name=project["name"],
+                transcript=transcript,
+                answers=answers,
+            )
+        reply = outcome.summary or (
+            "; ".join(question["prompt"] for question in outcome.questions)
+            if outcome.questions
+            else "Drafted."
+        )
+        transcript.append(
+            {"role": "interviewer", "text": reply, "at": _now_iso(), "status": outcome.status}
+        )
+        outcome_document = {
+            "status": outcome.status,
+            "summary": outcome.summary,
+            "questions": [dict(question) for question in outcome.questions],
+            "rejections": list(outcome.rejections),
+            "attempts": outcome.attempts,
+            "source": outcome.source,
+        }
+        next_document = {
+            **document,
+            "transcript": transcript,
+            "answers": outcome.answers if outcome.answers is not None else answers,
+            "outcome": outcome_document,
+        }
+        saved = self.store.save_interview_draft(
+            project_id,
+            document=next_document,
+            expected_draft_revision=expected_draft_revision,
+        )
+        return {"draft": saved, "outcome": outcome_document}
 
     def interview_questions(
         self,
