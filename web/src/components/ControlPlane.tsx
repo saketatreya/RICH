@@ -1136,6 +1136,7 @@ export default function ControlPlane() {
           <PreviewPanel
             key="preview"
             run={prepared.run}
+            projectId={project?.id ?? ''}
             sourceDir={scaffold?.destination ?? null}
             actor={actor}
           />

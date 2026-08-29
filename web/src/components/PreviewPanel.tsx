@@ -20,6 +20,8 @@ import {
 
 interface Props {
   run: Run
+  /** The project the run belongs to; its provider ids are remembered per project. */
+  projectId: string
   /**
    * The scaffold destination the run built in -- the only directory the API
    * accepts as a preview source, because it is the one the run's recorded
@@ -29,6 +31,22 @@ interface Props {
   actor: string
 }
 
+const providerKey = (projectId: string) => `rich.preview.${projectId}`
+
+/** The Neon and Vercel ids a project deploys to, remembered on this browser. */
+function rememberedProviders(projectId: string): { neon: string; vercel: string } {
+  try {
+    const raw = localStorage.getItem(providerKey(projectId))
+    const parsed = raw ? JSON.parse(raw) : {}
+    return {
+      neon: typeof parsed.neon === 'string' ? parsed.neon : '',
+      vercel: typeof parsed.vercel === 'string' ? parsed.vercel : '',
+    }
+  } catch {
+    return { neon: '', vercel: '' }
+  }
+}
+
 function defaultExpiry(): string {
   // Previews are cattle. A day is long enough to show someone and short enough
   // that forgetting one is not a standing bill.
@@ -36,14 +54,21 @@ function defaultExpiry(): string {
   return when.toISOString().slice(0, 16)
 }
 
-export default function PreviewPanel({ run, sourceDir, actor }: Props) {
+export default function PreviewPanel({ run, projectId, sourceDir, actor }: Props) {
   const [previews, setPreviews] = useState<Preview[]>([])
   // The request just made and not yet decided: its approval binds the digest,
   // and its preview is the one that deploys -- not whichever preview happens
   // to be last in the list.
   const [pending, setPending] = useState<PreviewSubmission | null>(null)
-  const [neonProjectId, setNeonProjectId] = useState('')
-  const [vercelProjectId, setVercelProjectId] = useState('')
+  const [neonProjectId, setNeonProjectId] = useState(() => rememberedProviders(projectId).neon)
+  const [vercelProjectId, setVercelProjectId] = useState(() => rememberedProviders(projectId).vercel)
+  useEffect(() => {
+    try {
+      localStorage.setItem(providerKey(projectId), JSON.stringify({ neon: neonProjectId, vercel: vercelProjectId }))
+    } catch {
+      // Best effort; the fields still work for this visit.
+    }
+  }, [projectId, neonProjectId, vercelProjectId])
   const [expiresAt, setExpiresAt] = useState(defaultExpiry)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -74,6 +99,10 @@ export default function PreviewPanel({ run, sourceDir, actor }: Props) {
   }
 
   const latest = previews[previews.length - 1] ?? null
+  const liveUrl = [...previews]
+    .reverse()
+    .map((preview) => preview.result?.deployment_url)
+    .find((url): url is string => typeof url === 'string')
 
   return (
     <section className="plane-panel">
@@ -84,6 +113,13 @@ export default function PreviewPanel({ run, sourceDir, actor }: Props) {
         </div>
         {latest && <span className={`chip ${latest.status}`}>{latest.status}</span>}
       </div>
+
+      {liveUrl && (
+        <a className="plane-live-url" href={liveUrl} target="_blank" rel="noreferrer noopener">
+          <span>Open the preview</span>
+          <code>{liveUrl}</code>
+        </a>
+      )}
 
       <p className="muted">
         Requesting a preview records an approval bound to the source digest that
@@ -104,17 +140,28 @@ export default function PreviewPanel({ run, sourceDir, actor }: Props) {
           <span>Neon project</span>
           <input
             value={neonProjectId}
-            placeholder="neon project id"
+            placeholder="e.g. nameless-river-12345678"
             onChange={(event) => setNeonProjectId(event.target.value)}
           />
+          <small>
+            The database branch is created here. Find the id in the{' '}
+            <a href="https://console.neon.tech" target="_blank" rel="noreferrer noopener">Neon console</a>
+            {' '}under Project settings → General. Remembered for this project.
+          </small>
         </label>
         <label>
           <span>Vercel project (optional)</span>
           <input
             value={vercelProjectId}
-            placeholder="vercel project id"
+            placeholder="prj_… — or leave empty to create one"
             onChange={(event) => setVercelProjectId(event.target.value)}
           />
+          <small>
+            Where the app is deployed. In the{' '}
+            <a href="https://vercel.com/dashboard" target="_blank" rel="noreferrer noopener">Vercel dashboard</a>
+            {' '}open the project → Settings → General → Project ID. The server needs
+            <code>NEON_API_TOKEN</code> and <code>VERCEL_TOKEN</code> in its environment.
+          </small>
         </label>
         <label>
           <span>Expires</span>
