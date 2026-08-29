@@ -12,7 +12,7 @@ import sys
 from typing import Any, Sequence
 
 from .control_plane import ControlPlane
-from .api import serve
+from .api import NO_MODEL_ROUTE, serve
 from .executor import BubblewrapExecutor
 from .execution import DefaultRunExecutor
 from .preview import default_preview_orchestrator
@@ -54,7 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     serve_command.add_argument(
         "--route",
         default=CLAUDE_CODE_ROUTE,
-        choices=sorted(MODEL_ROUTES),
+        choices=[*sorted(MODEL_ROUTES), NO_MODEL_ROUTE],
         help=(
             "how to reach the pinned model: an existing `claude` login, or "
             "ANTHROPIC_API_KEY. Never substituted for one another -- they "

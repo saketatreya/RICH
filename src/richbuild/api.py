@@ -28,7 +28,7 @@ from .preview import (
     PreviewOrchestrator,
     default_preview_orchestrator,
 )
-from .runtime import CLAUDE_CODE_ROUTE, default_architect, default_interviewer
+from .runtime import API_ROUTE, CLAUDE_CODE_ROUTE, default_architect, default_interviewer
 from .store import (
     STORE_SCHEMA_VERSION,
     IdempotencyReplay,
@@ -38,6 +38,9 @@ from .store import (
     StoreError,
 )
 from .target_packs.nextjs import DestinationNotEmptyError
+
+# Serve without any model route: deterministic planner, fixed questions.
+NO_MODEL_ROUTE = "none"
 
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -257,6 +260,11 @@ class Application:
                     "store_schema_version": STORE_SCHEMA_VERSION,
                 },
             )
+        if parts == ["v1", "vocabulary", "acceptance"] and method == "GET":
+            # What an oracle step may say, from the one place that decides it.
+            # A surface that offers a dropdown built from this cannot offer a
+            # value the step constructor will refuse.
+            return ApiResponse(200, acceptance_vocabulary())
         if parts == ["v1", "projects"] and method == "POST":
             project = self.control_plane.create_project(
                 project_id=_required(body, "project_id"),
@@ -1099,6 +1107,39 @@ STATIC_CONTENT_TYPES = {
 }
 
 
+def acceptance_vocabulary() -> dict[str, Any]:
+    """The closed vocabulary of an acceptance oracle, as the models define it."""
+
+    from .models import AcceptanceAction, BrowserLocatorKind
+    from .models._common import _ARIA_ROLES
+    from .models.spec import (
+        _LOCATOR_ONLY_ACTIONS,
+        _LOCATOR_VALUE_ACTIONS,
+        _VALUE_ONLY_ACTIONS,
+    )
+
+    def takes(action: AcceptanceAction) -> list[str]:
+        fields: list[str] = []
+        if action in _LOCATOR_ONLY_ACTIONS or action in _LOCATOR_VALUE_ACTIONS:
+            fields.append("locator")
+        if action in _LOCATOR_VALUE_ACTIONS or action in _VALUE_ONLY_ACTIONS:
+            fields.append("value")
+        return fields
+
+    return {
+        "actions": [
+            {"action": action.value, "takes": takes(action)}
+            for action in AcceptanceAction
+        ],
+        "locator_kinds": [kind.value for kind in BrowserLocatorKind],
+        "roles": sorted(_ARIA_ROLES),
+        "path_actions": [
+            AcceptanceAction.NAVIGATE.value,
+            AcceptanceAction.ASSERT_URL.value,
+        ],
+    }
+
+
 def default_web_root() -> Path:
     """Where `npm --prefix web run build` leaves the app."""
 
@@ -1235,15 +1276,20 @@ def serve(
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("the local API binds to loopback only")
     root = Path(web_root) if web_root is not None else default_web_root()
-    if architect is None:
+    # "none" is a real mode, not a missing credential: a host with no model
+    # route still plans deterministically and asks the fixed questions, and
+    # says so. Execution is built on the api route and fails closed at run
+    # time, where the missing credential is the honest error.
+    no_model = route == NO_MODEL_ROUTE
+    if architect is None and not no_model:
         architect = default_architect(route=route)
-    if interviewer is None:
+    if interviewer is None and not no_model:
         interviewer = default_interviewer(route=route)
     application = Application(
         RichStore(state_dir),
         architect=architect,
         interviewer=interviewer,
-        route=route,
+        route=API_ROUTE if no_model else route,
     )
     server = ThreadingHTTPServer((host, port), handler_for(application, root))
     # flush: stdout is block-buffered when piped, and a server that runs

@@ -1352,3 +1352,29 @@ def test_interview_turns_route_falls_back_to_the_fixed_questions(tmp_path):
 
     assert turn.status == 200
     assert turn.body["outcome"]["source"] == "form-fallback"
+
+
+def test_acceptance_vocabulary_is_the_models_own(tmp_path):
+    from richbuild.models import AcceptanceAction, AcceptanceStep, ModelValidationError
+
+    application = Application(RichStore(tmp_path))
+
+    response = application.handle("GET", "/v1/vocabulary/acceptance")
+
+    assert response.status == 200
+    vocabulary = response.body
+    assert [entry["action"] for entry in vocabulary["actions"]] == [
+        action.value for action in AcceptanceAction
+    ]
+    assert "button" in vocabulary["roles"] and "label" in vocabulary["locator_kinds"]
+    # What the vocabulary says an action takes is what the constructor accepts.
+    for entry in vocabulary["actions"]:
+        step = {"action": entry["action"]}
+        if "locator" in entry["takes"]:
+            step["locator"] = {"kind": "label", "value": "New item"}
+        if "value" in entry["takes"]:
+            step["value"] = "/" if entry["action"] in vocabulary["path_actions"] else "x"
+        assert AcceptanceStep.from_dict(step).action.value == entry["action"]
+        if "value" not in entry["takes"]:
+            with pytest.raises(ModelValidationError):
+                AcceptanceStep.from_dict({**step, "value": "x"})

@@ -69,10 +69,13 @@ await step('create a project', async () => {
   await page.getByText(`Created ${projectId}`).waitFor()
 })
 
-await step('type into the interview; the server holds it within a second', async () => {
+await step('start from the example, then type into the interview; the server holds it within a second', async () => {
+  // A new project starts with nothing drafted; the example gives the
+  // compile step requirements and scenarios to work with.
+  await page.getByRole('button', { name: 'Start from an example' }).click()
   await page.getByLabel('Outcome and problem').fill(goal)
   await eventually(
-    async () => (await serverDraft())?.document?.form?.goal === goal,
+    async () => (await serverDraft())?.document?.answers?.goal === goal,
     'the draft to reach the server',
   )
 })

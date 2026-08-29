@@ -1001,3 +1001,59 @@ button.plane-secondary:disabled { opacity: .55; cursor: default; }
 @media (prefers-reduced-motion: reduce) {
   .plane-waiting-pulse { animation: none; opacity: .8; }
 }
+
+/* ── the interview: a conversation on the left, the draft on the right ── */
+.plane-interview { display: grid; grid-template-columns: minmax(300px, .38fr) 1fr; gap: 18px; align-items: start; }
+@media (max-width: 1100px) { .plane-interview { grid-template-columns: 1fr; } }
+.plane-chat {
+  position: sticky; top: 88px; display: flex; flex-direction: column; gap: 10px;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface);
+  padding: 12px; max-height: calc(100vh - 120px);
+}
+.plane-chat-log { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; min-height: 120px; }
+.plane-chat-empty, .plane-chat-note { margin: 0; font-size: 12.5px; color: var(--ink-dim); line-height: 1.5; }
+.plane-chat-note { color: var(--ink-faint); font-size: 11.5px; }
+.plane-chat-line { display: flex; flex-direction: column; gap: 3px; }
+.plane-chat-line span { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); }
+.plane-chat-line p { margin: 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; padding: 8px 10px; border-radius: var(--r-sm); background: var(--surface-2); }
+.plane-chat-line.user p { background: rgba(124, 108, 255, .12); }
+.plane-questions { border-left: 2px solid var(--accent); padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+.plane-questions.warn { border-left-color: var(--building); }
+.plane-questions b { font-size: 12.5px; }
+.plane-questions ol, .plane-questions ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.plane-questions li { font-size: 13px; }
+.plane-questions li span { display: block; }
+.plane-questions li small, .plane-questions > small { color: var(--ink-faint); font-size: 11.5px; }
+.plane-chat-input { display: flex; flex-direction: column; gap: 8px; }
+.plane-chat-input textarea { min-height: 72px; }
+.plane-chat-input button { align-self: flex-end; }
+.plane-draft { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.plane-draft-empty {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border: 1px dashed var(--border-2); border-radius: var(--r-md); padding: 12px 14px; margin-bottom: 8px;
+}
+.plane-draft-empty p { margin: 0; font-size: 12.5px; color: var(--ink-dim); }
+.plane-requirement-card { grid-template-columns: 1fr; }
+.plane-scenario-card { grid-template-columns: 1fr; }
+.plane-picker { border: 1px solid var(--border); border-radius: var(--r-sm); padding: 6px 10px 8px; display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.plane-picker legend { font-size: 10.5px; color: var(--ink-faint); padding: 0 4px; }
+.plane-picker label {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-dim);
+  border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; cursor: pointer;
+}
+.plane-picker label.on { color: var(--ink); border-color: var(--accent); background: rgba(124, 108, 255, .1); }
+.plane-picker input { width: auto; margin: 0; }
+.plane-steps { display: flex; flex-direction: column; gap: 8px; }
+.plane-steps ol { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.plane-step { border: 1px solid var(--border); border-radius: var(--r-sm); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; background: var(--surface); }
+.plane-step.invalid { border-color: rgba(240, 180, 41, .5); }
+.plane-step-sentence { font-size: 13px; display: flex; gap: 8px; align-items: baseline; }
+.plane-step-sentence small { color: var(--building); font-size: 11.5px; }
+.plane-step-n { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); min-width: 16px; }
+.plane-step-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.plane-step-controls select, .plane-step-controls input { width: auto; flex: 1 1 120px; padding: 5px 8px; font-size: 12px; }
+.plane-step-controls select { flex: 0 1 auto; }
+.plane-step-tools { margin-left: auto; display: flex; gap: 4px; }
+.plane-step-add { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink-faint); }
+.plane-step-add select { width: auto; padding: 5px 8px; font-size: 12px; }
+.plane-steps-read { margin: 8px 0 0; padding-left: 18px; font-size: 12px; color: var(--ink-dim); display: flex; flex-direction: column; gap: 3px; }

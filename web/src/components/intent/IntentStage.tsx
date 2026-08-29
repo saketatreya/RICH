@@ -1,173 +1,157 @@
 import type { Dispatch, SetStateAction } from 'react'
 
-import type { InterviewNeeds, InterviewAnswers, Project } from '../../lib/api'
-import { api } from '../../lib/api'
+import type { AcceptanceVocabulary, InterviewDocument, Project } from '../../lib/api'
+import ConversationPanel from './ConversationPanel'
 import { RequirementEditor, ScenarioEditor } from './Editors'
-import type { IntentDraft } from './types'
+import {
+  type Answers,
+  POLICY_KEYS,
+  POLICY_LABELS,
+  emptyAnswers,
+  hasContent,
+} from './types'
 
 /**
  * The interview: what the product must do, in the architect's words.
  *
- * Held here rather than in the control plane because it is the one stage with
- * a substantial editing surface of its own -- capabilities, constraints,
- * scenarios and their browser oracles -- and none of that is anyone else's
- * business. What crosses the boundary is the draft, the actions that can be
- * taken on it, and whether something else is already running.
+ * Two halves. On the left, a conversation: prose in, questions or a draft
+ * back. On the right, the draft itself -- requirements and scenarios as
+ * readable, editable rows, with every oracle step a sentence built from
+ * dropdowns. Nothing here asks for an id or a line of JSON; what crosses the
+ * boundary is the answers document and the actions that can be taken on it.
  */
 
 export interface IntentStageProps {
   project: Project
-  draft: IntentDraft
-  setDraft: Dispatch<SetStateAction<IntentDraft>>
-  answers: () => InterviewAnswers
+  document: InterviewDocument
+  vocabulary: AcceptanceVocabulary
+  editAnswers: (update: (answers: Answers) => Answers) => void
   busy: string
-  setBusy: Dispatch<SetStateAction<string>>
+  busySince: number
   setError: Dispatch<SetStateAction<string>>
+  onTurn: (message: string) => void
   onSubmit: () => void
-  needs: InterviewNeeds | null
-  setNeeds: Dispatch<SetStateAction<InterviewNeeds | null>>
+  onExample: () => void
 }
 
 export default function IntentStage({
   project,
-  draft,
-  setDraft,
-  answers,
+  document,
+  vocabulary,
+  editAnswers,
   busy,
-  setBusy,
-  setError,
+  busySince,
+  onTurn,
   onSubmit,
-  needs: interviewNeeds,
-  setNeeds: setInterviewNeeds,
+  onExample,
 }: IntentStageProps) {
-  const submitSpec = onSubmit
+  const answers = document.answers ?? emptyAnswers()
+  const requirements = [...answers.capabilities, ...answers.quality_constraints]
+  const taken = new Set(requirements.map((item) => item.id))
+  const requirementCount = requirements.length
+  const ready = requirementCount > 0 && answers.scenarios.length > 0 && answers.goal.trim() !== ''
+
   return (
-        <section className="plane-panel" id="stage-intent">
-          <div className="plane-section-title">
-            <div>
-              <span className="plane-eyebrow">Intent · revision {project.current_revision + 1}</span>
-              <h2>Define the product truth</h2>
+    <section className="plane-panel" id="stage-intent">
+      <div className="plane-section-title">
+        <div>
+          <span className="plane-eyebrow">Intent · revision {project.current_revision + 1}</span>
+          <h2>Say what you want built</h2>
+        </div>
+        <span className="chip">draft</span>
+      </div>
+      <p className="plane-panel-lead">
+        Describe it in prose on the left. The interviewer asks what it needs and
+        drafts requirements and scenarios on the right — readable, editable, and
+        yours to approve. Every scenario becomes a browser test the software must pass.
+      </p>
+      <div className="plane-interview">
+        <ConversationPanel
+          document={document}
+          busy={busy}
+          busySince={busySince}
+          onSend={onTurn}
+        />
+        <div className="plane-draft">
+          {!hasContent(document.answers) && (
+            <div className="plane-draft-empty">
+              <p>Nothing drafted yet. Say what you want on the left, or start from an example and edit it.</p>
+              <button type="button" onClick={onExample}>Start from an example</button>
             </div>
-            <span className="chip">draft</span>
-          </div>
-          <p className="plane-panel-lead">
-            Requirements describe observable behavior. Scenarios define the evidence that
-            makes each requirement provable.
-          </p>
+          )}
           <div className="plane-intent-form">
             <label className="plane-span-2">
               <span>Outcome and problem</span>
               <textarea
-                value={draft.goal}
-                onChange={(event) => setDraft({ ...draft, goal: event.target.value })}
+                value={answers.goal}
+                onChange={(event) =>
+                  editAnswers((current) => ({ ...current, goal: event.target.value }))
+                }
+                placeholder="What should exist afterwards, and what problem does it replace?"
               />
             </label>
             <label className="plane-span-2">
               <span>Audiences · one per line</span>
               <textarea
-                value={draft.audiences}
-                onChange={(event) => setDraft({ ...draft, audiences: event.target.value })}
+                value={answers.audiences.join('\n')}
+                onChange={(event) =>
+                  editAnswers((current) => ({ ...current, audiences: event.target.value.split('\n') }))
+                }
+                placeholder="Who uses it, and who first"
               />
             </label>
           </div>
           <RequirementEditor
             title="Capabilities"
-            note="The observable first-release product surface."
-            items={draft.capabilities}
-            onChange={(capabilities) => setDraft({ ...draft, capabilities })}
+            note="What a person can do with the first release."
+            items={answers.capabilities}
+            taken={taken}
+            onChange={(capabilities) => editAnswers((current) => ({ ...current, capabilities }))}
           />
           <RequirementEditor
             title="Quality constraints"
-            note="Accessibility, security, performance, resilience, and device promises."
-            items={draft.qualityConstraints}
-            onChange={(qualityConstraints) => setDraft({ ...draft, qualityConstraints })}
+            note="Accessibility, security, performance, resilience, devices."
+            items={answers.quality_constraints}
+            taken={taken}
+            onChange={(quality_constraints) =>
+              editAnswers((current) => ({ ...current, quality_constraints }))
+            }
           />
           <ScenarioEditor
-            items={draft.scenarios}
-            onChange={(scenarios) => setDraft({ ...draft, scenarios })}
+            items={answers.scenarios}
+            requirements={requirements.map((item) => ({ id: item.id, title: item.title }))}
+            vocabulary={vocabulary}
+            onChange={(scenarios) => editAnswers((current) => ({ ...current, scenarios }))}
           />
-          <details className="plane-adaptive">
-            <summary>Adaptive policies for identity, data, integrations, or realtime work</summary>
-            <p>
-              Fill the relevant policy if the goal or capabilities mention these concerns.
-              The compiler fails closed when a relevant policy is missing.
-            </p>
+          <details className="plane-adaptive" open={POLICY_KEYS.some((key) => (answers[key] ?? []).length > 0)}>
+            <summary>Policies the interviewer may ask about — roles, data, outside services, simultaneous edits</summary>
             <div className="plane-adaptive-grid">
-              {[
-                ['Roles and permissions', 'roles', draft.roles],
-                ['Data lifecycle', 'dataPolicy', draft.dataPolicy],
-                ['Integration failure behavior', 'integrationFailurePolicy', draft.integrationFailurePolicy],
-                ['Concurrency and reconnects', 'concurrencyPolicy', draft.concurrencyPolicy],
-              ].map(([label, key, value]) => (
+              {POLICY_KEYS.map((key) => (
                 <label key={key}>
-                  <span>{label} · one rule per line</span>
+                  <span>{POLICY_LABELS[key]} · one rule per line</span>
                   <textarea
-                    value={value}
+                    value={(answers[key] ?? []).join('\n')}
                     onChange={(event) =>
-                      setDraft({ ...draft, [key]: event.target.value })
+                      editAnswers((current) => ({ ...current, [key]: event.target.value.split('\n') }))
                     }
                   />
                 </label>
               ))}
             </div>
           </details>
-          {interviewNeeds && (
-            <div className="plane-needs">
-              {interviewNeeds.complete ? (
-                <p className="plane-needs-done">
-                  Nothing outstanding — every question this project raises has an answer.
-                </p>
-              ) : (
-                <>
-                  <b>Still needed for this project</b>
-                  <ul>
-                    {interviewNeeds.questions.map((question) => (
-                      <li key={question.id}>
-                        <span>{question.prompt}</span>
-                        <small>{question.rationale}</small>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-            </div>
-          )}
           <div className="plane-submit-row">
             <div>
-              <b>{draft.capabilities.length + draft.qualityConstraints.length} requirements</b>
-              <span>{draft.scenarios.length} acceptance scenarios</span>
+              <b>{requirementCount} requirements</b>
+              <span>{answers.scenarios.length} scenarios</span>
             </div>
             <div className="plane-submit-actions">
-              <button
-                className="plane-secondary"
-                disabled={!!busy || !project}
-                onClick={async () => {
-                  if (!project) return
-                  setBusy('interview-needs')
-                  try {
-                    setInterviewNeeds(
-                      await api.interviewNeeds(
-                        project.id,
-                        project.name,
-                        answers(),
-                      ),
-                    )
-                  } catch (cause) {
-                    setError(
-                      cause instanceof Error ? cause.message : String(cause),
-                    )
-                  } finally {
-                    setBusy('')
-                  }
-                }}
-              >
-                {busy === 'interview-needs' ? 'Checking…' : 'What else do you need?'}
-              </button>
-              <button className="primary" disabled={!!busy} onClick={submitSpec}>
+              <button className="primary" disabled={!!busy || !ready} onClick={onSubmit}>
                 {busy === 'submit-spec' ? 'Compiling intent…' : 'Compile product specification →'}
               </button>
             </div>
           </div>
-        </section>
+        </div>
+      </div>
+    </section>
   )
 }

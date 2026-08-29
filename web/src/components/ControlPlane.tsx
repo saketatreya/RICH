@@ -1,10 +1,12 @@
-import { type Dispatch, type SetStateAction, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
+  type AcceptanceVocabulary,
   type ArchitectureDraft,
   type ArchitectureSubmission,
   type ExecutionStatus,
   type Health,
   type InterviewAnswers,
+  type InterviewDocument,
   type PreparedRun,
   type Project,
   type ProjectState,
@@ -14,7 +16,6 @@ import {
   ApiError,
   api,
   type DurableTask,
-  type InterviewNeeds,
 } from '../lib/api'
 import ApprovalGate from './ApprovalGate'
 import Assurance from './Assurance'
@@ -26,8 +27,9 @@ import Inspector from './Inspector'
 import Waiting from './Waiting'
 import IntentStage from './intent/IntentStage'
 import { ScenarioList } from './intent/Editors'
-import type { IntentDraft } from './intent/types'
-import { commaList, errorMessage, lines, shortId, statusClass } from '../lib/format'
+import { FALLBACK_VOCABULARY } from './intent/steps'
+import { type Answers, emptyAnswers, exampleAnswers, trimAnswers } from './intent/types'
+import { errorMessage, shortId, statusClass } from '../lib/format'
 
 /**
  * What survives a reload on this browser: a pointer to the project and who is
@@ -45,71 +47,6 @@ const DEFAULT_ACTOR = 'founder'
 const DEFAULT_REASON = 'Reviewed against the product intent.'
 const architectureDraftKey = (projectId: string) =>
   `rich.architecture-draft.${projectId}`
-
-const defaultDraft: IntentDraft = {
-  goal: 'Give technical founders a trustworthy way to turn approved product intent into a working web application.',
-  audiences: 'Technical founders',
-  capabilities: [
-    {
-      id: 'req.workflow',
-      title: 'Create a project workflow',
-      statement: 'A founder can create a project and review each approval-gated build stage.',
-    },
-  ],
-  qualityConstraints: [
-    {
-      id: 'req.a11y',
-      title: 'Keyboard access',
-      statement: 'Every core workflow is operable with a keyboard.',
-    },
-  ],
-  scenarios: [
-    {
-      id: 'scenario.workflow',
-      title: 'Create a project',
-      requirementIds: 'req.workflow',
-      given: 'A founder has opened the control plane.',
-      when: 'They create a project and submit its intent.',
-      then: 'The product specification is available for explicit approval.',
-      oracle: JSON.stringify([
-        { action: 'navigate', value: '/' },
-        {
-          action: 'fill',
-          locator: { kind: 'label', value: 'Project name' },
-          value: 'Example project',
-        },
-        {
-          action: 'click',
-          locator: { kind: 'role', value: 'button', name: 'Create project' },
-        },
-        {
-          action: 'assert_visible',
-          locator: { kind: 'text', value: 'approval', exact: false },
-        },
-      ], null, 2),
-    },
-    {
-      id: 'scenario.a11y',
-      title: 'Complete the workflow with a keyboard',
-      requirementIds: 'req.a11y',
-      given: 'A founder uses only a keyboard.',
-      when: 'They move through the core project workflow.',
-      then: 'Every control can be reached, understood, and activated.',
-      oracle: JSON.stringify([
-        { action: 'navigate', value: '/' },
-        { action: 'keyboard', value: 'Tab' },
-        {
-          action: 'assert_focused',
-          locator: { kind: 'label', value: 'Project name' },
-        },
-      ], null, 2),
-    },
-  ],
-  roles: '',
-  dataPolicy: '',
-  integrationFailurePolicy: '',
-  concurrencyPolicy: '',
-}
 
 function restoreSession(): SavedSession {
   const fallback: SavedSession = {
@@ -141,17 +78,21 @@ function restoreSession(): SavedSession {
   }
 }
 
-/** The interview form as the server stored it, if it is still the form's shape. */
-function draftFromDocument(document: unknown): IntentDraft | null {
-  if (!document || typeof document !== 'object') return null
-  const form = (document as { form?: unknown }).form
-  if (!form || typeof form !== 'object') return null
-  const candidate = form as Partial<IntentDraft>
-  return typeof candidate.goal === 'string' &&
-    Array.isArray(candidate.capabilities) &&
-    Array.isArray(candidate.scenarios)
-    ? { ...defaultDraft, ...candidate }
-    : null
+const emptyDocument = (): InterviewDocument => ({ transcript: [], answers: null })
+
+/** The interview as the server stored it: the conversation and the answers so far. */
+function draftFromDocument(document: unknown): InterviewDocument {
+  if (!document || typeof document !== 'object') return emptyDocument()
+  const stored = document as InterviewDocument
+  const answers = stored.answers
+  return {
+    ...stored,
+    transcript: Array.isArray(stored.transcript) ? stored.transcript : [],
+    answers:
+      answers && typeof answers === 'object' && typeof answers.goal === 'string'
+        ? { ...emptyAnswers(), ...answers }
+        : null,
+  }
 }
 
 function readArchitectureDraft(projectId: string): ArchitectureDraft | null {
@@ -170,7 +111,6 @@ export default function ControlPlane() {
   const [project, setProject] = useState<Project | null>(null)
   const [spec, setSpec] = useState<SpecSubmission | null>(null)
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
-  const [interviewNeeds, setInterviewNeeds] = useState<InterviewNeeds | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
   const [runTasks, setRunTasks] = useState<DurableTask[]>([])
   const [architecture, setArchitecture] = useState<ArchitectureSubmission | null>(null)
@@ -182,7 +122,8 @@ export default function ControlPlane() {
   const [execution, setExecution] = useState<ExecutionStatus | null>(null)
   const [projectId, setProjectId] = useState(restored.projectId || 'project.rich-demo')
   const [projectName, setProjectName] = useState('RICH Demo')
-  const [draft, setDraft] = useState<IntentDraft>(defaultDraft)
+  const [draft, setDraft] = useState<InterviewDocument>(emptyDocument)
+  const [vocabulary, setVocabulary] = useState<AcceptanceVocabulary>(FALLBACK_VOCABULARY)
   // The server's counter for the interview draft, and whether this tab has
   // edits the server has not seen yet.
   const [draftRevision, setDraftRevision] = useState(0)
@@ -230,8 +171,8 @@ export default function ControlPlane() {
     }
   }, [architectureDraft, project?.id])
 
-  const editDraft: Dispatch<SetStateAction<IntentDraft>> = (update) => {
-    setDraft(update)
+  const editAnswers = (update: (answers: Answers) => Answers) => {
+    setDraft((current) => ({ ...current, answers: update(current.answers ?? emptyAnswers()) }))
     setDraftDirty(true)
   }
 
@@ -245,7 +186,7 @@ export default function ControlPlane() {
       try {
         const saved = await api.saveInterview(
           targetProject,
-          { form: draft },
+          draft as Record<string, unknown>,
           draftRevision,
         )
         setDraftRevision(saved.draft_revision)
@@ -254,8 +195,7 @@ export default function ControlPlane() {
         if (saveError instanceof ApiError && saveError.status === 409) {
           const latest = await api.getInterview(targetProject).catch(() => null)
           if (latest) {
-            const theirs = draftFromDocument(latest.document)
-            if (theirs) setDraft(theirs)
+            setDraft(draftFromDocument(latest.document))
             setDraftRevision(latest.draft_revision)
             setDraftDirty(false)
             setNotice('The interview was changed elsewhere; showing the latest version.')
@@ -302,6 +242,9 @@ export default function ControlPlane() {
       .then(setProjects)
       // The banner owns connection errors; an empty list is a fine first run.
       .catch(() => setProjects([]))
+    // The vocabulary an oracle step may use, from the models that decide it;
+    // the built-in copy is identical and only bridges the first paint.
+    api.acceptanceVocabulary().then(setVocabulary).catch(() => {})
     if (restored.projectId) loadProject(restored.projectId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -354,9 +297,8 @@ export default function ControlPlane() {
     setEvents([])
     setRunTasks([])
     setSelectedNode(null)
-    setInterviewNeeds(null)
     setDestination(`rich-${state.project.id.split('.').pop()}`)
-    setDraft(draftFromDocument(state.interview?.document) ?? defaultDraft)
+    setDraft(draftFromDocument(state.interview?.document))
     setDraftRevision(state.interview?.draft_revision ?? 0)
     setDraftDirty(false)
     setArchitectureDraft(readArchitectureDraft(state.project.id))
@@ -378,42 +320,26 @@ export default function ControlPlane() {
       )
     })
 
-  const answers = (): InterviewAnswers => {
-    const result: InterviewAnswers = {
-      goal: draft.goal.trim(),
-      audiences: lines(draft.audiences),
-      capabilities: draft.capabilities.map((item) => ({
-        id: item.id.trim(),
-        title: item.title.trim(),
-        statement: item.statement.trim(),
-      })),
-      quality_constraints: draft.qualityConstraints.map((item) => ({
-        id: item.id.trim(),
-        title: item.title.trim(),
-        statement: item.statement.trim(),
-      })),
-      scenarios: draft.scenarios.map((item) => ({
-        id: item.id.trim(),
-        title: item.title.trim(),
-        requirement_ids: commaList(item.requirementIds),
-        given: lines(item.given),
-        when: lines(item.when),
-        then: lines(item.then),
-        oracle: JSON.parse(item.oracle),
-      })),
-    }
-    const optional: Array<[keyof InterviewAnswers, string]> = [
-      ['roles', draft.roles],
-      ['data_policy', draft.dataPolicy],
-      ['integration_failure_policy', draft.integrationFailurePolicy],
-      ['concurrency_policy', draft.concurrencyPolicy],
-    ]
-    for (const [key, value] of optional) {
-      const values = lines(value)
-      if (values.length) (result as any)[key] = values
-    }
-    return result
+  const answers = (): InterviewAnswers => trimAnswers(draft.answers ?? emptyAnswers())
+
+  const sendTurn = (message: string) => {
+    if (!project) return
+    runAction('interview-turn', async () => {
+      const result = await api.interviewTurn(project.id, message, draftRevision)
+      setDraft(draftFromDocument(result.draft.document))
+      setDraftRevision(result.draft.draft_revision)
+      setDraftDirty(false)
+      setNotice(
+        result.outcome.status === 'complete'
+          ? 'The interviewer drafted a specification. Read it on the right, edit anything, then compile.'
+          : result.outcome.status === 'questions'
+            ? 'The interviewer has questions. Answer them in the conversation.'
+            : 'The interviewer drafted what it could; the draft needs your edits before it compiles.',
+      )
+    })
   }
+
+  const startFromExample = () => editAnswers(() => exampleAnswers())
 
   const submitSpec = () => {
     if (!project) return
@@ -568,7 +494,7 @@ export default function ControlPlane() {
     setScaffold(null)
     setExecution(null)
     setEvents([])
-    setDraft(defaultDraft)
+    setDraft(emptyDocument())
     setDraftRevision(0)
     setDraftDirty(false)
     setNotice('')
@@ -829,15 +755,15 @@ export default function ControlPlane() {
         {project && (
           <IntentStage
             project={project}
-            draft={draft}
-            setDraft={editDraft}
-            answers={answers}
+            document={draft}
+            vocabulary={vocabulary}
+            editAnswers={editAnswers}
             busy={busy}
-            setBusy={setBusy}
+            busySince={busySince}
             setError={setError}
+            onTurn={sendTurn}
             onSubmit={submitSpec}
-            needs={interviewNeeds}
-            setNeeds={setInterviewNeeds}
+            onExample={startFromExample}
           />
         )}
 

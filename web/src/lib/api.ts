@@ -341,14 +341,50 @@ export interface InterviewNeeds {
   complete: boolean
 }
 
+/** One line of the interview conversation. */
+export interface InterviewTurnLine {
+  role: 'user' | 'interviewer'
+  text: string
+  at?: string
+  status?: string
+}
+
+/** What one interview turn produced, and how. */
+export interface InterviewOutcome {
+  status: 'complete' | 'questions' | 'partial'
+  summary: string
+  questions: Array<{ prompt: string; why: string }>
+  rejections: string[]
+  attempts: number
+  source: 'model' | 'form-fallback'
+}
+
+/**
+ * The draft document as the server keeps it: the conversation, the
+ * structured answers so far, and what the last turn said about them.
+ */
+export interface InterviewDocument {
+  transcript?: InterviewTurnLine[]
+  answers?: InterviewAnswers | null
+  outcome?: InterviewOutcome
+}
+
 /** The in-progress interview, kept on the server so a reload loses nothing. */
 export interface InterviewDraft {
   project_id: string
   draft_revision: number
-  document: Record<string, JsonValue>
+  document: InterviewDocument & Record<string, JsonValue | undefined>
   submitted_revision_id: string | null
   created_at: string
   updated_at: string
+}
+
+/** What an oracle step may say, from the models that decide it. */
+export interface AcceptanceVocabulary {
+  actions: Array<{ action: AcceptanceStep['action']; takes: Array<'locator' | 'value'> }>
+  locator_kinds: Array<BrowserLocator['kind']>
+  roles: string[]
+  path_actions: Array<AcceptanceStep['action']>
 }
 
 /**
@@ -608,6 +644,24 @@ export const api = {
   /** Where a succeeded run's verified release ZIP downloads from. */
   releaseUrl: (runId: string): string =>
     `/v1/runs/${encodeURIComponent(runId)}/release`,
+
+  /**
+   * One interview turn: say what you want; get questions back, or a draft
+   * specification. Revises the server-side draft under the revision this tab
+   * last saw. One bounded model call, so it can take a minute.
+   */
+  interviewTurn: async (
+    projectId: string,
+    message: string,
+    expectedDraftRevision: number,
+  ): Promise<{ draft: InterviewDraft; outcome: InterviewOutcome }> =>
+    post(`/v1/projects/${encodeURIComponent(projectId)}/interview-turns`, {
+      message,
+      expected_draft_revision: expectedDraftRevision,
+    }),
+
+  acceptanceVocabulary: async (): Promise<AcceptanceVocabulary> =>
+    request<AcceptanceVocabulary>('/v1/vocabulary/acceptance'),
 
   createProject: async (projectId: string, name: string): Promise<Project> =>
     (await post<{ project: Project }>('/v1/projects', {
