@@ -23,6 +23,7 @@ from ._nextjs_lock import PNPM_LOCK_TEMPLATE
 from ..models import (
     AcceptanceAction,
     AcceptanceScenario,
+    AcceptanceStep,
     ArchitectureSpec,
     BrowserLocator,
     BrowserLocatorKind,
