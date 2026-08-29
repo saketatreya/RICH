@@ -47,8 +47,9 @@ export function RepositoryPushPanel({ runId, tokenConfigured }: Props) {
     setError(null)
     try {
       const push = await api.pushRepository(runId, {
-        remote: toRemote(repository),
-        create,
+        remote,
+        // Only a github.com repository can be created; anywhere else must exist.
+        create: create && isGithub,
         private: isPrivate,
       })
       setPushes((previous) => [...previous, push])
@@ -59,7 +60,9 @@ export function RepositoryPushPanel({ runId, tokenConfigured }: Props) {
     }
   }
 
-  const needsToken = tokenConfigured === false && !/^file:\/\//i.test(repository.trim())
+  const remote = toRemote(repository)
+  const isGithub = /^https:\/\/github\.com\//i.test(remote)
+  const needsToken = tokenConfigured === false && !/^file:\/\//i.test(remote)
 
   return (
     <form className="plane-push" onSubmit={submit}>
@@ -75,7 +78,12 @@ export function RepositoryPushPanel({ runId, tokenConfigured }: Props) {
         />
       </label>
       <label className="plane-push-flag">
-        <input type="checkbox" checked={create} onChange={(event) => setCreate(event.target.checked)} />
+        <input
+          type="checkbox"
+          checked={create && isGithub}
+          disabled={!isGithub}
+          onChange={(event) => setCreate(event.target.checked)}
+        />
         Create it if missing
       </label>
       <label className="plane-push-flag">
