@@ -549,7 +549,20 @@ lazy secret handles, have durable state, and support expiry/teardown. Approved u
 bytes are frozen before migration preparation. Migrations run from a disposable
 extraction, but no generated Node process receives the database credential: trusted
 Python code reads only bounded, convention-named UTF-8 SQL files and applies them through
-`psycopg` with lock/statement timeouts and a digest journal. See the official
+`psycopg` with lock/statement timeouts and a digest journal.
+
+**The migration that passed the gate is the migration that is applied.** The preview
+request reads the migration set the run's acceptance evidence recorded (§8) and refuses,
+before anyone is asked to approve, a source whose `packages/db/migrations` is not exactly
+that set. The durable request carries the set and the gate's `SELECT version()`. At
+deploy the trusted runner refuses again before connecting if the extracted snapshot's
+files differ, applies the same text the same way the gate-side migrator did (§4), and
+then reads the journal back: it must equal the recorded set — a parent branch that already
+held other migrations, or a file whose digest drifted, fails the preview closed — and the
+preview's `SELECT version()` is recorded beside the gate's, majors side by side, in
+`preview.database.migrated`. The two engines differ (PGlite in WebAssembly at the gate,
+Postgres on Neon at preview); the dialect and the text do not, and the digests are how
+that is held. See the official
 [Neon branch workflow](https://neon.com/docs/get-started-with-neon/workflow-primer) and
 [Vercel API integration guidance](https://vercel.com/docs/integrations/create-integration/vercel-api-integrations).
 

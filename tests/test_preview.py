@@ -8,6 +8,8 @@ import pytest
 from richbuild.preview import (
     DeploymentFile,
     HttpResponse,
+    MigrationDigest,
+    MigrationReport,
     NeonPreviewDatabaseAdapter,
     PreviewError,
     PreviewOrchestrator,
@@ -71,14 +73,25 @@ class FakeTransport:
 
 
 class FakeMigrations:
-    def __init__(self, *, failure=None):
+    def __init__(self, *, failure=None, journal=None):
         self.database_urls = []
+        self.expected = []
         self.failure = failure
+        self.journal = journal
 
-    def migrate(self, source_dir, *, database_url):
+    def migrate(self, source_dir, *, database_url, expected_migration_digests=()):
         self.database_urls.append(database_url)
+        self.expected.append(tuple(expected_migration_digests))
         if self.failure:
             raise self.failure
+        return MigrationReport(
+            journal=(
+                tuple(expected_migration_digests)
+                if self.journal is None
+                else self.journal
+            ),
+            server_version="PostgreSQL 17.2 on x86_64-pc-linux-gnu",
+        )
 
 
 def _source(tmp_path):
@@ -137,7 +150,7 @@ def test_migration_mutations_are_disposable_and_never_enter_approved_upload(tmp_
         def __init__(self):
             self.source_dir = None
 
-        def migrate(self, source_dir, *, database_url):
+        def migrate(self, source_dir, *, database_url, expected_migration_digests=()):
             self.source_dir = source_dir
             (source_dir / "package.json").write_text(
                 '{"name":"migration-mutated"}'
@@ -145,6 +158,7 @@ def test_migration_mutations_are_disposable_and_never_enter_approved_upload(tmp_
             (source_dir / "generated-by-migration.txt").write_text(
                 "unapproved"
             )
+            return MigrationReport(journal=())
 
     transport = FakeTransport()
     migrations = MutatingMigrations()
@@ -329,9 +343,14 @@ def test_preview_request_rejects_untrusted_secret_handle(tmp_path):
 
 
 class RecordingCursor:
-    def __init__(self):
+    """Enough of a cursor to hold a journal: inserts are remembered, the
+    journal query answers with them, and version() answers like Neon."""
+
+    def __init__(self, *, preexisting=()):
         self.calls = []
         self.next_row = None
+        self.journal = list(preexisting)
+        self._last = ""
 
     def __enter__(self):
         return self
@@ -341,14 +360,24 @@ class RecordingCursor:
 
     def execute(self, statement, parameters=None):
         self.calls.append((statement, parameters))
+        self._last = statement
+        if "INSERT INTO public.__rich_migrations" in statement:
+            self.journal.append(tuple(parameters))
 
     def fetchone(self):
+        if "SELECT version()" in self._last:
+            return ("PostgreSQL 17.2 on x86_64-pc-linux-gnu, compiled by gcc",)
+        if "WHERE filename" in self._last:
+            return None
         return self.next_row
+
+    def fetchall(self):
+        return sorted(self.journal)
 
 
 class RecordingConnection:
-    def __init__(self):
-        self.cursor_instance = RecordingCursor()
+    def __init__(self, *, preexisting=()):
+        self.cursor_instance = RecordingCursor(preexisting=preexisting)
         self.commits = 0
 
     def __enter__(self):
@@ -365,9 +394,9 @@ class RecordingConnection:
 
 
 class RecordingConnector:
-    def __init__(self):
+    def __init__(self, *, preexisting=()):
         self.calls = []
-        self.connection = RecordingConnection()
+        self.connection = RecordingConnection(preexisting=preexisting)
 
     def __call__(self, database_url, **options):
         self.calls.append((database_url, options))
@@ -388,11 +417,14 @@ def test_trusted_sql_migrations_never_execute_generated_runtime(tmp_path):
     generated_runtime.write_text("throw new Error('must never execute');\n")
     connector = RecordingConnector()
 
-    SqlMigrationRunner(connect=connector).migrate(
+    report = SqlMigrationRunner(connect=connector).migrate(
         source,
         database_url="postgresql://owner:secret@ep-test.neon.tech/app",
+        expected_migration_digests=_digests(source),
     )
 
+    assert report.journal == _digests(source)
+    assert report.server_major == 17
     assert len(connector.calls) == 1
     assert connector.calls[0][1]["sslmode"] == "require"
     statements = [
@@ -425,6 +457,7 @@ def test_sql_migration_errors_drop_credential_bearing_exception_causes(tmp_path)
 
     source = _source(tmp_path)
     (source / "packages/db/migrations").mkdir(parents=True)
+    (source / "packages/db/migrations/0000_initial.sql").write_text("SELECT 1;\n")
 
     with pytest.raises(PreviewError) as captured:
         SqlMigrationRunner(connect=CredentialLeakingConnector()).migrate(
@@ -432,6 +465,7 @@ def test_sql_migration_errors_drop_credential_bearing_exception_causes(tmp_path)
             database_url=(
                 "postgresql://owner:highly-secret@ep-test.neon.tech/app"
             ),
+            expected_migration_digests=_digests(source),
         )
 
     assert "highly-secret" not in str(captured.value)
@@ -478,3 +512,170 @@ def test_database_coordinates_never_echo_the_connection_uri():
 
     assert "highly-secret" not in str(captured.value)
     assert "ep-test.neon.tech" not in str(captured.value)
+
+
+# --------------------------------------------------------------------------
+# Parity: the migration that passed the gate is the migration that is applied
+# --------------------------------------------------------------------------
+
+
+def _digests(source):
+    from richbuild.preview import migration_digests
+
+    return migration_digests(source)
+
+
+def _migrated_source(tmp_path):
+    source = _source(tmp_path)
+    migrations = source / "packages/db/migrations"
+    migrations.mkdir(parents=True)
+    (migrations / "0000_initial.sql").write_text(
+        'CREATE TABLE IF NOT EXISTS "todos" (id uuid PRIMARY KEY);\n'
+    )
+    (migrations / "0001_titles.sql").write_text(
+        'ALTER TABLE "todos" ADD COLUMN title text;\n'
+        "--> statement-breakpoint\n"
+        'CREATE INDEX todos_title ON "todos"(title);\n'
+    )
+    return source
+
+
+def test_preview_migrations_refuse_a_source_that_is_not_the_verified_set(tmp_path):
+    source = _migrated_source(tmp_path)
+    connector = RecordingConnector()
+    verified = _digests(source)
+    drifted = (verified[0], MigrationDigest(verified[1].file, "0" * 64))
+
+    # Before any connection: nothing is applied to a database that would hold
+    # a schema the run never verified.
+    with pytest.raises(PreviewError, match="not the set the run verified"):
+        SqlMigrationRunner(connect=connector).migrate(
+            source,
+            database_url="postgresql://owner:secret@ep-test.neon.tech/app",
+            expected_migration_digests=drifted,
+        )
+    with pytest.raises(PreviewError, match="not the set the run verified"):
+        SqlMigrationRunner(connect=connector).migrate(
+            source,
+            database_url="postgresql://owner:secret@ep-test.neon.tech/app",
+            expected_migration_digests=verified[:1],
+        )
+    # A run that recorded no set cannot have its source's migrations applied.
+    with pytest.raises(PreviewError, match="not the set the run verified"):
+        SqlMigrationRunner(connect=connector).migrate(
+            source,
+            database_url="postgresql://owner:secret@ep-test.neon.tech/app",
+        )
+    assert connector.calls == []
+
+    # And the other way round: a run that verified migrations the source lost.
+    bare = _source(tmp_path / "bare")
+    with pytest.raises(PreviewError, match="does not carry"):
+        SqlMigrationRunner(connect=connector).migrate(
+            bare,
+            database_url="postgresql://owner:secret@ep-test.neon.tech/app",
+            expected_migration_digests=verified,
+        )
+    assert SqlMigrationRunner(connect=connector).migrate(
+        bare, database_url="postgresql://owner:secret@ep-test.neon.tech/app"
+    ) == MigrationReport(journal=())
+    assert connector.calls == []
+
+
+def test_preview_migrations_refuse_a_journal_that_differs_after_apply(tmp_path):
+    source = _migrated_source(tmp_path)
+    # A parent branch that already carried a migration this run never saw.
+    connector = RecordingConnector(preexisting=[("0000_other.sql", "f" * 64)])
+
+    with pytest.raises(PreviewError, match="journal after apply"):
+        SqlMigrationRunner(connect=connector).migrate(
+            source,
+            database_url="postgresql://owner:secret@ep-test.neon.tech/app",
+            expected_migration_digests=_digests(source),
+        )
+
+    assert connector.connection.commits == 0, "refused before commit"
+
+
+def test_preview_migrations_record_the_journal_and_the_server_on_success(tmp_path):
+    source = _migrated_source(tmp_path)
+    connector = RecordingConnector()
+
+    report = SqlMigrationRunner(connect=connector).migrate(
+        source,
+        database_url="postgresql://owner:secret@ep-test.neon.tech/app",
+        expected_migration_digests=_digests(source),
+    )
+
+    assert report.journal == _digests(source)
+    assert [entry.file for entry in report.journal] == ["0000_initial.sql", "0001_titles.sql"]
+    assert report.server_version.startswith("PostgreSQL 17.2")
+    assert report.server_major == 17
+    statements = [s for s, _ in connector.connection.cursor_instance.calls]
+    assert any("CREATE INDEX todos_title" in s for s in statements)
+    assert statements[-1] == "SELECT version()"
+    assert connector.connection.commits == 1
+
+
+def test_the_orchestrator_holds_the_preview_to_the_run_s_recorded_set(tmp_path):
+    from richbuild.preview import server_major
+
+    transport = FakeTransport()
+    source = _migrated_source(tmp_path)
+    recorded = _digests(source)
+    migrations = FakeMigrations()
+    events = []
+    orchestrator = PreviewOrchestrator(
+        NeonPreviewDatabaseAdapter(transport),
+        VercelPreviewDeploymentAdapter(transport),
+        migrations,
+        secret_resolver=lambda handle: f"secret-for-{handle}",
+        event_sink=lambda event, payload: events.append((event, dict(payload))),
+    )
+    request = PreviewRequest(
+        run_id="run-1",
+        source_dir=source,
+        project_name="preview-app",
+        neon_project_id="neon-project-1",
+        neon_branch_name="preview/run-1",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        migration_digests=recorded,
+        gate_engine="PostgreSQL 18.3 (PGlite 0.5.8) on wasm32-unknown-emscripten",
+    )
+
+    orchestrator.create(request)
+
+    assert migrations.expected == [recorded]
+    migrated = next(payload for event, payload in events if event == "preview.database.migrated")
+    assert migrated["migrations"] == [entry.as_dict() for entry in recorded]
+    # Both sides, for the record: the engine that verified the text and the
+    # engine now holding it. Recorded, not compared -- a major mismatch is a
+    # fact about the deployment target, not a failure of the migration.
+    assert migrated["gate_server_major"] == 18
+    assert migrated["preview_server_major"] == 17
+    assert migrated["preview_server_version"].startswith("PostgreSQL 17.2")
+    assert server_major("nonsense") is None
+
+    # A runner whose journal disagrees fails the preview, and the branch goes.
+    disagreeing = FakeMigrations(journal=recorded[:1])
+    orchestrator = PreviewOrchestrator(
+        NeonPreviewDatabaseAdapter(FakeTransport()),
+        VercelPreviewDeploymentAdapter(FakeTransport()),
+        disagreeing,
+        secret_resolver=lambda handle: f"secret-for-{handle}",
+    )
+    with pytest.raises(PreviewError, match="not the set the run verified"):
+        orchestrator.create(request)
+
+
+def test_a_preview_request_only_carries_digest_entries():
+    with pytest.raises(ValueError, match="MigrationDigest"):
+        PreviewRequest(
+            run_id="run-1",
+            source_dir=".",
+            project_name="preview-app",
+            neon_project_id="neon-project-1",
+            neon_branch_name="preview/run-1",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+            migration_digests=({"file": "0000_initial.sql", "sha256": "0" * 64},),
+        )

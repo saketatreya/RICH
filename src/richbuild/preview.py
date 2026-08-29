@@ -6,7 +6,7 @@ records, durable events, command arguments, or exception messages.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -137,10 +137,22 @@ class PreviewRequest:
     neon_parent_branch_id: str | None = None
     vercel_project_id: str | None = None
     vercel_team_id: str | None = None
+    # The migration set the run's acceptance evidence recorded, and the engine
+    # the gate reported. The journal the preview writes must equal the set;
+    # the engine majors are recorded side by side.
+    migration_digests: tuple["MigrationDigest", ...] = ()
+    gate_engine: str = ""
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", self.run_id):
             raise ValueError("run_id is not a stable identifier")
+        if isinstance(self.migration_digests, (str, bytes)) or any(
+            not isinstance(entry, MigrationDigest) for entry in self.migration_digests
+        ):
+            raise ValueError("migration_digests must be MigrationDigest entries")
+        object.__setattr__(self, "migration_digests", tuple(self.migration_digests))
+        if not isinstance(self.gate_engine, str) or len(self.gate_engine) > 512:
+            raise ValueError("gate_engine must be a bounded string")
         if self.preview_id is not None and not re.fullmatch(
             r"preview_[0-9a-f]{32}", self.preview_id
         ):
@@ -419,8 +431,38 @@ class VercelPreviewDeploymentAdapter:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class MigrationReport:
+    """What a trusted migration run left behind: the journal it can vouch
+    for, and the server that holds it."""
+
+    journal: tuple["MigrationDigest", ...]
+    server_version: str = ""
+
+    @property
+    def server_major(self) -> int | None:
+        return server_major(self.server_version)
+
+
+def server_major(version: str) -> int | None:
+    """The major of a `SELECT version()` answer, on either engine.
+
+    PGlite reports "PostgreSQL 18.3 (PGlite 0.5.8) on wasm32..."; Neon
+    "PostgreSQL 17.2 on x86_64...". The same text, the same number.
+    """
+
+    match = re.search(r"PostgreSQL (\d+)", version or "")
+    return int(match.group(1)) if match else None
+
+
 class MigrationRunner(Protocol):
-    def migrate(self, source_dir: Path, *, database_url: str) -> None: ...
+    def migrate(
+        self,
+        source_dir: Path,
+        *,
+        database_url: str,
+        expected_migration_digests: Sequence["MigrationDigest"] = (),
+    ) -> MigrationReport: ...
 
 
 # One rule for what counts as a migration file, shared by the trusted preview
@@ -543,7 +585,20 @@ class SqlMigrationRunner:
         self.max_file_bytes = max_file_bytes
         self.max_total_bytes = max_total_bytes
 
-    def migrate(self, source_dir: Path, *, database_url: str) -> None:
+    def migrate(
+        self,
+        source_dir: Path,
+        *,
+        database_url: str,
+        expected_migration_digests: Sequence[MigrationDigest] = (),
+    ) -> MigrationReport:
+        """Apply the snapshot's migrations, and refuse unless what the journal
+        holds afterwards is exactly the set the run's acceptance evidence
+        recorded. The gate ran this text on PGlite; this runs it on Postgres;
+        the digests are how the two are held to be the same text.
+        """
+
+        expected = tuple(expected_migration_digests)
         parsed = urlsplit(database_url)
         if (
             parsed.scheme not in {"postgres", "postgresql"}
@@ -559,10 +614,24 @@ class SqlMigrationRunner:
                 "preview migration requires a credentialed Neon database URL"
             )
         source = Path(source_dir).resolve(strict=True)
-        migrations = source / "packages" / "db" / "migrations"
-        if not migrations.exists():
-            return
+        migrations = source.joinpath(*MIGRATIONS_DIRECTORY.parts)
+        if not migrations.exists() and not migrations.is_symlink():
+            if expected:
+                raise PreviewError(
+                    "the run verified migrations the preview source does not carry"
+                )
+            return MigrationReport(journal=())
         files = self._migration_files(migrations)
+        on_disk = tuple(
+            MigrationDigest(name, hashlib.sha256(payload).hexdigest())
+            for name, payload in files
+        )
+        if on_disk != expected:
+            # Before any connection: nothing is applied to a database that
+            # would hold a schema the run never verified.
+            raise PreviewError(
+                "the preview source's migrations are not the set the run verified"
+            )
         connector = self._connect or _psycopg_connect()
         try:
             with connector(
@@ -627,6 +696,28 @@ class SqlMigrationRunner:
                             """,
                             (filename, digest),
                         )
+                    cursor.execute(
+                        """
+                        SELECT filename, sha256
+                        FROM public.__rich_migrations
+                        ORDER BY filename
+                        """
+                    )
+                    journal = tuple(
+                        MigrationDigest(str(row[0]), str(row[1]))
+                        for row in cursor.fetchall()
+                    )
+                    if journal != expected:
+                        # A parent branch that already held other migrations,
+                        # or an applied file whose digest drifted: either way
+                        # this database does not hold the verified schema.
+                        raise PreviewError(
+                            "the migration journal after apply is not the set "
+                            "the run verified"
+                        )
+                    cursor.execute("SELECT version()")
+                    row = cursor.fetchone()
+                    version = str(row[0]) if row else ""
                 connection.commit()
         except PreviewError:
             raise
@@ -634,6 +725,7 @@ class SqlMigrationRunner:
             raise PreviewError(
                 f"trusted SQL migration failed: {type(exc).__name__}"
             ) from None
+        return MigrationReport(journal=journal, server_version=version)
 
     def _migration_files(
         self, migrations: Path
@@ -693,13 +785,30 @@ class PreviewOrchestrator:
                     approved_snapshot,
                     Path(temporary) / "source",
                 )
-                self.migrations.migrate(
+                report = self.migrations.migrate(
                     migration_source,
                     database_url=branch.connection_uri,
+                    expected_migration_digests=request.migration_digests,
+                )
+            if not isinstance(report, MigrationReport):
+                raise PreviewError("the migration runner returned no report")
+            if report.journal != request.migration_digests:
+                raise PreviewError(
+                    "the migration journal is not the set the run verified"
                 )
             self.event_sink(
                 "preview.database.migrated",
-                {"run_id": request.run_id, "branch_id": branch.branch_id},
+                {
+                    "run_id": request.run_id,
+                    "branch_id": branch.branch_id,
+                    "migrations": [entry.as_dict() for entry in report.journal],
+                    # Both sides, for the record: the engine that verified the
+                    # text and the engine now holding it.
+                    "gate_server_version": request.gate_engine,
+                    "gate_server_major": server_major(request.gate_engine),
+                    "preview_server_version": report.server_version,
+                    "preview_server_major": report.server_major,
+                },
             )
             deployment = self.vercel.deploy(
                 request,
