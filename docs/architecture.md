@@ -540,6 +540,27 @@ artifact bytes.
 `rich doctor` checks coarse host availability. Runtime construction performs the exact
 Node/pnpm identity checks and fails closed on drift.
 
+### Installing it
+
+`python tools/build_wheel.py` builds the canvas, packages it as data inside
+`richbuild/canvas`, assembles the wheel and removes the copy again, so a
+checkout keeps serving its own `web/dist` (`canvas_origin()` prefers the
+checkout's build when the repository is present and the bundled copy
+otherwise; `rich doctor` and the serve banner say which). `docker build -t
+rich .` produces an Ubuntu 24.04 image with Bubblewrap, Node 22.23.2 laid out
+as the one root the executor discovers, pnpm 10.34.5 in the Corepack cache it
+reads, Chromium's system libraries and the wheel, running as a non-root user
+with state and the dependency cache on the `/rich` volume. Inside, `rich
+serve --host 0.0.0.0 --published-on-loopback` binds beyond loopback with the
+Host and Origin checks enforced; the published port is the host's loopback.
+Docker's default seccomp profile refuses the user namespace Bubblewrap
+needs — CI records `rich doctor` saying so — hence the profile under
+`docker/` (or `--security-opt seccomp=unconfined`), plus
+`apparmor=unconfined` on Ubuntu hosts that confine unprivileged user
+namespaces. CI builds the wheel and the image on every push, installs the
+wheel into an empty venv, fetches the canvas from both, and asks the
+container's `rich doctor`.
+
 ### Local Canvas
 
 ```bash

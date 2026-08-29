@@ -98,9 +98,9 @@ jobs:
           docker exec rich-default rich doctor | tee doctor-default.json | python3 -c "import json,sys; d=json.load(sys.stdin); [print(('ok ' if c['ok'] else 'NO ') + c['name'] + ': ' + c['detail']) for c in d['checks']]"
           docker rm -f rich-default
       - run: |
-          docker run -d --name rich-userns -p 127.0.0.1:8767:8767 -v rich-ci-state:/rich --security-opt seccomp=unconfined --security-opt apparmor=unconfined rich:ci
+          docker run -d --name rich-userns -p 127.0.0.1:8767:8767 -v rich-ci-state:/rich --security-opt seccomp=docker/seccomp.json --security-opt apparmor=unconfined rich:ci
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:8767/v1/health >/dev/null && break; sleep 1; done
-          echo "--- rich doctor with seccomp and apparmor unconfined ---"
+          echo "--- rich doctor with docker/seccomp.json (default profile plus the namespace syscalls) ---"
           docker exec rich-userns rich doctor | tee doctor-userns.json | python3 -c "import json,sys; d=json.load(sys.stdin); [print(('ok ' if c['ok'] else 'NO ') + c['name'] + ': ' + c['detail']) for c in d['checks']]; sys.exit(0 if all(c['ok'] for c in d['checks'] if c['required']) else 1)"
           docker rm -f rich-userns
 

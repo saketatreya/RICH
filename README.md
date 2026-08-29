@@ -98,7 +98,7 @@ not carry.
 docker build -t rich .
 docker run --rm -p 127.0.0.1:8767:8767 -v rich-state:/rich \
   -e ANTHROPIC_API_KEY \
-  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --security-opt seccomp=docker/seccomp.json --security-opt apparmor=unconfined \
   rich
 ```
 
@@ -107,10 +107,12 @@ libraries and the wheel; state and the dependency cache live on the volume.
 The port is published only to the host's loopback, and inside the container
 the server binds `0.0.0.0` with its Host and Origin checks enforced. Building
 software needs unprivileged user namespaces inside the container, which
-Docker's default seccomp profile blocks: hence the two `--security-opt`
-flags, which CI proves are sufficient (and records whether the default
-profile happens to allow it). `rich doctor` inside the container says either
-way.
+Docker's default seccomp profile blocks (CI records `rich doctor` saying so).
+`docker/seccomp.json` is that default profile with exactly the namespace and
+mount syscalls Bubblewrap uses admitted — nothing else loosened — and CI
+proves it is sufficient; `apparmor=unconfined` is for Ubuntu hosts that
+confine unprivileged user namespaces. `rich doctor` inside the container
+says either way.
 
 ### Run it from a checkout
 

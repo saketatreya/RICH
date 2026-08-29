@@ -2,13 +2,14 @@
 #
 #   docker build -t rich .
 #   docker run --rm -p 127.0.0.1:8767:8767 -v rich-state:/rich -e ANTHROPIC_API_KEY \
-#     --security-opt seccomp=unconfined --security-opt apparmor=unconfined rich
+#     --security-opt seccomp=docker/seccomp.json --security-opt apparmor=unconfined rich
 #
 # The port is published only to the host's loopback; inside, the server binds
 # 0.0.0.0 with its Host and Origin checks enforced. Building software needs
 # unprivileged user namespaces for Bubblewrap, which Docker's default seccomp
-# profile blocks -- hence the two --security-opt flags. `rich doctor` inside
-# the container says whether they took effect.
+# profile blocks; docker/seccomp.json is that profile with the namespace and
+# mount syscalls admitted. `rich doctor` inside the container says whether
+# they took effect.
 
 ARG NODE_VERSION=22.23.2
 ARG PNPM_VERSION=10.34.5
