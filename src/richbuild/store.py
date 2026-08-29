@@ -972,6 +972,30 @@ class RichStore:
             "created_at": created_at,
         }
 
+    def all_events(
+        self, run_id: str, *, page_size: int = 1000
+    ) -> tuple[dict[str, Any], ...]:
+        """Every event of a run in sequence order, however many there are.
+
+        ``list_events`` is one bounded page. Run preparation, recovery and
+        execution all need the whole history, and two of them had grown
+        identical private paging loops around it.
+        """
+
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
+            raise ValueError("page_size must be a positive integer")
+        events: list[dict[str, Any]] = []
+        after = 0
+        while True:
+            page = self.list_events(run_id, after_sequence=after, limit=page_size)
+            if not page:
+                break
+            events.extend(page)
+            after = int(page[-1]["sequence"])
+            if len(page) < page_size:
+                break
+        return tuple(events)
+
     def list_events(
         self, run_id: str, *, after_sequence: int = 0, limit: int = 1000
     ) -> list[dict[str, Any]]:

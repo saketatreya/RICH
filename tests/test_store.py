@@ -597,3 +597,29 @@ def test_interview_draft_survives_reopen_and_guards_its_revision(tmp_path):
         store.save_interview_draft(
             "project.missing", document={}, expected_draft_revision=0
         )
+
+
+def test_all_events_walks_every_page_in_sequence_order(tmp_path):
+    """Two modules had grown identical private loops around list_events. The
+    one on the store is exercised across page boundaries with small pages
+    rather than by inserting a thousand rows."""
+
+    store = RichStore(tmp_path)
+    project, spec, architecture = _project_with_revisions(store)
+    run = store.create_run(
+        project["id"],
+        spec_revision_id=spec.id,
+        architecture_revision_id=architecture.id,
+        budget={"max_model_calls": 10},
+    )
+    appended = [
+        store.append_event(run["id"], "run.note", {"index": index})["sequence"]
+        for index in range(5)
+    ]
+
+    for page_size in (1, 2, 5, 1000):
+        events = store.all_events(run["id"], page_size=page_size)
+        assert [event["sequence"] for event in events] == appended
+    assert store.all_events("no-such-run") == ()
+    with pytest.raises(ValueError):
+        store.all_events(run["id"], page_size=0)

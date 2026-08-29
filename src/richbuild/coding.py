@@ -28,6 +28,7 @@ import time
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 
 from .canonical import canonical_json_bytes
+from .fs import fsync_directory
 from .canonical import canonical_json_text as _canonical_json
 from .paths import UnsafePath, is_owned, safe_relative_path
 from .compiler import CompiledTask, compile_architecture
@@ -541,10 +542,10 @@ class SourceCommit:
                     )
                     if original.existed:
                         os.replace(staged[original.path], destination)
-                        _fsync_directory(destination.parent)
+                        fsync_directory(destination.parent)
                     else:
                         destination.unlink()
-                        _fsync_directory(destination.parent)
+                        fsync_directory(destination.parent)
                     applied.append(original)
             except Exception as exc:
                 recovery_errors: list[str] = []
@@ -560,7 +561,7 @@ class SourceCommit:
                         recovery = stage / ".recovery" / current.path
                         _write_staged_file(recovery, current.content, 0o644)
                         os.replace(recovery, destination)
-                        _fsync_directory(destination.parent)
+                        fsync_directory(destination.parent)
                     except Exception as recovery_exc:  # pragma: no cover - dire
                         recovery_errors.append(
                             f"{original.path}: {type(recovery_exc).__name__}"
@@ -646,10 +647,6 @@ def _validate_relative_path(value: Any, limits: CodingLimits) -> PurePosixPath:
             f"generated secret-bearing filename is forbidden: {value!r}"
         )
     return path
-
-
-def _is_owned(path: PurePosixPath, owned_paths: Sequence[str]) -> bool:
-    return is_owned(path, owned_paths)
 
 
 _PROTECTED_FILE_NAMES = frozenset(
@@ -835,7 +832,7 @@ def parse_file_bundle(
                 f"generated file path is duplicated: {normalized!r}"
             )
         seen.add(normalized)
-        if not _is_owned(path, owned_paths):
+        if not is_owned(path, owned_paths):
             raise FileBundleValidationError(
                 f"generated file is outside task ownership: {normalized!r}"
             )
@@ -926,16 +923,6 @@ def _write_staged_file(path: Path, content: bytes, mode: int) -> None:
         os.fsync(handle.fileno())
 
 
-def _fsync_directory(directory: Path) -> None:
-    descriptor = os.open(
-        directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    )
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _make_source_stage(root: Path, prefix: str) -> Path:
     staging_root = root / ".rich" / "runtime" / "source-transactions"
     _assert_no_symlink_components(root, staging_root)
@@ -947,7 +934,7 @@ def _make_source_stage(root: Path, prefix: str) -> Path:
             root / ".rich" / "runtime",
             staging_root,
         ):
-            _fsync_directory(directory)
+            fsync_directory(directory)
     except OSError as exc:
         raise SourceTransactionError(
             "source transaction staging directory cannot be prepared"
@@ -976,7 +963,7 @@ def source_transaction_lock(
     try:
         lock_directory.mkdir(parents=True, exist_ok=True)
         for directory in (root, root / ".rich", lock_directory):
-            _fsync_directory(directory)
+            fsync_directory(directory)
     except OSError as exc:
         raise SourceTransactionError(
             "source transaction lock directory cannot be prepared"
@@ -986,7 +973,7 @@ def source_transaction_lock(
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(lock_path, flags, 0o600)
-        _fsync_directory(lock_directory)
+        fsync_directory(lock_directory)
     except OSError as exc:
         raise SourceTransactionError(
             "source transaction lock cannot be opened safely"
@@ -1128,12 +1115,12 @@ class AtomicSourceWriter:
                 for directory in reversed(missing):
                     if directory not in created_directories:
                         created_directories.append(directory)
-                    _fsync_directory(directory)
-                    _fsync_directory(directory.parent)
+                    fsync_directory(directory)
+                    fsync_directory(directory.parent)
                 _assert_no_symlink_components(self.root, destination)
                 os.replace(staged[item.path], destination)
                 applied.append((item, original))
-                _fsync_directory(destination.parent)
+                fsync_directory(destination.parent)
         except Exception as exc:
             recovery_errors: list[str] = []
             for item, original in reversed(applied):
@@ -1148,10 +1135,10 @@ class AtomicSourceWriter:
                             original.mode or 0o644,
                         )
                         os.replace(recovery, destination)
-                        _fsync_directory(destination.parent)
+                        fsync_directory(destination.parent)
                     else:
                         destination.unlink()
-                        _fsync_directory(destination.parent)
+                        fsync_directory(destination.parent)
                 except Exception as recovery_exc:  # pragma: no cover - dire
                     recovery_errors.append(
                         f"{item.path}: {type(recovery_exc).__name__}"

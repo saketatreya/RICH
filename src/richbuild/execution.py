@@ -125,7 +125,7 @@ class DefaultRunExecutor:
             cancellation=_DurableCancellation(self.store, run_id),
         ) as execution_owner:
             run = self.store.get_run(run_id)
-            event_history = _all_events(self.store, run_id)
+            event_history = self.store.all_events(run_id)
             model_events = _LeaseBoundModelEventSink(
                 self.store,
                 run_id,
@@ -210,21 +210,3 @@ class _DurableCancellation(CancellationToken):
             return False
         self.cancel(standing.get("reason") or "canceled by operator")
         return True
-
-
-def _all_events(
-    store: RichStore, run_id: str
-) -> tuple[dict[str, Any], ...]:
-    events: list[dict[str, Any]] = []
-    after = 0
-    while True:
-        page = store.list_events(
-            run_id, after_sequence=after, limit=1000
-        )
-        if not page:
-            break
-        events.extend(page)
-        after = int(page[-1]["sequence"])
-        if len(page) < 1000:
-            break
-    return tuple(events)

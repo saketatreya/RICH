@@ -50,6 +50,7 @@ from .coding import (
     source_transaction_lock,
 )
 from .canonical import canonical_json_bytes
+from .fs import fsync_directory
 from .paths import UnsafePath, is_owned, safe_relative_path
 from .budget import RunBudget
 from .compiler import CompiledArchitecture, CompiledTask, compile_architecture
@@ -1714,7 +1715,7 @@ class RunEngine:
         plan = compile_architecture(architecture, project)
         self._validate_durable_tasks(run_id, plan)
 
-        events = _all_events(self.store, run_id)
+        events = self.store.all_events(run_id)
         prepared_approval_id = _prepared_approval_id(events)
         if (
             architecture_approval_id is not None
@@ -1807,20 +1808,6 @@ class RunEngine:
                 raise RunEngineError(
                     f"durable task {task_id!r} does not match the compiled plan"
                 )
-
-
-def _all_events(store: RichStore, run_id: str) -> tuple[dict[str, Any], ...]:
-    events: list[dict[str, Any]] = []
-    after = 0
-    while True:
-        page = store.list_events(run_id, after_sequence=after, limit=1000)
-        if not page:
-            break
-        events.extend(page)
-        after = int(page[-1]["sequence"])
-        if len(page) < 1000:
-            break
-    return tuple(events)
 
 
 def _prepared_approval_id(events: Sequence[Mapping[str, Any]]) -> str:
@@ -2070,7 +2057,7 @@ def _load_recovery_source_files(
         path = _safe_manifest_path(path_value)
         if (
             path_value in generated_by_path
-            or not _is_owned(path, owned_paths)
+            or not is_owned(path, owned_paths)
             or is_protected_generation_path(path)
         ):
             raise WorkspaceValidationError(
@@ -2281,7 +2268,7 @@ def _restore_original_source_files(
                 )
             try:
                 destination.unlink()
-                _fsync_directory(destination.parent)
+                fsync_directory(destination.parent)
             except OSError as exc:
                 raise WorkspaceValidationError(
                     f"interrupted source could not be removed: {item.path}"
@@ -2371,7 +2358,7 @@ def _replace_recovery_file(
             os.fsync(temporary.fileno())
             os.fchmod(temporary.fileno(), mode)
         os.replace(temporary_name, destination)
-        _fsync_directory(destination.parent)
+        fsync_directory(destination.parent)
     except OSError as exc:
         raise WorkspaceValidationError(
             f"interrupted source could not be restored: {destination.name}"
@@ -2381,14 +2368,6 @@ def _replace_recovery_file(
             os.unlink(temporary_name)
         except FileNotFoundError:
             pass
-
-
-def _fsync_directory(directory: Path) -> None:
-    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def _require_recovery_owner(
@@ -2524,7 +2503,7 @@ def _validate_protected_scaffold(
                     f"generated source file {file_index} has no path"
                 )
             generated_path = _safe_manifest_path(generated_path_value)
-            if not _is_owned(generated_path, owned_paths):
+            if not is_owned(generated_path, owned_paths):
                 raise WorkspaceValidationError(
                     f"generated source path is outside its task ownership: "
                     f"{generated_path_value}"
@@ -2743,12 +2722,6 @@ def _is_runtime_output(path: PurePosixPath) -> bool:
     if path.parts[:2] == (".rich", "runtime"):
         return True
     return any(part in _RUNTIME_DIRECTORY_NAMES for part in path.parts)
-
-
-def _is_owned(
-    path: PurePosixPath, owned_paths: Sequence[PurePosixPath]
-) -> bool:
-    return is_owned(path, owned_paths)
 
 
 def _validated_execution_result(
