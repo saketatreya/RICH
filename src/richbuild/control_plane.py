@@ -26,7 +26,7 @@ from .preview import (
     create_deployment_snapshot,
     extract_deployment_snapshot,
 )
-from .store import Artifact, Revision, RichStore, StoreError
+from .store import Revision, RichStore, StoredArtifact, StoreError
 from .target_packs.nextjs import (
     NextJsTargetPack,
     NextJsTargetPackConfig,
@@ -103,14 +103,14 @@ class ArchitectureSubmission:
 class PreparedRun:
     run: dict[str, Any]
     compiled: CompiledArchitecture
-    plan_artifact: Artifact
+    plan_artifact: StoredArtifact
     tasks: tuple[dict[str, Any], ...]
 
 
 @dataclass(frozen=True, slots=True)
 class ScaffoldResult:
     manifest: ScaffoldManifest
-    manifest_artifact: Artifact
+    manifest_artifact: StoredArtifact
     destination: Path
 
 
@@ -1228,11 +1228,11 @@ def _preview_request(
         expires_at=datetime.fromisoformat(str(document["expires_at"])),
         neon_token_handle=str(document["neon_token_handle"]),
         vercel_token_handle=str(document["vercel_token_handle"]),
-        neon_parent_branch_id=_optional_string(
+        neon_parent_branch_id=_stringified(
             document.get("neon_parent_branch_id")
         ),
-        vercel_project_id=_optional_string(document.get("vercel_project_id")),
-        vercel_team_id=_optional_string(document.get("vercel_team_id")),
+        vercel_project_id=_stringified(document.get("vercel_project_id")),
+        vercel_team_id=_stringified(document.get("vercel_team_id")),
     )
 
 
@@ -1241,9 +1241,12 @@ def _preview_teardown(document: Mapping[str, Any]) -> PreviewTeardown:
         run_id=str(document["run_id"]),
         neon_token_handle=str(document["neon_token_handle"]),
         vercel_token_handle=str(document["vercel_token_handle"]),
-        vercel_team_id=_optional_string(document.get("vercel_team_id")),
+        vercel_team_id=_stringified(document.get("vercel_team_id")),
     )
 
 
-def _optional_string(value: Any) -> str | None:
+def _stringified(value: Any) -> str | None:
+    # Reads a field back out of the store's own document, where the API
+    # boundary already validated it: this coerces and does not validate, unlike
+    # api._optional_string, and its name no longer claims otherwise.
     return str(value) if value is not None else None

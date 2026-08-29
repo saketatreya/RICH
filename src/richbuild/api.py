@@ -29,7 +29,7 @@ from .preview import (
 )
 from .runtime import CLAUDE_CODE_ROUTE, default_architect
 from .store import (
-    SCHEMA_VERSION as STORE_SCHEMA_VERSION,
+    STORE_SCHEMA_VERSION,
     IdempotencyReplay,
     NotFoundError,
     RevisionConflict,

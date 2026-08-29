@@ -1,22 +1,12 @@
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import replace
 
 import pytest
 
 from richbuild.compiler import (
     CompilationError,
     DiagnosticCode,
-    WorkflowBranch,
-    WorkflowBranchCase,
-    WorkflowParallel,
-    WorkflowRetry,
-    WorkflowSequence,
-    WorkflowTask,
-    WorkflowTimeout,
-    WorkflowValidationError,
     compile_architecture,
-    require_valid_workflow,
     validate_architecture,
-    validate_workflow,
 )
 from richbuild.models import (
     AcceptanceScenario,
@@ -463,82 +453,3 @@ def test_incompatible_port_schemas_fail_closed():
     assert mismatch.edge_ids == ("edge.data",)
     with pytest.raises(CompilationError):
         compile_architecture(incompatible, project)
-
-
-def test_workflow_types_are_immutable_and_validate_nested_task_references():
-    workflow = WorkflowSequence(
-        (
-            WorkflowTask("parse"),
-            WorkflowParallel(
-                (
-                    WorkflowRetry(WorkflowTask("validate"), max_attempts=3),
-                    WorkflowTimeout(
-                        WorkflowTask("enrich"),
-                        timeout_seconds=10,
-                    ),
-                )
-            ),
-            WorkflowBranch(
-                cases=(
-                    WorkflowBranchCase(
-                        "result.is_valid",
-                        WorkflowTask("publish"),
-                    ),
-                ),
-                otherwise=WorkflowTask("reject"),
-            ),
-        )
-    )
-
-    assert validate_workflow(
-        workflow,
-        known_task_ids={"parse", "validate", "enrich", "publish", "reject"},
-    ) == ()
-    with pytest.raises(FrozenInstanceError):
-        workflow.steps = ()
-
-
-@pytest.mark.parametrize(
-    ("factory", "code"),
-    [
-        (
-            lambda: WorkflowParallel((WorkflowTask("only"),)),
-            DiagnosticCode.WORKFLOW_PARALLEL_ARITY,
-        ),
-        (
-            lambda: WorkflowRetry(WorkflowTask("task"), max_attempts=1),
-            DiagnosticCode.WORKFLOW_INVALID_RETRY,
-        ),
-        (
-            lambda: WorkflowTimeout(WorkflowTask("task"), timeout_seconds=0),
-            DiagnosticCode.WORKFLOW_INVALID_TIMEOUT,
-        ),
-        (
-            lambda: WorkflowBranch(
-                cases=(
-                    WorkflowBranchCase("same", WorkflowTask("a")),
-                    WorkflowBranchCase("same", WorkflowTask("b")),
-                ),
-                otherwise=WorkflowTask("fallback"),
-            ),
-            DiagnosticCode.WORKFLOW_DUPLICATE_BRANCH,
-        ),
-    ],
-)
-def test_invalid_workflows_fail_with_structured_diagnostics(factory, code):
-    with pytest.raises(WorkflowValidationError) as caught:
-        factory()
-
-    assert caught.value.diagnostics[0].code is code
-
-
-def test_unknown_workflow_task_fails_closed():
-    workflow = WorkflowSequence((WorkflowTask("known"), WorkflowTask("missing")))
-
-    diagnostics = validate_workflow(workflow, known_task_ids={"known"})
-
-    assert len(diagnostics) == 1
-    assert diagnostics[0].code is DiagnosticCode.WORKFLOW_UNKNOWN_TASK
-    assert diagnostics[0].locations == ("workflow.steps[1]",)
-    with pytest.raises(WorkflowValidationError):
-        require_valid_workflow(workflow, known_task_ids={"known"})

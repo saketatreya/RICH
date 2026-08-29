@@ -66,6 +66,10 @@ _SHARP_OVERRIDE = "0.35.3"
 _MINIMATCH_OVERRIDE = "10.2.5"
 _ESBUILD_KIT_OVERRIDE = "0.25.12"
 _LOCK_SCOPE_PLACEHOLDER = "@rich-template"
+
+# The pack's version, stamped into every manifest it writes. One constant: the
+# manifest default and the pack had drifted a minor version apart.
+TARGET_PACK_VERSION = "1.3.0"
 _MUTABLE_GENERATED_FILES = {
     # Next.js owns this declaration shim and may rewrite it during dev/build as its
     # generated type entrypoints evolve.  Every other rendered source is invariant.
@@ -184,7 +188,7 @@ class ScaffoldManifest:
     files: tuple[ManifestFile, ...]
     schema_version: str = "rich.target-pack-manifest/v2"
     target_pack: str = "nextjs-app-router"
-    target_pack_version: str = "1.2.0"
+    target_pack_version: str = TARGET_PACK_VERSION
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -772,7 +776,7 @@ class NextJsTargetPack:
     """Render and atomically materialize the built-in web target pack."""
 
     target_pack_id = "nextjs-app-router"
-    target_pack_version = "1.3.0"
+    target_pack_version = TARGET_PACK_VERSION
 
     def __init__(self, config: NextJsTargetPackConfig):
         self.config = config

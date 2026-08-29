@@ -12,10 +12,10 @@ on the first.
 """
 
 from dataclasses import replace
-import shutil
-from pathlib import Path
 
 import pytest
+
+from liveutil import require_claude_login
 
 from richbuild.change import compile_change
 from richbuild.models import ProjectSpec
@@ -109,10 +109,7 @@ def _amend(spec: ProjectSpec, requirement_id: str, statement: str) -> ProjectSpe
 
 
 def _require_login():
-    if shutil.which("claude") is None:
-        pytest.skip("live test; the `claude` CLI is not on PATH")
-    if not (Path.home() / ".claude" / ".credentials.json").exists():
-        pytest.skip("live test; run `claude` once to log in first")
+    require_claude_login()
 
 
 @pytest.mark.live

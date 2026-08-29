@@ -1,9 +1,10 @@
 import json
-import shutil
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+from liveutil import require_claude_login
 
 from richbuild.claude_code_provider import (
     CLAUDE_CODE_PROVIDER,
@@ -486,11 +487,7 @@ def test_repr_never_leaks_the_credential_path(credential):
 
 @pytest.mark.live
 def test_the_real_cli_answers_with_a_structured_document(tmp_path):
-    if shutil.which("claude") is None:
-        pytest.skip("live test; the `claude` CLI is not on PATH")
-    credential_path = Path.home() / ".claude" / ".credentials.json"
-    if not credential_path.exists():
-        pytest.skip("live test; run `claude` once to log in first")
+    require_claude_login()
 
     provider = ClaudeCodeCliProvider()
     # The schema has to describe the same document the prompt asks for. This

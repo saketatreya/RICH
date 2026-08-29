@@ -13,11 +13,12 @@ locked dependency graph, and takes minutes. Run it deliberately:
         tests/test_closed_loop_live.py
 """
 
-import shutil
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+from liveutil import require_claude_login
 
 from richbuild.compiler import compile_architecture
 from richbuild.interview import AdaptiveInterview, InterviewState
@@ -282,10 +283,7 @@ def _execute(state, events=None):
 
 
 def _require_login():
-    if shutil.which("claude") is None:
-        pytest.skip("live test; the `claude` CLI is not on PATH")
-    if not (Path.home() / ".claude" / ".credentials.json").exists():
-        pytest.skip("live test; run `claude` once to log in first")
+    require_claude_login()
 
 
 @pytest.mark.live

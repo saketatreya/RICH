@@ -24,7 +24,7 @@ from .models import ApprovalGate
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 12
+STORE_SCHEMA_VERSION = 12
 _UNSET = object()
 
 _RUN_TRANSITIONS = {
@@ -90,7 +90,7 @@ class Revision:
 
 
 @dataclass(frozen=True, slots=True)
-class Artifact:
+class StoredArtifact:
     digest: str
     size: int
     media_type: str
@@ -519,9 +519,9 @@ class RichStore:
             current = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations"
             ).fetchone()["version"]
-            if current > SCHEMA_VERSION:
+            if current > STORE_SCHEMA_VERSION:
                 raise StoreError(
-                    f"database schema {current} is newer than supported {SCHEMA_VERSION}"
+                    f"database schema {current} is newer than supported {STORE_SCHEMA_VERSION}"
                 )
         finally:
             conn.close()
@@ -1027,7 +1027,7 @@ class RichStore:
         *,
         media_type: str = "application/octet-stream",
         metadata: Mapping[str, Any] | None = None,
-    ) -> Artifact:
+    ) -> StoredArtifact:
         digest = hashlib.sha256(content).hexdigest()
         target = self.artifact_root / digest[:2] / digest[2:]
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1065,7 +1065,7 @@ class RichStore:
             )
         return self.get_artifact(digest)
 
-    def get_artifact(self, digest: str) -> Artifact:
+    def get_artifact(self, digest: str) -> StoredArtifact:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM artifacts WHERE digest = ?", (digest,)
@@ -1076,7 +1076,7 @@ class RichStore:
         if not path.is_file():
             raise StoreError(f"artifact {digest!r} metadata exists but content is missing")
         _verify_artifact_file(path, digest, int(row["size"]))
-        return Artifact(
+        return StoredArtifact(
             digest=row["digest"],
             size=row["size"],
             media_type=row["media_type"],

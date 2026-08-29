@@ -3,6 +3,8 @@ import json
 
 import pytest
 
+from liveutil import require_claude_login
+
 from richbuild.architect import (
     LAYER_NODE_IDS,
     ROOT_NODE_ID,
@@ -679,13 +681,8 @@ def test_a_repair_instruction_carries_the_rejection_verbatim():
 
 
 def _require_login():
-    import shutil
-    from pathlib import Path
 
-    if shutil.which("claude") is None:
-        pytest.skip("live test; the `claude` CLI is not on PATH")
-    if not (Path.home() / ".claude" / ".credentials.json").exists():
-        pytest.skip("live test; run `claude` once to log in first")
+    require_claude_login()
 
 
 @pytest.mark.live

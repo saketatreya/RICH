@@ -530,3 +530,34 @@ def test_run_rejects_unknown_task_dependencies():
 
     with pytest.raises(ModelValidationError, match="unknown dependencies"):
         run.validate_records(tasks=(task,), evidence=evidence, artifacts=artifacts)
+
+
+@pytest.mark.parametrize(
+    ("owned_path", "reason"),
+    [
+        ("apps/we\x00b", "null byte"),
+        ("apps/web/", "trailing slash"),
+        ("apps/" + "w" * 256, "oversized component"),
+    ],
+)
+def test_owned_paths_are_held_to_the_same_rules_as_the_path_guard(owned_path, reason):
+    """models keeps its own copy of the path rules on purpose (it imports no
+    sibling), so the copy has to be the same rules: paths.py refuses a null
+    byte, a trailing slash and an oversized component, and so must this."""
+
+    from richbuild.models import ArchitectureNode, ModelValidationError, NodeKind
+
+    def node(path):
+        return ArchitectureNode(
+            id="node.web",
+            name="Web",
+            kind=NodeKind.UI,
+            contract_id="contract:web",
+            requirement_ids=("req.web",),
+            owned_paths=(path,),
+            ports=(),
+        )
+
+    assert node("apps/web").owned_paths == ("apps/web",)
+    with pytest.raises(ModelValidationError, match=reason):
+        node(owned_path)

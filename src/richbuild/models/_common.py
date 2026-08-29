@@ -546,6 +546,11 @@ def _unique_by_id(items: Iterable[Any], label: str) -> dict[str, Any]:
     return index
 
 
+# The filesystem's own limit, restated here rather than imported: see the note
+# inside _relative_owned_path on why this module reaches for no sibling.
+_MAX_PATH_COMPONENT_BYTES = 255
+
+
 def _relative_owned_path(value: str, label: str) -> str:
     # Deliberately not delegating to paths.safe_relative_path, which every
     # other caller in the package now shares: models.py is the bottom of the
@@ -556,6 +561,15 @@ def _relative_owned_path(value: str, label: str) -> str:
     normalized = _text(value, label)
     if "\\" in normalized:
         raise ModelValidationError(f"{label} must use POSIX '/' separators")
+    if "\x00" in normalized:
+        raise ModelValidationError(f"{label} cannot contain a null byte")
+    if normalized.endswith("/"):
+        raise ModelValidationError(f"{label} must not end with a trailing slash")
+    if any(
+        len(part.encode("utf-8")) > _MAX_PATH_COMPONENT_BYTES
+        for part in normalized.split("/")
+    ):
+        raise ModelValidationError(f"{label} has an oversized component")
     path = PurePosixPath(normalized)
     if path.is_absolute() or normalized in {".", ".."} or ".." in path.parts:
         raise ModelValidationError(f"{label} must be a normalized relative path")

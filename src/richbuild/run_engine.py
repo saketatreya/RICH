@@ -442,7 +442,11 @@ class RunEngineConfig:
     """Bounded model, scheduler, and verification policy."""
 
     max_workers: int = 1
-    max_task_attempts: int = 2
+    # Three, not two. A first attempt cannot have seen any gate output; the
+    # second is the first that can, and the first live build needed a third to
+    # act on property-gate output it had only just been shown. Two attempts
+    # gave a task exactly one chance to read what failed it.
+    max_task_attempts: int = 3
     max_provider_attempts: int = 1
     task_timeout_seconds: float = 600.0
     retry_backoff_seconds: float = 0.0
