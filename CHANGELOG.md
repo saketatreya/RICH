@@ -18,6 +18,13 @@ tree a wheel could not install, so the program's releases are numbered 2.0,
   and runs everything downstream again. Owners out of attempts withhold the
   retry instead of spending it on the root. Step messages lose their ANSI
   colour codes.
+- **A seccomp profile for the image.** `docker/seccomp.json` is Docker's
+  default profile with only the namespace and mount syscalls Bubblewrap uses
+  admitted; CI runs the container with it and requires `rich doctor` green.
+- **A failed run names the component that used every attempt** and offers
+  "Rebuild ‹node› and build again" as one act, beside "Build again as is".
+- **The README carries the customer's path**: install, first build, getting
+  it out, amending.
 - **A container image.** `docker build -t rich .` produces an Ubuntu 24.04
   image with Bubblewrap, the pinned Node and pnpm (in the Corepack cache the
   executor reads), Chromium's system libraries and the wheel; state lives on

@@ -151,7 +151,8 @@ run as a timeline), `control_plane.py` / `api.py` / `cli.py` / `runtime.py`
 
 ## The program and the board
 
-`docs/program.md` is the approved program: three releases, twenty-two milestones,
+`docs/customer-drive.md` tracks the customer scenario step by step against what
+holds today, with what proved it. `docs/program.md` is the approved program: three releases, twenty-two milestones,
 one customer scenario as the definition of done. `docs/board/cards/*.md` is the
 tracker — one file per card — and `docs/board.html` is rendered from it, never
 edited. Move a card when work starts, lands (with its commit), blocks, or a
