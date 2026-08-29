@@ -582,7 +582,7 @@ def move(card_id: str, status: str, *, sha: str = "", why: str = "") -> None:
     _write_front_matter(path, updates)
 
 
-def new(card_id: str, *, title: str, milestone: str, track: str, status: str = "next", body: str = "", tag: str = "") -> Path:
+def new(card_id: str, *, title: str, milestone: str, track: str, status: str = "next", body: str = "", tag: str = "", sha: str = "") -> Path:
     path = CARDS / f"{card_id}.md"
     if path.exists():
         raise BoardError(f"card {card_id!r} already exists")
@@ -591,6 +591,13 @@ def new(card_id: str, *, title: str, milestone: str, track: str, status: str = "
         meta["tag"] = tag
     if status == "doing":
         meta["started"] = _today()
+    if status == "done":
+        # A card born done -- work that shipped before its card was written --
+        # still needs the commit that shipped it and the day it did.
+        if not sha:
+            raise BoardError("a card born done needs --sha")
+        meta["sha"] = sha
+        meta["finished"] = _today()
     front = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, width=1000).strip()
     path.write_text(f"---\n{front}\n---\n\n{body.strip()}\n", encoding="utf-8")
     return path
@@ -618,6 +625,7 @@ def main(argv: list[str] | None = None) -> int:
     nw.add_argument("--status", default="next", choices=[s for s in STATUSES if s != "decision"])
     nw.add_argument("--body", default="")
     nw.add_argument("--tag", default="")
+    nw.add_argument("--sha", default="")
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
@@ -629,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "move":
             move(args.card_id, args.status, sha=args.sha, why=args.why)
         if args.command == "new":
-            new(args.card_id, title=args.title, milestone=args.milestone, track=args.track, status=args.status, body=args.body, tag=args.tag)
+            new(args.card_id, title=args.title, milestone=args.milestone, track=args.track, status=args.status, body=args.body, tag=args.tag, sha=args.sha)
         health = None
         if args.command == "verify":
             health = verify()
