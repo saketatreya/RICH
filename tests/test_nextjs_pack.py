@@ -762,3 +762,18 @@ def test_exercised_pages_name_the_page_files_a_scenario_opens():
         own,
     )
     assert exercised_pages(project, scenarios["scenario.none"]) == ()
+
+
+def test_the_scaffolded_pages_say_who_replaces_them():
+    """Two live builds left the requirement page untouched: the worker read the
+    scaffold as generated scaffolding. The placeholder now says otherwise in
+    its first line, in words the worker sees in current_files."""
+    from richbuild.target_packs.nextjs import _route_segments
+
+    files = _approved_pack().render_files()
+    project = _approved_project()
+    route = _route_segments(tuple(r.id for r in project.requirements))[project.requirements[0].id]
+    page = files[f"apps/web/src/app/capabilities/{route}/page.tsx"].decode()
+    assert page.startswith("// Placeholder rendered by RICH")
+    assert "replaces this file with the working page" in page
+    assert files["apps/web/src/app/page.tsx"].decode().startswith("// Placeholder rendered by RICH")

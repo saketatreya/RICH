@@ -710,6 +710,8 @@ def _intent_files(
             "}\n"
         ),
         "apps/web/src/app/page.tsx": (
+            "// Placeholder rendered by RICH. The component that owns apps/web may\n"
+            "// replace this page; the approved scenarios say what it must show.\n"
             f'import {{ buildWelcomeMessage }} from "{packages["domain"]}";\n'
             f'import {{ ButtonLink }} from "{packages["ui"]}";\n'
             "\n"
@@ -759,6 +761,10 @@ def _intent_files(
             "}\n"
         )
         files[f"apps/web/src/app/capabilities/{route}/page.tsx"] = (
+            "// Placeholder rendered by RICH from the approved intent. The component\n"
+            "// that owns apps/web replaces this file with the working page: every\n"
+            "// label, button and text the approved scenarios for this requirement\n"
+            "// name must exist here. Keep the requirement's title and statement.\n"
             f'import {{ executeApprovedCapability }} from "{packages["domain"]}";\n'
             "\n"
             f"const approvedScenarios = {_typescript(scenario_contracts)};\n"

@@ -216,13 +216,15 @@ def test_schema_is_strict_and_only_authorizes_create_or_replace():
 def test_default_prompt_and_cost_reservations_are_internally_coherent():
     limits = coding.DEFAULT_LIMITS
 
-    assert limits.max_prompt_bytes <= limits.max_input_tokens
-    assert limits.max_prompt_bytes == 24_000
+    # four bytes of prompt is about a token: the byte ceiling must fit the
+    # token budget the provider reserves for the attempt
+    assert limits.max_prompt_bytes <= limits.max_input_tokens * 4
+    assert limits.max_prompt_bytes == 48_000
     assert limits.max_input_tokens == 32_000
     assert limits.max_output_tokens == 8_000
     assert limits.max_cost_usd == Decimal("0.208")
     with pytest.raises(ValueError, match="cannot exceed max_input_tokens"):
-        CodingLimits(max_prompt_bytes=16_001, max_input_tokens=16_000)
+        CodingLimits(max_prompt_bytes=16_001, max_input_tokens=4_000)
 
 
 def test_prompt_contains_only_approved_task_context_dependencies_and_current_files(
@@ -1376,6 +1378,9 @@ def test_a_scenario_names_the_pages_the_task_owns(tmp_path):
     context = json.loads(with_pages.user_prompt[with_pages.user_prompt.index("{"):])
     scenarios = {s["id"]: s for s in context["approved_intent"]["acceptance_scenarios"]}
     assert scenarios[scenario_id]["pages"] == ["apps/web/note.tsx"], "only the pages this task owns"
+    assert context["pages_to_write"] == ["apps/web/note.tsx"]
+    assert with_pages.user_prompt.startswith("Deliverables, in order. 1. Rewrite these placeholder pages")
+    assert "apps/web/note.tsx" in with_pages.user_prompt.split("Produce the smallest")[0]
     assert "runs its browser steps against those files" in with_pages.system_prompt
 
     without = build_task_prompt(
@@ -1388,3 +1393,5 @@ def test_a_scenario_names_the_pages_the_task_owns(tmp_path):
     )
     plain = json.loads(without.user_prompt[without.user_prompt.index("{"):])
     assert all("pages" not in s for s in plain["approved_intent"]["acceptance_scenarios"])
+    assert plain["pages_to_write"] == []
+    assert without.user_prompt.startswith("Produce the smallest")

@@ -81,7 +81,12 @@ class CodingLimits:
     # Leave room inside the 32k input reservation for the structured-output
     # schema and trusted provider framing.  The provider performs the final
     # canonical-envelope bound before any HTTP request is sent.
-    max_prompt_bytes: int = 24_000
+    # A component that owns apps/web sees every scaffolded page in
+    # current_files; its first prompt ran 22 KB and the reopened retry, with
+    # the failure it was shown, 29 KB against a 24 KB ceiling -- two dead
+    # attempts in one second. 48 KB is about 12k tokens, well inside the
+    # per-attempt input budget.
+    max_prompt_bytes: int = 48_000
     max_input_tokens: int = 32_000
     max_output_tokens: int = 8_000
     # Exact worst-case reservation for the default 32k/8k token request at the
@@ -124,7 +129,10 @@ class CodingLimits:
                 "max_dependency_summary_total_bytes cannot be smaller than "
                 "max_dependency_summary_bytes"
             )
-        if self.max_prompt_bytes > self.max_input_tokens:
+        # Bytes against tokens: four bytes of prompt is roughly a token, so a
+        # prompt the byte limit admits must fit the token budget the provider
+        # reserves for it.
+        if self.max_prompt_bytes > self.max_input_tokens * 4:
             raise ValueError(
                 "max_prompt_bytes cannot exceed max_input_tokens"
             )
@@ -1625,8 +1633,33 @@ def build_task_prompt(
             "contract.\n"
         )
     )
+    pages_to_write = sorted(
+        {
+            page
+            for scenario in context["approved_intent"]["acceptance_scenarios"]
+            for page in scenario.get("pages", ())
+        }
+    )
+    # First, because two live builds produced the operations module and left
+    # the pages untouched: what the browser scenarios need is the deliverable
+    # a worker skips when it is one field among many.
+    page_guidance = (
+        ""
+        if not pages_to_write
+        else (
+            "Deliverables, in order. 1. Rewrite these placeholder pages so the "
+            "approved scenarios pass against them: "
+            + ", ".join(pages_to_write)
+            + ". Each scenario in acceptance_scenarios lists its steps and the pages "
+            "they run on; a label, button or text a step names must exist on that "
+            "page, with the same words. The scaffolded content of a page is a "
+            "placeholder, not a constraint. 2. Everything else this task owns.\n"
+        )
+    )
+    context["pages_to_write"] = pages_to_write
     user_prompt = (
-        "Produce the smallest coherent source change for this task. The control "
+        page_guidance
+        + "Produce the smallest coherent source change for this task. The control "
         "plane will validate and apply it, and separate workers will verify it.\n"
         + surface_guidance
         + retry_guidance
