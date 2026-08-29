@@ -197,12 +197,12 @@
     </p>
 
     <div class="health">
-      <div class="stat ok"><b>662</b><span>tests pass</span></div>
+      <div class="stat ok"><b>667</b><span>tests pass, at last check</span></div>
       <div class="stat ok"><b>3.10–3.14</b><span>python, all verified</span></div>
-      <div class="stat ok"><b>green</b><span>ruff · tsc · build</span></div>
       <div class="stat ok"><b>9</b><span>bugs found by one live test</span></div>
+      <div class="stat ok"><b>4</b><span>found by driving the product</span></div>
       <div class="stat"><b>−10k</b><span>net lines this pass</span></div>
-      <div class="stat"><b>0</b><span>known defects</span></div>
+      <div class="stat ok"><b>0</b><span>unverified changes in the tree</span></div>
     </div>
   </header>
 
@@ -210,7 +210,31 @@
 
     <!-- ── DONE ─────────────────────────────────────── -->
     <div class="col done">
-      <div class="col-head"><span class="dot"></span><h2>Shipped</h2><span class="n">42</span></div>
+      <div class="col-head"><span class="dot"></span><h2>Shipped</h2><span class="n">46</span></div>
+
+      <article class="card">
+        <h3>A slow step says how long it has been slow</h3>
+        <p>Drafting an architecture is one bounded model call and takes minutes; the button said "Designing…" for all of them, indistinguishable from a hang. Now an elapsed count and an honest range — <b>no progress bar</b>, because RICH has no estimate and a bar over an unknown duration is a lie. Written blind during the tooling outage, then verified: typecheck, 667 tests, and a production build all clean.</p>
+        <div class="meta"><span class="tag canvas">canvas</span><span class="sha">5e09f7c</span></div>
+      </article>
+
+      <article class="card">
+        <h3>The architect was unreachable from the product</h3>
+        <p>Driving it as a user: create, interview, approve, <em>Draft</em> → <code>source: planner</code> in 17ms. No model call. The feature measured at 6/6 was not wired into the only surface anyone uses — a regression from retiring the old canvas, which did wire it.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">9188357</span></div>
+      </article>
+
+      <article class="card">
+        <h3>One route for designing and for building</h3>
+        <p>The architect defaulted to the subscription route and the builder to the API one, so a host with a <code>claude</code> login could design an architecture and then fail to build it. Now one explicit choice, printed in the banner, still never substituted.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">c6895d4</span></div>
+      </article>
+
+      <article class="card">
+        <h3>A failed attempt says why</h3>
+        <p>"handler raised ProviderFailure" with the reason discarded — the event recorded the reservation, the usage and the retryable flag, but not what went wrong. Now a bounded reason, capped so a chatty upstream cannot push a response body into the event stream.</p>
+        <div class="meta"><span class="tag engine">engine</span><span class="sha">c6895d4</span></div>
+      </article>
 
       <article class="card">
         <h3>Provider conformance suite</h3>
@@ -461,13 +485,7 @@
 
     <!-- ── DOING ────────────────────────────────────── -->
     <div class="col doing">
-      <div class="col-head"><span class="dot"></span><h2>In progress</h2><span class="n">3</span></div>
-
-      <article class="card">
-        <h3>Change locality, end to end</h3>
-        <p>A live test that builds, amends a requirement the domain layer does not serve, and asserts domain replays while the rest is rewritten. Four fixture bugs found and fixed; the first build now lands on its third attempt. Running.</p>
-        <div class="meta"><span class="tag engine">engine</span></div>
-      </article>
+      <div class="col-head"><span class="dot"></span><h2>In progress</h2><span class="n">2</span></div>
 
       <article class="card">
         <h3>Three attempts, not two</h3>
