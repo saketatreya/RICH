@@ -255,6 +255,55 @@ def verify() -> dict[str, Any]:
     return record
 
 
+def _github_repository() -> str | None:
+    """owner/name from the origin remote, or None when there is no GitHub remote."""
+
+    try:
+        url = _git("remote", "get-url", "origin")
+    except Exception:  # noqa: BLE001 - no remote is a legitimate state
+        return None
+    found = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", url.strip())
+    return f"{found.group(1)}/{found.group(2)}" if found else None
+
+
+def ci_status(branch: str = "main", *, timeout: float = 6.0) -> dict[str, str]:
+    """What GitHub Actions last concluded on the branch -- asked, never assumed.
+
+    The strip's other numbers are measured on this machine; a workflow GitHub
+    refuses to start fails with no jobs and no log, and nothing local can see
+    that. So the board asks. Unreachable is reported as unknown, in words.
+    """
+
+    repository = _github_repository()
+    if repository is None:
+        return {"state": "unknown", "detail": "no GitHub remote"}
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repository}/actions/runs?branch={branch}&per_page=1",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "rich-board"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            document = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {"state": "unknown", "detail": f"GitHub unreachable: {type(exc).__name__}"}
+    runs = document.get("workflow_runs") or []
+    if not runs:
+        return {"state": "unknown", "detail": "no runs yet"}
+    run = runs[0]
+    sha = str(run.get("head_sha", ""))[:7]
+    if run.get("status") != "completed":
+        return {"state": "running", "detail": f"{run.get('status')} at {sha}", "sha": sha}
+    conclusion = str(run.get("conclusion") or "unknown")
+    return {
+        "state": "green" if conclusion == "success" else "red",
+        "detail": f"{conclusion} at {sha}",
+        "sha": sha,
+    }
+
+
 def _ci_python_matrix() -> str:
     workflow = ROOT / ".github" / "workflows" / "ci.yml"
     if not workflow.exists():
@@ -267,6 +316,19 @@ def _ci_python_matrix() -> str:
 
 
 # ── rendering ──────────────────────────────────────────────────────────────
+
+
+def _ci_stat(ci: dict[str, str] | None) -> str:
+    """The strip's CI cell: GitHub's word for main, or the admission nobody asked."""
+
+    if ci is None:
+        return '<div class="stat warn"><b>?</b><span>CI not asked</span></div>'
+    classes = {"green": "ok", "red": "bad", "running": "warn", "unknown": "warn"}
+    word = {"green": "green", "red": "RED", "running": "running", "unknown": "unknown"}[ci["state"]]
+    return (
+        f'<div class="stat {classes[ci["state"]]}"><b>{word}</b>'
+        f'<span>CI on main · {html.escape(ci["detail"])}</span></div>'
+    )
 
 
 def _inline(text: str) -> str:
@@ -344,7 +406,13 @@ def _sort_key(card: Card) -> tuple[Any, ...]:
     return (card.finished or "", card.order, card.title)
 
 
-def render(cards: list[Card], *, health: dict[str, Any] | None, out: Path = PAGE) -> str:
+def render(
+    cards: list[Card],
+    *,
+    health: dict[str, Any] | None,
+    out: Path = PAGE,
+    ci: dict[str, str] | None = None,
+) -> str:
     problems = check(cards, verify_git=False)
     if problems:
         raise BoardError("\n".join(problems))
@@ -384,7 +452,8 @@ def render(cards: list[Card], *, health: dict[str, Any] | None, out: Path = PAGE
     strip = (
         f'<div class="health">{tests}'
         f'<div class="stat ok"><b>{_ci_python_matrix()}</b><span>python in CI</span></div>'
-        f'<div class="stat"><b>{len(program_done)}/{len(work) - len(earlier)}</b><span>program cards shipped</span></div>'
+        + _ci_stat(ci)
+        + f'<div class="stat"><b>{len(program_done)}/{len(work) - len(earlier)}</b><span>program cards shipped</span></div>'
         f'<div class="stat"><b>{len(doing)}</b><span>in progress</span></div>'
         f'<div class="stat {"ok" if dirty == 0 else "warn"}"><b>{dirty}</b><span>uncommitted files at render</span></div>'
         f'<div class="stat"><b>{head}</b><span>HEAD</span></div></div>'
@@ -644,7 +713,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(health, indent=2))
         elif HEALTH.exists():
             health = json.loads(HEALTH.read_text(encoding="utf-8"))
-        render(load_cards(), health=health)
+        render(load_cards(), health=health, ci=ci_status())
         print(f"rendered {PAGE.relative_to(ROOT)}")
         return 0
     except BoardError as exc:
