@@ -22,6 +22,7 @@ import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
 import PreviewPanel from './PreviewPanel'
 import Inspector from './Inspector'
+import Waiting from './Waiting'
 import IntentStage from './intent/IntentStage'
 import { ScenarioList } from './intent/Editors'
 import type { IntentDraft } from './intent/types'
@@ -150,6 +151,7 @@ export default function ControlPlane() {
   )
   const [packageScope, setPackageScope] = useState('@rich-app')
   const [busy, setBusy] = useState('')
+  const [busySince, setBusySince] = useState(() => Date.now())
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
 
@@ -163,6 +165,9 @@ export default function ControlPlane() {
 
   const runAction = async (label: string, action: () => Promise<void>) => {
     setBusy(label)
+    // Recorded so a slow step can say how long it has been slow for. Some of
+    // these are one bounded model call and take minutes.
+    setBusySince(Date.now())
     setError('')
     setNotice('')
     try {
@@ -764,6 +769,13 @@ export default function ControlPlane() {
                   <span className="v2-eyebrow">Compiler stage</span>
                   <h2>Plan owned architecture boundaries</h2>
                   <p>The Next.js target pack will derive nodes, typed ports, dependencies, and requirement traces.</p>
+                  {busy === 'draft-architecture' && (
+                    <Waiting
+                      since={busySince}
+                      what="The architect is designing the decomposition"
+                      typical="one bounded model call, usually 1–3 minutes"
+                    />
+                  )}
                 </div>
                 <div className="v2-draft-actions">
                   <button className="primary" disabled={!!busy} onClick={() => draftArchitecture()}>
@@ -845,6 +857,13 @@ export default function ControlPlane() {
                   <span className="v2-eyebrow">Not what you wanted?</span>
                   <h2>Ask for a different decomposition</h2>
                   <p>Rejecting alone leaves nothing to build. A new draft can be reviewed and applied as the next revision.</p>
+                  {busy === 'draft-architecture' && (
+                    <Waiting
+                      since={busySince}
+                      what="The architect is designing an alternative"
+                      typical="one bounded model call, usually 1–3 minutes"
+                    />
+                  )}
                 </div>
                 <button disabled={!!busy} onClick={() => draftArchitecture()}>
                   {busy === 'draft-architecture' ? 'Designing…' : 'Draft an alternative →'}
