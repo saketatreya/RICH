@@ -284,19 +284,12 @@ def test_persisted_overage_survives_terminal_sink_failpoint():
 
 
 def test_shared_provider_helpers_refuse_what_each_copy_used_to():
-    from richbuild.providers import (
-        canonical_request_bytes,
-        non_negative_int,
-    )
+    from richbuild.providers import non_negative_int
 
     assert non_negative_int(0) == 0
     for bad in (True, False, -1, 1.0, "1", None):
         with pytest.raises(ValueError):
             non_negative_int(bad)
-
-    assert canonical_request_bytes({"b": 1, "a": 2}) == b'{"a":2,"b":1}'
-    with pytest.raises(ValueError):
-        canonical_request_bytes({"a": float("nan")})
 
 
 def test_the_request_id_reader_differs_only_in_which_header_it_trusts():

@@ -27,6 +27,7 @@ import threading
 import time
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 
+from .canonical import canonical_json_bytes
 from .canonical import canonical_json_text as _canonical_json
 from .paths import UnsafePath, is_owned, safe_relative_path
 from .compiler import CompiledTask, compile_architecture
@@ -466,7 +467,7 @@ class SourceTransactionJournal:
             "generated_artifact_digest": generated_artifact_digest,
             "files": files,
         }
-        return (_canonical_json(document) + "\n").encode("utf-8")
+        return canonical_json_bytes(document)
 
 
 class SourceCommit:
@@ -1613,7 +1614,7 @@ def generated_source_artifact_bytes(
             for item in sorted(bundle.files, key=lambda value: value.path)
         ],
     }
-    return (_canonical_json(document) + "\n").encode("utf-8")
+    return canonical_json_bytes(document)
 
 
 

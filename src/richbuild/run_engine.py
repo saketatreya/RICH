@@ -1162,7 +1162,7 @@ class _VerifiedCodingHandler:
                 ),
             }
 
-        artifact_content = _canonical_json_bytes(result_document)
+        artifact_content = canonical_json_bytes(result_document)
         log_digest = hashlib.sha256(artifact_content).hexdigest()
         scenario_coverage = (
             observed_scenario_ids
@@ -1635,7 +1635,7 @@ class RunEngine:
                 ),
             }
             artifact = self.store.put_artifact(
-                _canonical_json_bytes(document),
+                canonical_json_bytes(document),
                 media_type=(
                     "application/vnd.rich.workspace-preparation+json"
                 ),
@@ -2749,13 +2749,6 @@ def _is_owned(
     path: PurePosixPath, owned_paths: Sequence[PurePosixPath]
 ) -> bool:
     return is_owned(path, owned_paths)
-
-
-def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
-    # Coerced here rather than in the shared encoder: json.dumps serializes only
-    # dict, and widening the shared form to accept any Mapping would quietly
-    # change what it does with everything else.
-    return canonical_json_bytes(dict(value))
 
 
 def _validated_execution_result(

@@ -10,7 +10,6 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 from uuid import uuid4
 
 from .budget import BudgetLedger, ReservationExceeded, RunBudget, Usage
-from .canonical import canonical_json_text
 
 
 MODEL_ATTEMPT_EVENT_SCHEMA = "rich.model-attempt/v1"
@@ -602,9 +601,11 @@ def _usage_within(actual: Usage, maximum: Usage) -> bool:
 
 # ── Shared provider-adapter helpers ──────────────────────────────────
 # Each adapter is its own trust boundary and keeps its own parsing, but these
-# three were byte-identical copies doing nothing vendor-specific. The only real
+# were byte-identical copies doing nothing vendor-specific. The only real
 # difference between the request-id readers was which header the API answers
-# with, so that is the parameter rather than a second function.
+# with, so that is the parameter rather than a second function. The request
+# envelope is measured with canonical.canonical_json_bytes -- one encoding,
+# never a provider-side second one.
 
 SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
@@ -615,12 +616,6 @@ def non_negative_int(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError("value must be a non-negative integer")
     return value
-
-
-def canonical_request_bytes(payload: Mapping[str, Any]) -> bytes:
-    """Serialize the exact request envelope used for the input upper bound."""
-
-    return canonical_json_text(payload).encode("utf-8")
 
 
 def safe_request_id(

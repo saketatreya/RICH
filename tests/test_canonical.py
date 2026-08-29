@@ -6,7 +6,6 @@ import pytest
 
 from richbuild.canonical import canonical_json_bytes, canonical_json_text
 import richbuild.coding as coding
-import richbuild.run_engine as run_engine
 import richbuild.scheduler as scheduler
 import richbuild.store as store
 
@@ -20,7 +19,6 @@ def test_every_producer_shares_one_encoding():
     assert coding._canonical_json(document) == canonical_json_text(document)
     assert store._canonical_json(document) == canonical_json_text(document)
     assert scheduler._canonical_json(document) == canonical_json_bytes(document)
-    assert run_engine._canonical_json_bytes(document) == canonical_json_bytes(document)
 
 
 def test_the_form_is_sorted_tight_unescaped_and_newline_terminated():

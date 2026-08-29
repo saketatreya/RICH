@@ -545,3 +545,28 @@ def test_every_token_rate_must_be_a_finite_non_negative_decimal(field):
     for bad in (Decimal("-1"), Decimal("NaN"), 2.5, None):
         with pytest.raises((ValueError, TypeError)):
             _rates(**{field: bad})
+
+
+def test_the_input_bound_measures_the_canonical_envelope_bytes():
+    """The envelope is counted in canonical.canonical_json_bytes -- the one
+    encoding, trailing newline included -- plus the framing allowance. A
+    reservation exactly that large is accepted; one byte less is refused
+    before anything is sent. The providers used to carry a second encoder
+    without the newline for this measurement."""
+
+    from richbuild.anthropic_provider import ANTHROPIC_INPUT_FRAMING_TOKEN_ALLOWANCE
+    from richbuild.canonical import canonical_json_bytes
+
+    transport = RecordingTransport(_response(_success()))
+    provider = AnthropicMessagesProvider("key", transport=transport)
+    exact = (
+        len(canonical_json_bytes(provider._payload(_request())))
+        + ANTHROPIC_INPUT_FRAMING_TOKEN_ALLOWANCE
+    )
+
+    with pytest.raises(ProviderFailure, match="exceeds its input token reservation"):
+        provider.generate(_request(max_input_tokens=exact - 1))
+    assert transport.calls == [], "refused before any request was sent"
+
+    provider.generate(_request(max_input_tokens=exact))
+    assert len(transport.calls) == 1

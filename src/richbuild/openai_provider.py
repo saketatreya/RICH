@@ -21,11 +21,11 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib import error, parse, request as urllib_request
 
 from .budget import Usage
+from .canonical import canonical_json_bytes
 from .providers import (
     ModelRequest,
     ModelResponse,
     ProviderFailure,
-    canonical_request_bytes as _canonical_request_bytes,
     non_negative_int as _non_negative_int,
     safe_request_id,
 )
@@ -268,7 +268,7 @@ class OpenAIResponsesProvider:
             )
         try:
             input_upper_bound = (
-                len(_canonical_request_bytes(self._payload(request)))
+                len(canonical_json_bytes(self._payload(request)))
                 + OPENAI_INPUT_FRAMING_TOKEN_ALLOWANCE
             )
         except (TypeError, ValueError):
