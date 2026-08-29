@@ -19,10 +19,11 @@ import socket
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from time import monotonic
-from typing import Any, Callable, Mapping, Protocol
-from urllib import error, parse, request as urllib_request
+from typing import Any, Callable, Mapping
+from urllib import parse
 
 from .budget import Usage
+from ._http import HTTPResponse, MAX_RESPONSE_BYTES, Transport, UrllibTransport
 from .canonical import canonical_json_bytes
 from .providers import (
     ModelRequest,
@@ -34,7 +35,6 @@ from .providers import (
 
 
 _ONE_MILLION = Decimal(1_000_000)
-_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 ANTHROPIC_API_VERSION = "2023-06-01"
 # The Messages API does not expose the tokenizer-visible framing around its
 # system prompt, message envelope, and structured-output grammar.  Account for
@@ -119,71 +119,11 @@ class AnthropicTokenRates:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class AnthropicHTTPResponse:
-    status_code: int
-    body: bytes
-    headers: Mapping[str, str] | None = None
-
-    def __post_init__(self) -> None:
-        if not 100 <= self.status_code <= 599:
-            raise ValueError("HTTP status code is out of range")
-        if not isinstance(self.body, bytes):
-            raise TypeError("HTTP response body must be bytes")
-
-
-class AnthropicTransport(Protocol):
-    """Trusted HTTP boundary, injectable for deterministic tests."""
-
-    def post_json(
-        self,
-        *,
-        url: str,
-        headers: Mapping[str, str],
-        payload: Mapping[str, Any],
-        timeout_seconds: float,
-    ) -> AnthropicHTTPResponse:
-        ...
-
-
-class _UrllibTransport:
-    def post_json(
-        self,
-        *,
-        url: str,
-        headers: Mapping[str, str],
-        payload: Mapping[str, Any],
-        timeout_seconds: float,
-    ) -> AnthropicHTTPResponse:
-        encoded = json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
-        http_request = urllib_request.Request(
-            url=url,
-            data=encoded,
-            headers=dict(headers),
-            method="POST",
-        )
-        try:
-            with urllib_request.urlopen(
-                http_request, timeout=timeout_seconds
-            ) as response:
-                body = _bounded_read(response)
-                return AnthropicHTTPResponse(
-                    status_code=int(response.status),
-                    body=body,
-                    headers=dict(response.headers.items()),
-                )
-        except error.HTTPError as exc:
-            # HTTPError is also a file-like response.  Preserve only the status and
-            # bytes for internal classification; its body never reaches an exception.
-            body = _bounded_read(exc)
-            return AnthropicHTTPResponse(
-                status_code=int(exc.code),
-                body=body,
-                headers=dict(exc.headers.items()) if exc.headers else {},
-            )
-
+# The response envelope and the transport are not vendor-specific; the one
+# definition is in _http. The names stay so that code and tests speaking of
+# an Anthropic response keep doing so.
+AnthropicHTTPResponse = HTTPResponse
+AnthropicTransport = Transport
 
 ApiKeySource = str | Callable[[], str]
 
@@ -214,7 +154,7 @@ class AnthropicMessagesProvider:
             for rate in self._rates.values()
         ):
             raise TypeError("rates must map model identifiers to AnthropicTokenRates")
-        self._transport = transport or _UrllibTransport()
+        self._transport = transport or UrllibTransport()
         self._endpoint = f"{base_url.rstrip('/')}/messages"
         self._effort = effort
 
@@ -479,7 +419,7 @@ class AnthropicMessagesProvider:
 
     @staticmethod
     def _decode_document(body: bytes) -> Mapping[str, Any]:
-        if len(body) > _MAX_RESPONSE_BYTES:
+        if len(body) > MAX_RESPONSE_BYTES:
             raise ProviderFailure(
                 "Anthropic response exceeded the maximum accepted size",
                 retryable=True,
@@ -610,14 +550,6 @@ class AnthropicMessagesProvider:
             or parsed.fragment
         ):
             raise ValueError("Anthropic base URL must be an HTTPS origin/path")
-
-
-def _bounded_read(response: Any) -> bytes:
-    body = response.read(_MAX_RESPONSE_BYTES + 1)
-    if len(body) > _MAX_RESPONSE_BYTES:
-        # This exception is sanitized by the provider's network boundary.
-        raise ValueError("response too large")
-    return body
 
 
 def _safe_request_id(value, headers):
