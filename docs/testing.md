@@ -61,7 +61,17 @@ The delivery board is part of the tree, so its consistency is part of the suite:
 `tests/test_board.py` holds `docs/board/cards/` to the rules in `tools/board.py`, and
 `python tools/board.py verify` records a measured health strip at a commit.
 
-The checked-in CI workflow runs Python lint plus the offline suite, then installs
-the Canvas from its lockfile, audits dependencies, typechecks, and builds the
-production frontend. The host-specific Bubblewrap/Chromium conformance gate stays
-explicit because shared CI runners do not provide a uniform user-namespace policy.
+The checked-in CI workflow (`.github/workflows/ci.yml`) runs, on every push:
+Python lint plus the offline suite on 3.10–3.14 (with Bubblewrap installed and
+Ubuntu's AppArmor restriction on unprivileged user namespaces lifted, because
+the runner is a 24.04 host); the wheel built with `tools/build_wheel.py`,
+installed into an empty venv that must import, print its version and serve the
+bundled canvas; the container image, run with `docker/seccomp.json`, whose
+`rich doctor` must be green (its verdict under Docker's default profile is
+recorded, not required); the canvas's typecheck, vitest suite and build; and
+the M1 and M6 drives in Chromium against `rich serve --route none`. A tag
+`v*` runs `release.yml`: the wheel, the image on ghcr.io, and a GitHub
+release carrying the wheel, refused when `pyproject.toml` disagrees with the
+tag. The workflow files are checked with `actionlint`; a workflow GitHub
+refuses to start fails with no jobs and no log, which is how a red CI hid for
+a day.

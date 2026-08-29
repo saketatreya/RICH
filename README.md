@@ -225,8 +225,16 @@ checkpoint, from any surface.
 ruff check .                     # lint
 python -m pytest                 # the offline suite; never calls a model
 npm --prefix web run typecheck
+npm --prefix web test            # the canvas: describeStep against the shared sentence fixture, and more
 npm --prefix web run dev         # hot reload; proxies /v1 to the Python server
+npm --prefix web run drive:m1    # a real browser against `rich serve` (also m2, m3, m4, m6)
+python tools/board.py verify     # ruff + pytest + tsc → the board's health strip
 ```
+
+CI runs the offline suite on Python 3.10–3.14, builds the wheel and installs it
+into an empty venv that must serve the canvas, builds the image and asks the
+container's `rich doctor`, typechecks and tests the canvas, and drives M1 and M6
+in Chromium — on every push.
 
 `CLAUDE.md` carries the working conventions and the invariants that must not be
 weakened. `docs/architecture.md` is the operating contract — read it before
