@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import html
 import json
+import os
 import re
 import subprocess
 import sys
@@ -194,6 +196,37 @@ def _run(cmd: list[str]) -> tuple[int, str]:
     return result.returncode, (result.stdout + result.stderr)
 
 
+def _working_tree() -> str:
+    """The git tree of the working directory as it is now, index untouched.
+
+    Verification runs before the commit that carries its result, so a commit id
+    cannot say whether what was verified is what HEAD holds. A tree written from
+    a throwaway index can: it covers tracked changes and untracked files alike,
+    respects .gitignore, and leaves the real index alone.
+    """
+
+    index = ROOT / ".rich" / "board.index"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+    for cmd in (["git", "read-tree", "HEAD"], ["git", "add", "-A"]):
+        subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, check=True)
+    tree = subprocess.run(
+        ["git", "write-tree"], cwd=ROOT, env=env, capture_output=True, text=True, check=True
+    )
+    return tree.stdout.strip()
+
+
+def _fingerprint(tree: str) -> str:
+    """What the gates saw: the tree, minus the board's own rendered files."""
+
+    listing = [
+        line
+        for line in _git("ls-tree", "-r", tree).splitlines()
+        if not line.endswith("\tdocs/board.html") and "\tdocs/board/" not in line
+    ]
+    return hashlib.sha256("\n".join(listing).encode("utf-8")).hexdigest()[:12]
+
+
 def verify() -> dict[str, Any]:
     """Run the offline gates and record what they said, at which commit."""
 
@@ -209,6 +242,7 @@ def verify() -> dict[str, Any]:
     tsc_code, _ = _run(["npm", "--prefix", "web", "run", "typecheck"])
     record = {
         "commit": _git("rev-parse", "--short", "HEAD"),
+        "fingerprint": _fingerprint(_working_tree()),
         "verified_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "ruff_ok": ruff_code == 0,
         "pytest_ok": pytest_code == 0,
@@ -328,7 +362,11 @@ def render(cards: list[Card], *, health: dict[str, Any] | None, out: Path = PAGE
     earlier = [c for c in done if c.milestone == "pre"]
 
     if health:
-        stale = health.get("commit") != head
+        # Stale means the source differs from what was verified -- judged by
+        # content, because the verifying run always precedes the commit that
+        # records it, and a commit id would call its own tree stale.
+        recorded = health.get("fingerprint")
+        stale = recorded is None or recorded != _fingerprint(_working_tree())
         failed = int(health.get("failed", 0)) or (0 if health.get("pytest_ok") else 1)
         tests_class = "bad" if failed else ("warn" if stale else "ok")
         tests_label = (
