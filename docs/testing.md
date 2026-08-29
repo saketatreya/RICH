@@ -48,15 +48,18 @@ migrations lazily require `psycopg`, validate the Neon endpoint, and execute onl
 bounded SQL migration files through the trusted runner. No generated Node
 process receives the preview database credential.
 
-The historical OpenRouter end-to-end phase runner remains a standalone,
-destructive build-artifact harness:
+The product is also driven as a person would use it, in a real browser against a
+running server. Each milestone's drive lives under `web/drive/` and is its acceptance
+test -- it fails when the product fails, whichever layer is to blame:
 
 ```bash
-OPENROUTER_API_KEY=... python tests/run_tests.py
+PYTHONPATH=src python -m richbuild.cli serve --state-dir .rich/drive/state --port 8790 &
+RICH_URL=http://127.0.0.1:8790 npm --prefix web run drive:m1
 ```
 
-It writes under `build/`, `build_archive/`, and `testlog/`; it is intentionally
-not part of the offline pytest suite.
+The delivery board is part of the tree, so its consistency is part of the suite:
+`tests/test_board.py` holds `docs/board/cards/` to the rules in `tools/board.py`, and
+`python tools/board.py verify` records a measured health strip at a commit.
 
 The checked-in CI workflow runs Python lint plus the offline suite, then installs
 the Canvas from its lockfile, audits dependencies, typechecks, and builds the

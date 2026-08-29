@@ -113,8 +113,9 @@ contract.
 - **One canonical encoding.** `canonical.py` is the single definition of the
   bytes digests are taken over. Never add a second.
 - **One path guard.** `paths.py` is the single relative-path validator and
-  ownership check. `models.py` keeps its own copy on purpose: a layering test
-  says it is the bottom of the stack and imports no sibling module.
+  ownership check. `models/_common.py` keeps its own copy on purpose, with the
+  same rules: a layering test says the `models` package is the bottom of the
+  stack and imports no sibling module.
 - Toolchain identity is exact (Node 22.22.3, pnpm 10.34.5) and the sole trusted
   model policy is `anthropic/claude-sonnet-5` — no silent fallback. Two
   **routes** reach it, chosen explicitly via `route=` on `default_run_runtime`
@@ -133,13 +134,29 @@ contract.
 ## Module map
 
 `interview.py` / `compiler.py` / `planner.py` / `architect.py` (intent → spec →
-architecture → tasks), `models.py` (typed objects), `store.py` (SQLite + CAS),
-`canonical.py`, `paths.py`, `budget.py`, `scheduler.py` / `run_engine.py` /
-`execution.py` / `executor.py` (fenced execution + Bubblewrap gates),
-`coding.py` + `anthropic_provider.py` / `claude_code_provider.py` /
-`providers.py` (bounded generation), `target_packs/` (Next.js pack + TypeScript
-obligation compiler), `preview.py` (Neon/Vercel), `control_plane.py` / `api.py`
-/ `cli.py` / `runtime.py` (surfaces).
+architecture → tasks), `models/` (typed objects, six modules by subject, one
+import name), `change.py` (what an amendment costs), `store.py` (SQLite + CAS),
+`canonical.py`, `paths.py`, `fs.py`, `budget.py`, `scheduler.py` /
+`run_engine.py` / `execution.py` / `executor.py` (fenced execution + Bubblewrap
+gates), `coding.py` + `anthropic_provider.py` / `claude_code_provider.py` /
+`providers.py` / `_http.py` (bounded generation), `target_packs/` (Next.js pack
++ TypeScript obligation compiler), `preview.py` (Neon/Vercel), `runlog.py` (a
+run as a timeline), `control_plane.py` / `api.py` / `cli.py` / `runtime.py`
+(surfaces).
+
+## The program and the board
+
+`docs/program.md` is the approved program: three releases, twenty-two milestones,
+one customer scenario as the definition of done. `docs/board/cards/*.md` is the
+tracker — one file per card — and `docs/board.html` is rendered from it, never
+edited. Move a card when work starts, lands (with its commit), blocks, or a
+finding changes the plan; then `python tools/board.py render`. `tests/test_board.py`
+fails the suite when the board lies (a done card without a commit, a milestone
+without a card). Run `python tools/board.py verify` before pushing a milestone.
+
+Each milestone ends with its drive — a real browser against `rich serve`, under
+`web/drive/` (`npm --prefix web run drive:m1`). A milestone that moves no step
+of the customer scenario is not on the plan.
 
 ## Testing conventions
 

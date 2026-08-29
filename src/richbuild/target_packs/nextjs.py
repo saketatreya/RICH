@@ -721,10 +721,11 @@ def _intent_files(
 def _property_files(architecture: ArchitectureSpec) -> dict[str, str]:
     """Render the proof obligations an architecture declares as a runnable gate.
 
-    Emitted only when a contract actually declares obligations. An architecture
-    from the deterministic planner declares none, and a property gate over
-    nothing would pass without checking anything -- which is worse than not
-    having one, because it reads like assurance.
+    Emitted only when a contract actually declares obligations -- the
+    deterministic planner declares one EXAMPLE per operation, the architect
+    declares what it can express -- because a property gate over nothing would
+    pass without checking anything, which is worse than not having one: it
+    reads like assurance.
 
     Everything here is a protected input: the suites are compiled from the
     approved contract, so a worker that could edit them could edit the claim it

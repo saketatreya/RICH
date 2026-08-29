@@ -51,7 +51,7 @@ product-spec revision ── product_spec approval ──┐
                       │ source-only model output + durable reservations  │
                       └─────────────────────────┬─────────────────────────┘
                                                 │
-                           lint → types → unit → production build → browser
+              lint → types → unit → contract obligations → production build → browser
                                                 │
                                   content-addressed evidence
                                                 │
@@ -94,7 +94,7 @@ tasks and their paths cannot authorize generated source. The Next.js target pack
 missing ownership, traversal, globs, ambiguous coverage, and source outside an approved
 non-resource owner.
 
-### 2a. The architect is asked only what it can get right
+### 3. The architect is asked only what it can get right
 
 Architecture may be authored by a model (`architect.py`) or by the deterministic layer
 planner (`planner.py`). The model's proposal is the *input* to the compiler, never a
@@ -128,7 +128,7 @@ None of this weakens what is checked. Anti-vacuity, endomorphism, predicate typi
 example inhabitation all still hold on the assembled architecture, and every surviving
 obligation must still compile to a runnable check.
 
-### 3. The scaffold freezes the verifier
+### 4. The scaffold freezes the verifier
 
 The target pack emits:
 
@@ -148,7 +148,7 @@ Model output is restricted to approved owned source paths. Package manifests, lo
 tests, type declarations, compiler configuration, framework configuration, CI, and RICH
 metadata are protected generation inputs.
 
-### 4. Authority and budget are explicit
+### 5. Authority and budget are explicit
 
 Preparing a run binds:
 
@@ -214,7 +214,7 @@ advisory: an overage is detected and charged after the fact rather than prevente
 The harness's own auxiliary small-model calls are charged too, and the pinned model
 is verified to have out-generated them.
 
-### 5. One fenced owner mutates a run
+### 6. One fenced owner mutates a run
 
 Execution claims an expiring SQLite lease containing an opaque fencing token. The owner
 heartbeats during work. A stale owner cannot renew or release a successor's lease, and
@@ -242,7 +242,7 @@ The current live-workspace engine uses one coding worker at a time. Parallel cod
 require task-isolated worktrees plus a trusted merge/reverification phase; it is not
 implemented by racing agents against one directory.
 
-### 6. Sandboxing has no permissive fallback
+### 7. Sandboxing has no permissive fallback
 
 Linux Bubblewrap is mandatory for the production runtime. Generated commands see:
 
@@ -278,7 +278,7 @@ combines:
 The production build uses supported `next build --webpack`, and browser acceptance starts
 the resulting production server. This tests the same artifact produced by the build gate.
 
-### 7. Model output is not evidence
+### 8. Model output is not evidence
 
 Each task is checked by the trusted command runner. Non-root tasks require static and unit
 evidence. The root release task requires all of:
@@ -301,7 +301,7 @@ The run cannot publish success merely because a handler returns success. The sch
 checks required evidence kinds, blocking status, artifact roles, and exact acceptance
 coverage before committing task and run status.
 
-### 6a. A change costs what it changes
+### 9. A change costs what it changes
 
 Software is not built once. Given two approved revisions, `change.py` computes the
 smallest set of components that must be regenerated; everything else replays from memo.
@@ -358,7 +358,7 @@ through UI, domain and data — and buys no change locality at all: every amendm
 everything. Modularity under change is a property of the allocation, not of having
 drawn boxes, so the architect is asked for the minimum allocation and told why.
 
-### 7b. Obligations are executed, not merely declared
+### 10. Obligations are executed, not merely declared
 
 A contract's proof obligations are compiled into a vitest suite against a pinned
 `Operations` interface and run as their own gate, separate from the unit gate so the
@@ -379,7 +379,7 @@ avoid — the same reason `ContractV2` refuses a contract whose only claims are 
 and the same reason the obligation compiler refuses a `PROOF`-tier claim it can only
 sample.
 
-### 7a. Evidence flows forward into the retry
+### 11. Evidence flows forward into the retry
 
 A gate failure is recorded as a `rich.command-verification/v1` artifact holding the exact
 command, exit status, and bounded stdout/stderr. That evidence is also fed into the next
@@ -387,7 +387,7 @@ attempt's prompt (`redact_diagnostics`, `PriorAttemptFailure`), because a retry 
 cannot see why the last attempt failed is just another first attempt charged to the same
 budget.
 
-This does not weaken §7. What flows forward is an *independently observed command result*,
+This does not weaken §8. What flows forward is an *independently observed command result*,
 never a model's claim about itself; verification still runs out of process, and a worker
 still cannot publish its own success. The direction matters: evidence may inform
 generation, but generation may never become evidence.
@@ -402,7 +402,7 @@ sibling's source would pass through inside an indented context block. Withheld l
 reported to the worker as a count, which is the signal it needs: a consumer broke, so
 re-read the contract rather than guess at the consumer.
 
-### 8. What was verified is what can deploy
+### 12. What was verified is what can deploy
 
 Before root verification, RICH records the deployment-source digest set. Verification
 may write only declared outputs. After all gates, any source change fails the run except
@@ -470,7 +470,8 @@ artifact bytes.
 - Python 3.10+;
 - exact Node 22.22.3;
 - exact pnpm 10.34.5 present in the local Corepack cache;
-- an `ANTHROPIC_API_KEY` for model-backed execution.
+- a model route: an `ANTHROPIC_API_KEY` (the `api` route) or an existing `claude`
+  login (the `claude-code` route). Neither is a fallback for the other.
 
 `rich doctor` checks coarse host availability. Runtime construction performs the exact
 Node/pnpm identity checks and fails closed on drift.
@@ -549,7 +550,7 @@ python -m pytest --run-live \
 ```
 
 The public-runtime live test creates a fresh approved spec/architecture/scaffold, installs
-the frozen dependency graph and Chromium inside Bubblewrap, and runs the five independent
+the frozen dependency graph and Chromium inside Bubblewrap, and runs the six independent
 gates. It does not use a model credential.
 
 The Canvas frontend is checked independently:
@@ -559,25 +560,13 @@ npm --prefix web run build
 npm --prefix web run typecheck
 ```
 
-## Generalization roadmap
+## What comes next
 
-The next work is not “make the prompt bigger.” It is to grow the compiler while preserving
-the proof chain:
+The program that takes this kernel to a finished product -- three releases, twenty-two
+milestones, one customer scenario as the definition of done -- is `docs/program.md`,
+and the live tracker is `docs/board.html`, rendered from `docs/board/cards/`. Change
+compilation, once item five of a roadmap here, is §9 above; the rest of that roadmap is
+ordered there rather than listed here twice.
 
-1. **Task-isolated parallelism:** per-task worktrees, deterministic merge plans, conflict
-   ownership, and full post-merge reverification.
-2. **Additional target packs:** Python services, mobile, systems code, data/ML pipelines,
-   libraries, and infrastructure, each with pinned tools and native acceptance gates.
-3. **Resource packs:** databases, queues, object stores, identity, secrets, migrations,
-   rollback, observability, and failure injection.
-4. **Richer architecture semantics:** state machines, transactions, concurrency,
-   compatibility/versioning, latency/SLO and data-governance constraints.
-5. **Change compilation:** derive the minimal affected cone from a new approved revision,
-   preserve valid evidence, and prove compatibility across releases.
-6. **Production promotion:** a new approval/evidence layer beyond ephemeral previews,
-   including policy, rollout, health, and automatic rollback.
-7. **Stronger assurance:** fuzz, security, performance, accessibility, and formal
-   evidence packs selected from requirement kinds and risk.
-
-The invariant through all of these is unchanged: authority is explicit, generation is
+The invariant through all of it is unchanged: authority is explicit, generation is
 bounded, verification is independent, and only the exact verified artifact may advance.

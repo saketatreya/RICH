@@ -77,7 +77,8 @@ resource, migration, observability, and failure-semantics packs. See
 python -m pip install -e '.[test]'
 npm --prefix web ci && npm --prefix web run build
 
-rich doctor      # check the host: Bubblewrap, Node 22.22.3, pnpm
+rich doctor      # coarse host check: bubblewrap, node, pnpm, npm, git on PATH
+                 # (exact Node/pnpm identity is verified when a run starts)
 rich serve       # → http://127.0.0.1:8767
 ```
 

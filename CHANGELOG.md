@@ -3,6 +3,54 @@
 All notable changes to RICH are recorded here. Versions follow
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Toward 2.0 — the release that builds real software. `1.0.0` was tagged on a
+tree a wheel could not install, so the program's releases are numbered 2.0,
+2.1 and 2.2 rather than moving a tag; the program itself is `docs/program.md`.
+
+### Added
+
+- **A project you can return to.** `GET /v1/projects/{id}/state` restores the
+  latest spec and architecture with their approvals, the runs, the latest run's
+  compiled plan and scaffold, the previews and the interview draft in one
+  answer; the canvas keeps only a pointer to the project and who is deciding.
+- **The interview draft lives on the server** (`GET`/`PUT
+  /v1/projects/{id}/interview`), autosaved shortly after each edit with an
+  optimistic revision, so a reload never loses a word and two tabs never
+  silently overwrite each other.
+- **Download the release ZIP.** `GET /v1/runs/{id}/release` streams the exact
+  verified snapshot with its digest in a header; a succeeded run shows the link.
+- **A rendered, measured delivery board.** Cards are files under
+  `docs/board/cards/`; `tools/board.py` validates, renders and records a real
+  verification run, and the suite fails when the board misreports.
+- **Browser drives.** `web/drive/` holds each milestone's acceptance drive,
+  run against a live `rich serve`.
+
+### Fixed
+
+- **A model worker could self-certify the property gate**: the forbidden
+  evidence set listed five kinds while the run engine had six.
+- **A wheel could not import `richbuild`**: `pyproject.toml` listed packages by
+  hand and omitted `richbuild.models`. CI now builds, installs and imports the
+  wheel.
+- **The canvas preview request always failed**: it sent the workspace-relative
+  form string as the source directory. It sends the scaffold destination the
+  run's events name, and deploys the preview it just had approved.
+- **ChangeCost compared each revision with itself**, so the plan was always
+  empty. It leaves the page until it is wired between approved pairs.
+- Two canonical encodings became one; duplicated helpers (`_all_events`,
+  `_fsync_directory`, the providers' HTTP transport, owned-path pass-throughs)
+  became one definition each.
+
+### Changed
+
+- The canvas' CSS namespace is `plane-` and its error class is `ApiError`;
+  nothing is named for a version that no longer exists.
+- `docs/architecture.md` says six gates, two routes, and numbers its
+  invariants in order; `docs/spec.md`, which described the deleted v1 engine,
+  is gone.
+
 ## [1.0.0] — 2026-08-27
 
 The first release of RICH as one product rather than two systems sharing a
@@ -83,4 +131,5 @@ repository.
   HTTP surface, its half of the single-page app, and the v1-canvas importer that
   read a format nothing produces any more.
 
-[1.0.0]: https://github.com/
+[Unreleased]: https://github.com/saketatreya/RICH/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/saketatreya/RICH/releases/tag/v1.0.0
