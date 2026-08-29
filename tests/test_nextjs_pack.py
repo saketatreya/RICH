@@ -1,13 +1,16 @@
 from dataclasses import replace
 import hashlib
+import itertools
 import json
 from pathlib import Path
+import posixpath
 import shutil
 import subprocess
 
 import pytest
+import yaml
 
-from richbuild.models import AcceptanceScenario, ProjectSpec, Requirement
+from richbuild.models import AcceptanceScenario, NodeKind, ProjectSpec, Requirement
 from richbuild.planner import plan_nextjs_architecture
 import richbuild.target_packs.nextjs as nextjs_target
 from richbuild.target_packs.nextjs import (
@@ -142,6 +145,18 @@ def test_scaffold_contains_strict_full_stack_workspace(tmp_path):
     web_package = json.loads((destination / "apps/web/package.json").read_text())
     assert web_package["dependencies"]["next"] == "16.2.12"
     assert web_package["dependencies"]["@founder-os/domain"] == "workspace:*"
+    # The database drivers are direct dependencies of the web application: a
+    # serverExternalPackages require runs from apps/web/.next/server, where
+    # pnpm exposes nothing but apps/web's own dependencies.
+    assert web_package["dependencies"]["@electric-sql/pglite"] == "0.5.8"
+    assert web_package["dependencies"]["postgres"] == "3.4.9"
+    assert "@founder-os/db" not in web_package["dependencies"]
+    domain_package = json.loads(
+        (destination / "packages/domain/package.json").read_text()
+    )
+    assert domain_package["dependencies"] == {"@founder-os/db": "workspace:*"}
+    db_package = json.loads((destination / "packages/db/package.json").read_text())
+    assert db_package["dependencies"]["@electric-sql/pglite"] == "0.5.8"
     package_tsconfig = json.loads(
         (destination / "packages/domain/tsconfig.json").read_text()
     )
@@ -233,13 +248,196 @@ def test_lockfile_matches_optional_workspace_importers_and_approved_intent():
     assert "\n  packages/db:" not in lockfile
     assert "\n  packages/adapters:" not in lockfile
     assert "'@product/adapters':" not in lockfile
+    assert "'@product/db':" not in lockfile
+    assert "'@electric-sql/pglite':" not in lockfile.split("\npackages:\n")[0]
+    assert "\n      postgres:" not in lockfile.split("\npackages:\n")[0]
     assert (
         "\n  packages/domain:\n"
         "    dependencies:\n"
         "      '@product/contracts':\n"
         "        specifier: workspace:*\n"
         "        version: link:../contracts\n"
+        "\n  packages/ui:"
     ) in lockfile
+
+    bare = _pnpm_lockfile("@product", include_data=False, include_intent=False)
+    assert "\n  packages/domain: {}\n" in bare
+
+
+def _specifiers(importer, section):
+    return {
+        name: entry["specifier"]
+        for name, entry in ((importer or {}).get(section) or {}).items()
+    }
+
+
+def _assert_every_specifier_resolves(document):
+    """A lock is only frozen if pnpm can satisfy every importer from it alone."""
+
+    importers = document["importers"]
+    for path, importer in importers.items():
+        for section in ("dependencies", "devDependencies", "optionalDependencies"):
+            for name, entry in ((importer or {}).get(section) or {}).items():
+                version = entry["version"]
+                if version.startswith("link:"):
+                    target = posixpath.normpath(
+                        posixpath.join(path, version[len("link:") :])
+                    )
+                    assert target in importers, (path, name, version)
+                    continue
+                assert f"{name}@{version}" in document["snapshots"], (path, name)
+                assert f"{name}@{version.split('(', 1)[0]}" in document["packages"], (
+                    path,
+                    name,
+                )
+
+
+@pytest.mark.parametrize(
+    "include_data,include_adapters,include_intent",
+    list(itertools.product((True, False), repeat=3)),
+)
+def test_every_lock_variant_resolves_every_importer_specifier(
+    include_data, include_adapters, include_intent
+):
+    lockfile = _pnpm_lockfile(
+        "@product",
+        include_data=include_data,
+        include_adapters=include_adapters,
+        include_intent=include_intent,
+    )
+    document = yaml.safe_load(lockfile)
+
+    expected = {".", "apps/web", "packages/contracts", "packages/domain", "packages/ui"}
+    if include_data:
+        expected.add("packages/db")
+    if include_adapters:
+        expected.add("packages/adapters")
+    assert set(document["importers"]) == expected
+    _assert_every_specifier_resolves(document)
+
+    web = _specifiers(document["importers"]["apps/web"], "dependencies")
+    assert ("@electric-sql/pglite" in web) is include_data
+    assert ("postgres" in web) is include_data
+    assert ("@product/adapters" in web) is include_adapters
+    assert "@product/db" not in web, "web never reaches the data package directly"
+    domain = _specifiers(document["importers"]["packages/domain"], "dependencies")
+    assert ("@product/db" in domain) is include_data
+    assert ("@product/contracts" in domain) is include_intent
+    assert "@rich-template" not in lockfile
+
+
+def _intent(*, data: bool, adapters: bool) -> ProjectSpec:
+    """A project whose words make the planner emit exactly the nodes asked for."""
+
+    goal = " ".join(
+        part
+        for part in (
+            "Publish an approved checklist.",
+            "Persist each record in a database." if data else "",
+            "Notify an external provider." if adapters else "",
+        )
+        if part
+    )
+    statement = "A founder reviews the approved checklist."
+    return ProjectSpec(
+        id="project.variant",
+        name="Variant application",
+        goal=goal,
+        audiences=("founders",),
+        requirements=(
+            Requirement(
+                id="req.checklist", title="Review the checklist", statement=statement
+            ),
+        ),
+        acceptance_scenarios=(
+            AcceptanceScenario(
+                id="scenario.checklist",
+                title="Checklist is visible",
+                given=("The application is available.",),
+                when=("A founder opens the checklist.",),
+                then=("The checklist is visible.",),
+                requirement_ids=("req.checklist",),
+                oracle=(
+                    {"action": "open_requirement"},
+                    {
+                        "action": "assert_visible",
+                        "locator": {"kind": "text", "value": statement},
+                    },
+                ),
+            ),
+        ),
+    )
+
+
+def _scaffold_variants():
+    """Every scaffold the pack can render, by which optional importers it has.
+
+    Five, not eight: without an approved architecture the pack renders every
+    optional package, so ``include_intent=False`` only ever pairs with both
+    ``include_data`` and ``include_adapters`` on.
+    """
+
+    variants = [
+        ("template", _pack(project_name="template-only")),
+    ]
+    for data, adapters in itertools.product((True, False), repeat=2):
+        project = _intent(data=data, adapters=adapters)
+        architecture = plan_nextjs_architecture(project).architecture
+        kinds = {node.kind for node in architecture.nodes}
+        assert (NodeKind.DATA in kinds) is data
+        assert (NodeKind.ADAPTER in kinds) is adapters
+        variants.append(
+            (
+                f"intent,data={data},adapters={adapters}",
+                NextJsTargetPack(
+                    NextJsTargetPackConfig(
+                        project_name="variant-application",
+                        project_spec=project,
+                        architecture=architecture,
+                    )
+                ),
+            )
+        )
+    return variants
+
+
+@pytest.mark.parametrize(
+    "label,pack", _scaffold_variants(), ids=[label for label, _ in _scaffold_variants()]
+)
+def test_each_rendered_manifest_matches_its_lock_importer(label, pack):
+    """The lock a scaffold ships must be the lock of exactly those manifests.
+
+    ``pnpm install --frozen-lockfile`` refuses anything else, and it runs
+    inside the network-enabled bootstrap where a mismatch costs a whole run.
+    """
+
+    files = pack.render_files()
+    lockfile = files["pnpm-lock.yaml"].decode()
+    document = yaml.safe_load(lockfile)
+    importers = document["importers"]
+    manifests = {
+        ("." if path == "package.json" else path[: -len("/package.json")]): json.loads(
+            content
+        )
+        for path, content in files.items()
+        if path == "package.json" or path.endswith("/package.json")
+    }
+
+    assert set(manifests) == set(importers), label
+    for path, manifest in manifests.items():
+        importer = importers[path] or {}
+        assert set(importer) <= {"dependencies", "devDependencies"}, (label, path)
+        # pnpm's autoInstallPeers records the peer it installed as a dependency.
+        expected = {
+            **manifest.get("peerDependencies", {}),
+            **manifest.get("dependencies", {}),
+        }
+        assert _specifiers(importer, "dependencies") == expected, (label, path)
+        assert _specifiers(importer, "devDependencies") == manifest.get(
+            "devDependencies", {}
+        ), (label, path)
+    _assert_every_specifier_resolves(document)
+    assert "@rich-template" not in lockfile
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is unavailable")

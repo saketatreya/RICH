@@ -66,7 +66,28 @@ _POSTCSS_OVERRIDE = "8.5.23"
 _SHARP_OVERRIDE = "0.35.3"
 _MINIMATCH_OVERRIDE = "10.2.5"
 _ESBUILD_KIT_OVERRIDE = "0.25.12"
+# The two database drivers, pinned once because two manifests list them: the
+# data package that uses them, and the web application. The web copy is not a
+# layering leak -- domain reaches data through its contract, never web -- it is
+# a resolution fact: `serverExternalPackages` leaves the require in the built
+# server bundle, which executes from apps/web/.next/server, and pnpm's strict
+# node_modules exposes only apps/web's own direct dependencies from there.
+_PGLITE_VERSION = "0.5.8"
+_POSTGRES_JS_VERSION = "3.4.9"
 _LOCK_SCOPE_PLACEHOLDER = "@rich-template"
+# The lock snapshot is rendered for the scaffold with every optional importer
+# present; `_pnpm_lockfile` removes what a smaller scaffold does not declare.
+_LOCK_IMPORTERS = frozenset(
+    {
+        ".",
+        "apps/web",
+        "packages/adapters",
+        "packages/contracts",
+        "packages/db",
+        "packages/domain",
+        "packages/ui",
+    }
+)
 
 # The pack's version, stamped into every manifest it writes. One constant: the
 # manifest default and the pack had drifted a minor version apart.
@@ -338,24 +359,64 @@ def _validate_rendered_path_ownership(
         )
 
 
-def _without_lock_importer(lockfile: str, importer: str) -> str:
-    """Remove one optional workspace importer from the pinned lock snapshot."""
+def _lock_importer_span(lockfile: str, importer: str) -> tuple[int, int]:
+    """Locate one importer block: from its leading newline to the next importer."""
 
     marker = f"\n  {importer}:"
     start = lockfile.find(marker)
     if start < 0:
         raise TargetPackError(f"lock snapshot is missing importer {importer!r}")
-    following = re.search(r"\n  \S", lockfile[start + len(marker) :])
-    packages = lockfile.find("\npackages:\n", start + len(marker))
+    body = start + len(marker)
+    following = re.search(r"\n  \S", lockfile[body:])
+    packages = lockfile.find("\npackages:\n", body)
     if following is None:
         end = packages
     else:
-        end = start + len(marker) + following.start()
+        end = body + following.start()
         if packages >= 0:
             end = min(end, packages)
     if end < 0:
         raise TargetPackError(f"lock snapshot importer {importer!r} is unterminated")
+    return start, end
+
+
+def _without_lock_importer(lockfile: str, importer: str) -> str:
+    """Remove one optional workspace importer from the pinned lock snapshot."""
+
+    start, end = _lock_importer_span(lockfile, importer)
     return f"{lockfile[:start]}{lockfile[end:]}"
+
+
+_LOCK_SECTION_NAMES = ("dependencies", "devDependencies", "optionalDependencies")
+
+
+def _without_lock_dependency(lockfile: str, importer: str, name: str) -> str:
+    """Remove one dependency from one importer of the pinned lock snapshot.
+
+    Scoped only to that importer's block: the same package can be a dependency of
+    two importers -- ``postgres`` is one of both the data package and the web
+    application -- and a whole-text replacement would not know which it removed.
+    A section left with no entries is dropped, and an importer left with no
+    sections is written the way pnpm writes it, ``path: {}``.
+    """
+
+    start, end = _lock_importer_span(lockfile, importer)
+    block = lockfile[start:end]
+    key = f"'{name}'" if name.startswith("@") else name
+    entry = re.compile(
+        rf"\n      {re.escape(key)}:\n        specifier: [^\n]*\n        version: [^\n]*"
+    )
+    if len(entry.findall(block)) != 1:
+        raise TargetPackError(
+            f"lock snapshot importer {importer!r} must list {name!r} exactly once"
+        )
+    block = entry.sub("", block, count=1)
+    sections = "|".join(_LOCK_SECTION_NAMES)
+    block = re.sub(rf"\n    (?:{sections}):(?=\n    \S|\n?\Z)", "", block)
+    header = f"\n  {importer}:"
+    if block.rstrip("\n") == header:
+        block = f"{header} {{}}\n"
+    return f"{lockfile[:start]}{block}{lockfile[end:]}"
 
 
 def _pnpm_lockfile(
@@ -365,33 +426,31 @@ def _pnpm_lockfile(
     include_adapters: bool = True,
     include_intent: bool = False,
 ) -> str:
-    """Render a frozen lockfile matching the selected deterministic workspace."""
+    """Render a frozen lockfile matching the selected deterministic workspace.
+
+    The snapshot holds the largest scaffold -- every optional importer and every
+    edge between them -- and each switch removes exactly what its scaffold does
+    not declare, so the lock a workspace receives always matches the manifests
+    beside it. The removals mirror the manifest renderers in ``render_files``.
+    """
 
     lockfile = PNPM_LOCK_TEMPLATE
     if not include_adapters:
-        adapter_dependency = (
-            f"      '{_LOCK_SCOPE_PLACEHOLDER}/adapters':\n"
-            "        specifier: workspace:*\n"
-            "        version: link:../../packages/adapters\n"
+        lockfile = _without_lock_dependency(
+            lockfile, "apps/web", f"{_LOCK_SCOPE_PLACEHOLDER}/adapters"
         )
-        if lockfile.count(adapter_dependency) != 1:
-            raise TargetPackError("lock snapshot adapter dependency is invalid")
-        lockfile = lockfile.replace(adapter_dependency, "", 1)
         lockfile = _without_lock_importer(lockfile, "packages/adapters")
     if not include_data:
         lockfile = _without_lock_importer(lockfile, "packages/db")
-    if include_intent:
-        domain_importer = "\n  packages/domain: {}\n"
-        domain_with_contract = (
-            "\n  packages/domain:\n"
-            "    dependencies:\n"
-            f"      '{_LOCK_SCOPE_PLACEHOLDER}/contracts':\n"
-            "        specifier: workspace:*\n"
-            "        version: link:../contracts\n"
+        lockfile = _without_lock_dependency(
+            lockfile, "packages/domain", f"{_LOCK_SCOPE_PLACEHOLDER}/db"
         )
-        if lockfile.count(domain_importer) != 1:
-            raise TargetPackError("lock snapshot domain importer is invalid")
-        lockfile = lockfile.replace(domain_importer, domain_with_contract, 1)
+        for name in ("@electric-sql/pglite", "postgres"):
+            lockfile = _without_lock_dependency(lockfile, "apps/web", name)
+    if not include_intent:
+        lockfile = _without_lock_dependency(
+            lockfile, "packages/domain", f"{_LOCK_SCOPE_PLACEHOLDER}/contracts"
+        )
     if lockfile.count(_LOCK_SCOPE_PLACEHOLDER) == 0:
         raise TargetPackError("lock snapshot has no package-scope placeholders")
     return lockfile.replace(_LOCK_SCOPE_PLACEHOLDER, scope)
@@ -1337,6 +1396,18 @@ class NextJsTargetPack:
         }
         if include_adapters:
             web_dependencies[packages["adapters"]] = "workspace:*"
+        if include_data:
+            # Direct, not hoisted: see _PGLITE_VERSION. Domain still owns the
+            # only import of the data package; web never imports a driver.
+            web_dependencies["@electric-sql/pglite"] = _PGLITE_VERSION
+            web_dependencies["postgres"] = _POSTGRES_JS_VERSION
+        domain_dependencies: dict[str, str] = {}
+        if has_approved_intent:
+            domain_dependencies[packages["contracts"]] = "workspace:*"
+        if include_data:
+            # The one edge into the data package: domain implements its use
+            # cases against the data node's contract, web calls domain.
+            domain_dependencies[packages["db"]] = "workspace:*"
         files.update(
             {
                 "apps/web/package.json": _package_json(
@@ -1514,11 +1585,7 @@ class NextJsTargetPack:
                 "packages/domain/package.json": _package_json(
                     packages["domain"],
                     scripts={"typecheck": "tsc --noEmit"},
-                    dependencies=(
-                        {packages["contracts"]: "workspace:*"}
-                        if has_approved_intent
-                        else None
-                    ),
+                    dependencies=domain_dependencies or None,
                     extra={
                         "exports": {".": "./src/index.ts"},
                         "types": "./src/index.ts",
@@ -1598,8 +1665,11 @@ class NextJsTargetPack:
                         "db:seed": "tsx src/seed.ts",
                     },
                     dependencies={
+                        # Both engines the one migration text runs on: PGlite
+                        # inside the network-off gates, postgres-js on Neon.
+                        "@electric-sql/pglite": _PGLITE_VERSION,
                         "drizzle-orm": "0.45.2",
-                        "postgres": "3.4.9",
+                        "postgres": _POSTGRES_JS_VERSION,
                     },
                     dev_dependencies={
                         "drizzle-kit": "0.31.10",
