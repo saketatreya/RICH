@@ -217,8 +217,8 @@ class VerificationCommand:
             EvidenceKind.ACCEPTANCE,
         }:
             raise ValueError(
-                "verification commands must be lint, static, unit, build, "
-                "or acceptance"
+                "verification commands must be lint, static, unit, property, "
+                "build, or acceptance"
             )
         object.__setattr__(self, "kind", kind.value)
         if (
@@ -858,11 +858,17 @@ class _LoadedRun:
 class _VerifiedCodingHandler:
     """Compose model generation with independent process verification."""
 
+    # Every kind a VerificationCommand can carry, and no fewer: a kind the
+    # trusted runner publishes is a kind a model worker may not claim, blocking
+    # or not. PROPERTY was missing from this set for a while, so a worker could
+    # hand back a passed, non-blocking obligation claim and have it recorded
+    # beside the gate's own evidence.
     _FORBIDDEN_MODEL_EVIDENCE = frozenset(
         {
             EvidenceKind.STATIC.value,
             EvidenceKind.LINT.value,
             EvidenceKind.UNIT.value,
+            EvidenceKind.PROPERTY.value,
             EvidenceKind.BUILD.value,
             EvidenceKind.ACCEPTANCE.value,
         }

@@ -1953,3 +1953,32 @@ def test_a_node_is_gated_on_its_own_obligation_suite_and_no_other(tmp_path):
         "a component with no suite scaffolded runs no property gate"
     )
     assert handler._property_suite(None) is None
+
+
+@pytest.mark.parametrize(
+    "kind", ["static", "lint", "unit", "property", "build", "acceptance"]
+)
+def test_a_model_worker_cannot_self_certify_any_gate_even_as_non_blocking(kind):
+    """The forbidden set must name every kind the trusted runner publishes.
+    PROPERTY was missing from it while present in VerificationCommand's
+    accepted set, so a worker could hand back a passed, non-blocking
+    obligation claim and have it recorded beside the gate's own evidence."""
+
+    from richbuild.run_engine import RunEngineError, _VerifiedCodingHandler
+    from richbuild.scheduler import TaskEvidence, TaskResult
+
+    claimed = TaskResult(
+        evidence=(
+            TaskEvidence(
+                kind=kind,
+                status="passed",
+                summary="the worker says this held",
+                blocking=False,
+            ),
+        )
+    )
+    handler = object.__new__(_VerifiedCodingHandler)
+    handler.model_worker = lambda context: claimed
+
+    with pytest.raises(RunEngineError, match="self-certify"):
+        handler(SimpleNamespace(is_cancelled=False))
