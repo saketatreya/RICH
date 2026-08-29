@@ -239,7 +239,7 @@ export default function Inspector({
 
   if (error) {
     return (
-      <section className="plane-panel">
+      <section className="plane-panel" id="stage-inspector">
         <div className="plane-section-title">
           <div>
             <span className="plane-eyebrow">Inspector</span>

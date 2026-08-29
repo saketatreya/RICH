@@ -16,6 +16,8 @@ from .budget import RunBudget
 from .compiler import CompiledArchitecture, compile_architecture
 from .interview import AdaptiveInterview, InterviewState
 from .interviewer import InterviewOutcome, form_fallback
+from .providers import ModelUsageRecoveryError, recover_model_usage
+from .runlog import format_event, run_is_settled
 from .change import compile_change
 from .models import ApprovalGate, ArchitectureSpec, ProjectSpec
 from .planner import ArchitectureProposal, plan_nextjs_architecture
@@ -425,6 +427,57 @@ class ControlPlane:
             "project_id": project_id,
             "node_id": node_id,
             "forgotten_generations": forgotten,
+        }
+
+    def run_usage(self, run_id: str) -> dict[str, Any]:
+        """What a run has spent against what it was allowed, from durable events.
+
+        The ledger that enforces the budget lives in the executing process; the
+        events it writes are the only account that survives it, and
+        ``recover_model_usage`` already reconstitutes them for a restart -- a
+        started attempt with no settlement charged at its reservation, so this
+        number is never optimistic. A surface that showed a running total from
+        anywhere else would be showing a number nobody measured.
+        """
+
+        run = self.store.get_run(run_id)
+        budget = RunBudget.from_mapping(run["budget"])
+        try:
+            used = recover_model_usage(self.store.all_events(run_id))
+        except ModelUsageRecoveryError as exc:
+            return {
+                "run_id": run_id,
+                "budget": budget.to_mapping(),
+                "used": None,
+                "remaining": None,
+                "recovery_error": str(exc),
+            }
+        remaining = {
+            "model_attempts": budget.max_model_attempts - used.model_attempts,
+            "input_tokens": budget.max_input_tokens - used.input_tokens,
+            "output_tokens": budget.max_output_tokens - used.output_tokens,
+            "cost_usd": str(budget.max_cost_usd - used.cost_usd),
+            "execution_seconds": budget.max_execution_seconds - used.execution_seconds,
+        }
+        return {
+            "run_id": run_id,
+            "budget": budget.to_mapping(),
+            "used": used.to_mapping(),
+            "remaining": remaining,
+        }
+
+    def run_timeline(self, run_id: str, *, after_sequence: int = 0) -> dict[str, Any]:
+        """The run's events as the lines ``rich logs`` prints, plus whether it is settled."""
+
+        self.store.get_run(run_id)
+        events = self.store.list_events(run_id, after_sequence=after_sequence)
+        return {
+            "run_id": run_id,
+            "lines": [
+                {"sequence": event["sequence"], "text": format_event(event)}
+                for event in events
+            ],
+            "settled": run_is_settled(self.store, run_id),
         }
 
     def interview_turn(

@@ -611,6 +611,26 @@ class Application:
         if (
             len(parts) == 4
             and parts[:2] == ["v1", "runs"]
+            and parts[3] == "usage"
+            and method == "GET"
+        ):
+            return ApiResponse(200, self.control_plane.run_usage(parts[2]))
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v1", "runs"]
+            and parts[3] == "timeline"
+            and method == "GET"
+        ):
+            after = _query_string(query, "after")
+            return ApiResponse(
+                200,
+                self.control_plane.run_timeline(
+                    parts[2], after_sequence=int(after) if after else 0
+                ),
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v1", "runs"]
             and parts[3] == "artifacts"
             and method == "GET"
         ):

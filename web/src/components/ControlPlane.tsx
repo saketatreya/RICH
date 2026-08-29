@@ -23,6 +23,7 @@ import type { ContractDoc } from './Behaviour'
 import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
 import PreviewPanel from './PreviewPanel'
+import RunMonitor from './RunMonitor'
 import Inspector from './Inspector'
 import Waiting from './Waiting'
 import IntentStage from './intent/IntentStage'
@@ -95,6 +96,30 @@ function draftFromDocument(document: unknown): InterviewDocument {
   }
 }
 
+/**
+ * One dollar figure decides the whole budget. The other four dimensions are
+ * derived from it the way the run engine sizes an attempt -- 32k input and 8k
+ * output tokens, two minutes -- and shown, so nothing is hidden behind the
+ * number a person typed.
+ */
+function budgetPlan(dollars: string) {
+  const amount = Number(dollars)
+  const valid = Number.isFinite(amount) && amount > 0 && /^\d+(\.\d{1,2})?$/.test(dollars.trim())
+  const attempts = valid ? Math.min(200, Math.max(2, Math.ceil(amount * 2))) : 0
+  return {
+    valid,
+    attempts,
+    inputTokens: attempts * 32_000,
+    outputTokens: attempts * 8_000,
+    seconds: attempts * 120,
+    costUsd: valid ? amount.toFixed(2) : '0.00',
+  }
+}
+
+/** The part of a project id that names it: `project.todo` → `todo`. */
+const projectSlug = (projectId: string) =>
+  (projectId.split('.').pop() || projectId).toLowerCase().replace(/[^a-z0-9-]+/g, '-') || 'project'
+
 function readArchitectureDraft(projectId: string): ArchitectureDraft | null {
   try {
     const raw = localStorage.getItem(architectureDraftKey(projectId))
@@ -130,12 +155,9 @@ export default function ControlPlane() {
   const [draftDirty, setDraftDirty] = useState(false)
   const [actor, setActor] = useState(restored.actor)
   const [reason, setReason] = useState(restored.reason)
-  const [maxAttempts, setMaxAttempts] = useState('20')
-  const [maxCost, setMaxCost] = useState('10.00')
-  const [destination, setDestination] = useState(
-    `rich-${(restored.projectId || 'demo').split('.').pop()}`,
-  )
-  const [packageScope, setPackageScope] = useState('@rich-app')
+  const [budgetUsd, setBudgetUsd] = useState('10.00')
+  // Which of Build's three durable steps is in flight, for the checklist.
+  const [buildStage, setBuildStage] = useState<'' | 'preparing' | 'scaffolding' | 'starting'>('')
   const [busy, setBusy] = useState('')
   const [busySince, setBusySince] = useState(() => Date.now())
   const [notice, setNotice] = useState('')
@@ -297,7 +319,6 @@ export default function ControlPlane() {
     setEvents([])
     setRunTasks([])
     setSelectedNode(null)
-    setDestination(`rich-${state.project.id.split('.').pop()}`)
     setDraft(draftFromDocument(state.interview?.document))
     setDraftRevision(state.interview?.draft_revision ?? 0)
     setDraftDirty(false)
@@ -437,38 +458,55 @@ export default function ControlPlane() {
     })
   }
 
-  const prepareRun = () => {
-    if (!architecture) return
-    runAction('prepare-run', async () => {
-      const result = await api.prepareRun(architecture.approval.id, {
-        max_model_attempts: Number(maxAttempts),
-        max_input_tokens: Number(maxAttempts) * 32_000,
-        max_output_tokens: Number(maxAttempts) * 8_000,
-        max_cost_usd: maxCost,
-        max_execution_seconds: Number(maxAttempts) * 120,
-      })
-      setPrepared(result)
-      setScaffold(null)
-      setExecution(null)
-      setNotice(`Durable run ${shortId(result.run.id)} is ready with ${result.tasks.length} tasks.`)
+  // Prepare, scaffold and execute stay three durable authority boundaries --
+  // a budget is bound, files are written, a lease is taken -- and the canvas
+  // runs them as one Build with defaults derived from what it already knows.
+  // Each step is durable on its own, so a failure part-way leaves a real state
+  // to resume from rather than a half-pressed button.
+  const buildRun = () => {
+    if (!project || !architecture) return
+    runAction('build', async () => {
+      const plan = budgetPlan(budgetUsd)
+      try {
+        setBuildStage('preparing')
+        const preparedRun = await api.prepareRun(architecture.approval.id, {
+          max_model_attempts: plan.attempts,
+          max_input_tokens: plan.inputTokens,
+          max_output_tokens: plan.outputTokens,
+          max_cost_usd: plan.costUsd,
+          max_execution_seconds: plan.seconds,
+        })
+        setPrepared(preparedRun)
+        setScaffold(null)
+        setExecution(null)
+        setBuildStage('scaffolding')
+        const slug = projectSlug(project.id)
+        const written = await api.scaffold(
+          preparedRun.run.id,
+          `${slug}/run-${preparedRun.run.id.slice(-8)}`,
+          `@${slug}`,
+        )
+        setScaffold(written)
+        setBuildStage('starting')
+        const started = await api.startExecution(
+          preparedRun.run.id,
+          written.destination,
+          architecture.approval.id,
+        )
+        setExecution(started)
+        setEvents(await api.events(preparedRun.run.id))
+        setNotice(
+          `Build started with a ${plan.costUsd} USD ceiling. Dependencies install, then every gate runs in the sandbox.`,
+        )
+      } finally {
+        setBuildStage('')
+      }
     })
   }
 
-  const scaffoldRun = () => {
-    if (!prepared) return
-    runAction('scaffold', async () => {
-      const result = await api.scaffold(
-        prepared.run.id,
-        destination.trim(),
-        packageScope.trim() || undefined,
-      )
-      setScaffold(result)
-      setNotice(`Scaffold written to ${result.destination}.`)
-      setEvents(await api.events(prepared.run.id))
-    })
-  }
-
-  const executeRun = () => {
+  // A run that already exists -- after a reload, or one that stopped at a
+  // checkpoint -- continues from its durable state; nothing is prepared twice.
+  const resumeRun = () => {
     if (!prepared || !scaffold) return
     runAction('execute-run', async () => {
       const result = await api.startExecution(
@@ -477,9 +515,7 @@ export default function ControlPlane() {
         architecture?.approval.id,
       )
       setExecution(result)
-      setNotice(
-        `Execution ${result.status}. Dependency bootstrap and independent verification now run in the sandbox.`,
-      )
+      setNotice(`Execution ${result.status}. Continuing from the last durable checkpoint.`)
       setEvents(await api.events(prepared.run.id))
     })
   }
@@ -912,17 +948,49 @@ export default function ControlPlane() {
               <section className="plane-panel" id="stage-run">
                 <div className="plane-section-title">
                   <div>
-                    <span className="plane-eyebrow">Budget boundary</span>
-                    <h2>Prepare a durable run</h2>
+                    <span className="plane-eyebrow">Build</span>
+                    <h2>Build it, under a budget</h2>
                   </div>
                 </div>
-                <div className="plane-budget-row">
-                  <label><span>Maximum model attempts</span><input type="number" min="1" value={maxAttempts} onChange={(event) => setMaxAttempts(event.target.value)} /></label>
-                  <label><span>Maximum cost · USD</span><input value={maxCost} onChange={(event) => setMaxCost(event.target.value)} /></label>
-                  <button className="primary" disabled={!!busy} onClick={prepareRun}>
-                    {busy === 'prepare-run' ? 'Compiling…' : 'Compile durable run →'}
+                <p className="plane-panel-lead">
+                  The model writes the source; independent gates the model cannot touch
+                  decide whether it is right. Nothing can be spent beyond the ceiling you set.
+                </p>
+                <div className="plane-build-row">
+                  <label>
+                    <span>Spending ceiling · USD</span>
+                    <input
+                      inputMode="decimal"
+                      value={budgetUsd}
+                      onChange={(event) => setBudgetUsd(event.target.value)}
+                    />
+                  </label>
+                  <div className="plane-build-derived">
+                    {(() => {
+                      const plan = budgetPlan(budgetUsd)
+                      return plan.valid
+                        ? `Up to ${plan.attempts} model attempts · ${Math.round(plan.inputTokens / 1000)}k input and ${Math.round(plan.outputTokens / 1000)}k output tokens · ${Math.round(plan.seconds / 60)} minutes of sandbox time`
+                        : 'Enter an amount such as 10.00'
+                    })()}
+                  </div>
+                  <button
+                    className="go"
+                    disabled={!!busy || !budgetPlan(budgetUsd).valid}
+                    onClick={buildRun}
+                  >
+                    {busy === 'build' ? 'Building…' : 'Build →'}
                   </button>
                 </div>
+                {busy === 'build' && (
+                  <ol className="plane-build-steps" aria-label="Build steps">
+                    {(['preparing', 'scaffolding', 'starting'] as const).map((stage, index) => {
+                      const order = ['preparing', 'scaffolding', 'starting']
+                      const state = order.indexOf(buildStage) > index ? 'done' : buildStage === stage ? 'doing' : 'todo'
+                      const label = { preparing: 'Binding the budget and compiling tasks', scaffolding: 'Writing the frozen scaffold', starting: 'Taking the execution lease' }[stage]
+                      return <li key={stage} className={state}>{label}</li>
+                    })}
+                  </ol>
+                )}
               </section>
             )}
           </>
@@ -962,19 +1030,12 @@ export default function ControlPlane() {
               <span>Immutable plan artifact</span>
               <code>{prepared.plan_artifact_digest}</code>
             </div>
-            <div className="plane-scaffold-form">
-              <label>
-                <span>Workspace-relative destination · must be absent or empty</span>
-                <input className="mono" value={destination} onChange={(event) => setDestination(event.target.value)} />
-              </label>
-              <label>
-                <span>Package scope</span>
-                <input className="mono" value={packageScope} onChange={(event) => setPackageScope(event.target.value)} />
-              </label>
-              <button className="go" disabled={!!busy || !!scaffold} onClick={scaffoldRun}>
-                {busy === 'scaffold' ? 'Writing scaffold…' : scaffold ? 'Scaffold created ✓' : 'Create Next.js scaffold'}
-              </button>
-            </div>
+            {scaffold && (
+              <div className="plane-digest">
+                <span>Built in</span>
+                <code>{scaffold.destination}</code>
+              </div>
+            )}
             {scaffold && (
               <div className="plane-execution-row">
                 <div>
@@ -992,17 +1053,17 @@ export default function ControlPlane() {
                     prepared.run.status === 'succeeded' ||
                     ['failed', 'canceled'].includes(prepared.run.status)
                   }
-                  onClick={executeRun}
+                  onClick={resumeRun}
                 >
                   {busy === 'execute-run'
                     ? 'Starting…'
                     : execution?.active
-                      ? 'Execution running…'
+                      ? 'Building…'
                       : prepared.run.status === 'succeeded'
                         ? 'Release verified ✓'
                         : ['running', 'verifying'].includes(prepared.run.status)
-                          ? 'Resume durable execution'
-                          : 'Execute verified build →'}
+                          ? 'Continue the build'
+                          : 'Start the build →'}
                 </button>
                 {execution?.active && (
                   <button
@@ -1030,35 +1091,17 @@ export default function ControlPlane() {
         )}
 
         {prepared && (
-          <section className="plane-panel">
-            <div className="plane-section-title">
-              <div>
-                <span className="plane-eyebrow">Evidence stream</span>
-                <h2>Durable run events</h2>
-              </div>
-              <span className="chip">{events.length} events</span>
-            </div>
-            {scaffold && (
-              <div className="plane-scaffold-result">
-                <div><span>Destination</span><code>{scaffold.destination}</code></div>
-                <div><span>Content digest</span><code>{scaffold.manifest.content_digest}</code></div>
-                <div><span>Manifest artifact</span><code>{scaffold.manifest_artifact_digest}</code></div>
-              </div>
-            )}
-            <div className="plane-event-feed">
-              {events.length === 0 && <p className="muted">Waiting for run evidence…</p>}
-              {events.map((event) => (
-                <article key={event.sequence}>
-                  <span>{String(event.sequence).padStart(3, '0')}</span>
-                  <div>
-                    <b>{event.event_type}</b>
-                    <small>{new Date(event.created_at).toLocaleTimeString()} · {event.task_id ? shortId(event.task_id) : 'run'}</small>
-                  </div>
-                  <code>{JSON.stringify(event.payload)}</code>
-                </article>
-              ))}
-            </div>
-          </section>
+          <RunMonitor
+            run={prepared.run}
+            events={events}
+            onBuildAgain={buildRun}
+            onInspect={() =>
+              document.getElementById('stage-inspector')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }
+            onAmend={() =>
+              document.getElementById('stage-intent')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }
+          />
         )}
 
         {prepared && spec && (

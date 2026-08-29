@@ -432,6 +432,39 @@ export interface NodeRebuild {
   forgotten_generations: number
 }
 
+/** What a run has spent against what it was allowed, from its durable events. */
+export interface RunUsage {
+  run_id: string
+  budget: {
+    max_model_attempts: number
+    max_input_tokens: number
+    max_output_tokens: number
+    max_cost_usd: string
+    max_execution_seconds: number
+  }
+  used: {
+    model_attempts: number
+    input_tokens: number
+    output_tokens: number
+    cost_usd: string
+    execution_seconds: number
+  } | null
+  remaining: {
+    model_attempts: number
+    input_tokens: number
+    output_tokens: number
+    cost_usd: string
+    execution_seconds: number
+  } | null
+  recovery_error?: string
+}
+
+export interface RunTimeline {
+  run_id: string
+  lines: Array<{ sequence: number; text: string }>
+  settled: boolean
+}
+
 export interface ExecutionStatus {
   run_id: string
   status: string
@@ -942,6 +975,14 @@ export const api = {
     (await request<{ source_transactions: SourceTransaction[] }>(
       `/v1/runs/${encodeURIComponent(runId)}/source-transactions`,
     )).source_transactions,
+
+  usage: async (runId: string): Promise<RunUsage> =>
+    request<RunUsage>(`/v1/runs/${encodeURIComponent(runId)}/usage`),
+
+  timeline: async (runId: string, after = 0): Promise<RunTimeline> =>
+    request<RunTimeline>(
+      `/v1/runs/${encodeURIComponent(runId)}/timeline?after=${after}`,
+    ),
 
   events: async (runId: string, after = 0): Promise<RunEvent[]> =>
     (await request<{ events: RunEvent[] }>(

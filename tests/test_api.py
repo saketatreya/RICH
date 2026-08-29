@@ -1378,3 +1378,46 @@ def test_acceptance_vocabulary_is_the_models_own(tmp_path):
         if "value" not in entry["takes"]:
             with pytest.raises(ModelValidationError):
                 AcceptanceStep.from_dict({**step, "value": "x"})
+
+
+def test_usage_and_timeline_read_the_durable_run(tmp_path):
+    store = RichStore(tmp_path)
+    project = store.create_project("Demo", project_id="project.demo")
+    run = store.create_run(
+        project["id"],
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        budget={
+            "max_model_attempts": 4,
+            "max_input_tokens": 128_000,
+            "max_output_tokens": 32_000,
+            "max_cost_usd": "2.50",
+            "max_execution_seconds": 480,
+        },
+        status="ready",
+    )
+    store.append_event(run["id"], "run.prepared", {"task_count": 2})
+    store.append_event(run["id"], "task.failed", {"summary": "lint command exited with 1"})
+    application = Application(store)
+
+    usage = application.handle("GET", f"/v1/runs/{run['id']}/usage")
+    timeline = application.handle("GET", f"/v1/runs/{run['id']}/timeline")
+    later = application.handle(
+        "GET", f"/v1/runs/{run['id']}/timeline", query={"after": ["1"]}
+    )
+
+    assert usage.status == 200
+    from decimal import Decimal
+
+    # Money is a decimal string; the store canonicalizes its scale, so compare
+    # as decimals rather than as the digits a person typed.
+    assert Decimal(usage.body["budget"]["max_cost_usd"]) == Decimal("2.50")
+    assert usage.body["used"]["model_attempts"] == 0
+    assert Decimal(usage.body["remaining"]["cost_usd"]) == Decimal("2.50")
+    assert usage.body["remaining"]["model_attempts"] == 4
+    assert timeline.status == 200 and timeline.body["settled"] is False
+    texts = [line["text"] for line in timeline.body["lines"]]
+    assert any("run.prepared" in text for text in texts)
+    assert any("task.failed" in text and "lint command exited with 1" in text for text in texts)
+    assert [line["sequence"] for line in later.body["lines"]] == [2]
+    assert application.handle("GET", "/v1/runs/run_missing/usage").status == 404
