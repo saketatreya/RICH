@@ -400,6 +400,15 @@ export interface ProjectState {
   scaffold: ScaffoldResult | null
   previews: Preview[]
   interview: InterviewDraft | null
+  /** Every approved (spec, architecture) pair, newest first. */
+  approved_designs: ApprovedDesign[]
+}
+
+export interface ApprovedDesign {
+  architecture_revision_id: string
+  spec_revision_id: string
+  approved_at: string | null
+  approval_id: string
 }
 
 export interface ChangePlan {

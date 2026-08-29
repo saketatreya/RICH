@@ -1072,3 +1072,101 @@ def test_every_surviving_obligation_is_still_fully_checked():
         for obligation in contract.obligations
     )
     compile_obligation_suite(contract)
+
+
+# --------------------------------------------------------------------------
+# A redraft carries an untouched layer's contract forward exactly. Change
+# locality is computed over contracts, so a redraft that reworded a contract
+# it did not need to change would stale every consumer for nothing.
+# --------------------------------------------------------------------------
+
+
+def _previous_design():
+    from richbuild.architect import PreviousDesign, assemble
+
+    project = _project()
+    architecture = assemble(project, _proposal(), target_pack="nextjs-app-router")
+    return PreviousDesign(project=project, architecture=architecture)
+
+
+def _redraft_keeping_domain():
+    document = copy.deepcopy(_proposal())
+    domain = next(c for c in document["components"] if c["layer"] == "domain")
+    domain["unchanged"] = True
+    domain["operations"] = []
+    domain["obligations"] = []
+    ui = next(c for c in document["components"] if c["layer"] == "ui")
+    ui["operations"].append(_operation("renderEmpty", BOOLEAN, MARKUP))
+    ui["obligations"].append(_obligation("example", "renderEmpty", argument=True, result=""))
+    return document
+
+
+def test_an_unchanged_layer_keeps_its_contract_byte_for_byte():
+    from richbuild.architect import assemble
+    from richbuild.change import compile_change
+
+    previous = _previous_design()
+    redrafted = assemble(
+        previous.project, _redraft_keeping_domain(), target_pack="nextjs-app-router", previous=previous
+    )
+
+    before = {c.id: c for c in previous.architecture.contracts}
+    after = {c.id: c for c in redrafted.contracts}
+    domain_id = previous.architecture.node_index["domain"].contract_id
+    assert after[domain_id].to_dict() == before[domain_id].to_dict()
+    assert redrafted.metadata["carried_forward"] == ["domain"]
+    web_id = previous.architecture.node_index["web"].contract_id
+    assert after[web_id].to_dict() != before[web_id].to_dict()
+
+    change = compile_change(
+        before_spec=previous.project,
+        after_spec=previous.project,
+        before_architecture=previous.architecture,
+        after_architecture=redrafted,
+    )
+    assert "domain" in change.reusable
+    assert "web" in change.stale
+
+
+def test_unchanged_is_refused_when_a_requirement_it_serves_changed():
+    from richbuild.architect import ArchitectProposalError, assemble
+    from richbuild.models import ProjectSpec
+
+    previous = _previous_design()
+    amended_document = previous.project.to_dict()
+    for requirement in amended_document["requirements"]:
+        if requirement["id"] == "req.todo":
+            requirement["statement"] = "A member can add a task with a due date."
+    amended = ProjectSpec.from_dict(amended_document)
+
+    with pytest.raises(ArchitectProposalError, match="req.todo.*redraft it"):
+        assemble(amended, _redraft_keeping_domain(), target_pack="nextjs-app-router", previous=previous)
+
+
+def test_unchanged_is_refused_without_a_previous_design_or_with_a_different_allocation():
+    from richbuild.architect import ArchitectProposalError, assemble
+
+    project = _project()
+    with pytest.raises(ArchitectProposalError, match="no previous design"):
+        assemble(project, _redraft_keeping_domain(), target_pack="nextjs-app-router")
+
+    previous = _previous_design()
+    moved = _redraft_keeping_domain()
+    domain = next(c for c in moved["components"] if c["layer"] == "domain")
+    domain["requirement_ids"] = ["req.todo", "req.a11y"]
+    with pytest.raises(ArchitectProposalError, match="requirements differ"):
+        assemble(project, moved, target_pack="nextjs-app-router", previous=previous)
+
+
+def test_the_redraft_prompt_shows_the_previous_design_and_the_rule():
+    from richbuild.architect import architect_prompt
+
+    previous = _previous_design()
+    system_prompt, user_prompt = architect_prompt(
+        previous.project, target_pack="nextjs-app-router", previous=previous
+    )
+    fresh_system, fresh_user = architect_prompt(previous.project, target_pack="nextjs-app-router")
+
+    assert '"unchanged": true' in system_prompt and "unchanged" not in fresh_system
+    assert "previous_components" in user_prompt and "previous_components" not in fresh_user
+    assert "normalizeTasks" in user_prompt

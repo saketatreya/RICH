@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   type AcceptanceVocabulary,
   type ArchitectureDraft,
+  type ApprovedDesign,
   type ArchitectureSubmission,
   type ExecutionStatus,
   type Health,
@@ -19,6 +20,7 @@ import {
 } from '../lib/api'
 import ApprovalGate from './ApprovalGate'
 import Assurance from './Assurance'
+import ChangeCost from './ChangeCost'
 import type { ContractDoc } from './Behaviour'
 import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
@@ -143,6 +145,7 @@ export default function ControlPlane() {
     useState<ArchitectureDraft | null>(null)
   const [prepared, setPrepared] = useState<PreparedRun | null>(null)
   const [scaffold, setScaffold] = useState<ScaffoldResult | null>(null)
+  const [approvedDesigns, setApprovedDesigns] = useState<ApprovedDesign[]>([])
   const [events, setEvents] = useState<RunEvent[]>([])
   const [execution, setExecution] = useState<ExecutionStatus | null>(null)
   const [projectId, setProjectId] = useState(restored.projectId || 'project.rich-demo')
@@ -315,6 +318,7 @@ export default function ControlPlane() {
     setArchitecture(state.architecture)
     setPrepared(state.prepared)
     setScaffold(state.scaffold)
+    setApprovedDesigns(state.approved_designs ?? [])
     setExecution(null)
     setEvents([])
     setRunTasks([])
@@ -454,6 +458,7 @@ export default function ControlPlane() {
         reason,
       )
       setArchitecture({ ...architecture, approval })
+      if (project) setApprovedDesigns((await api.projectState(project.id)).approved_designs ?? [])
       setNotice(approved ? 'Architecture approved.' : 'Architecture rejected.')
     })
   }
@@ -944,6 +949,19 @@ export default function ControlPlane() {
               busy={!!busy}
               onDecision={decideArchitecture}
             />
+            {project && architecture.approval.status === 'approved' && approvedDesigns.length >= 2 && (
+              <ChangeCost
+                projectId={project.id}
+                revisions={{
+                  fromSpec: approvedDesigns[1].spec_revision_id,
+                  toSpec: approvedDesigns[0].spec_revision_id,
+                  fromArchitecture: approvedDesigns[1].architecture_revision_id,
+                  toArchitecture: approvedDesigns[0].architecture_revision_id,
+                }}
+                onApplyAndBuild={buildRun}
+                busy={!!busy}
+              />
+            )}
             {architecture.approval.status === 'approved' && !prepared && (
               <section className="plane-panel" id="stage-run">
                 <div className="plane-section-title">

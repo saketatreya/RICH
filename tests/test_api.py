@@ -790,7 +790,8 @@ class RecordingArchitect:
         self.calls = []
         self.transform = transform
 
-    def propose(self, spec, *, target_pack, repair=None):
+    def propose(self, spec, *, target_pack, repair=None, previous=None):
+        self.previous = previous
         from richbuild.planner import plan_nextjs_architecture
 
         from dataclasses import replace

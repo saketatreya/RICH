@@ -18,6 +18,7 @@ from .interview import AdaptiveInterview, InterviewState
 from .interviewer import InterviewOutcome, form_fallback
 from .providers import ModelUsageRecoveryError, recover_model_usage
 from .runlog import format_event, run_is_settled
+from .architect import PreviousDesign
 from .change import compile_change
 from .models import ApprovalGate, ArchitectureSpec, ProjectSpec
 from .planner import ArchitectureProposal, plan_nextjs_architecture
@@ -71,6 +72,7 @@ class ArchitectProposer(Protocol):
         *,
         target_pack: str,
         repair: str | None = None,
+        previous: PreviousDesign | None = None,
     ) -> ArchitectureProposal:
         """Propose one decomposition. May raise; the caller decides what next."""
 
@@ -254,6 +256,7 @@ class ControlPlane:
                 preview for run in runs for preview in self.store.list_previews(run["id"])
             ],
             "interview": self.store.get_interview_draft(project_id),
+            "approved_designs": self.approved_designs(project_id),
         }
 
     def _prepared_view(self, run: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -703,8 +706,14 @@ class ControlPlane:
                 risks=tuple(proposal.risks),
                 source="planner",
             )
+        # A redraft starts from the last approved design, so a layer the
+        # amendment does not touch keeps its contract exactly and its
+        # consumers are not rebuilt for a rewording.
         proposal = self.architect.propose(
-            spec, target_pack=NextJsTargetPack.target_pack_id, repair=repair
+            spec,
+            target_pack=NextJsTargetPack.target_pack_id,
+            repair=repair,
+            previous=self._previous_design(project_id),
         )
         architecture = proposal.architecture
         architecture.validate_against_project(spec)
@@ -718,6 +727,45 @@ class ControlPlane:
             # be the one lie this surface cannot afford.
             source=proposal.source,
             rationale=str(architecture.metadata.get("rationale", "")),
+        )
+
+    def approved_designs(self, project_id: str) -> list[dict[str, Any]]:
+        """Every approved (spec, architecture) pair, newest first.
+
+        Two consecutive entries are what a change costs is computed between;
+        the newest is what a run is prepared from.
+        """
+
+        designs = []
+        for approval in self.store.list_approvals(project_id, status="approved"):
+            if approval["gate"] != ApprovalGate.ARCHITECTURE.value:
+                continue
+            request = approval["request"]
+            designs.append(
+                {
+                    "architecture_revision_id": request["revision_id"],
+                    "spec_revision_id": request["spec_revision_id"],
+                    "approved_at": approval.get("decided_at"),
+                    "approval_id": approval["id"],
+                }
+            )
+        designs.reverse()
+        return designs
+
+    def _previous_design(self, project_id: str) -> PreviousDesign | None:
+        designs = self.approved_designs(project_id)
+        if not designs:
+            return None
+        latest = designs[0]
+        return PreviousDesign(
+            project=ProjectSpec.from_dict(
+                self._revision_document(project_id, latest["spec_revision_id"], "product_spec")
+            ),
+            architecture=ArchitectureSpec.from_dict(
+                self._revision_document(
+                    project_id, latest["architecture_revision_id"], "architecture"
+                )
+            ),
         )
 
     def _approved_spec(

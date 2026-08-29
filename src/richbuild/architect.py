@@ -155,6 +155,10 @@ class ComponentProposal:
     requirement_ids: tuple[str, ...]
     operations: tuple[OperationProposal, ...]
     obligations: tuple[ObligationProposal, ...] = ()
+    # Carried forward from the previous approved design: the contract is
+    # reused exactly, so consumers see nothing new and change locality holds.
+    unchanged: bool = False
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,11 +264,14 @@ def architect_response_schema(
                         },
                         "operations": {
                             "type": "array",
-                            "minItems": 1,
                             "maxItems": _MAX_OPERATIONS_PER_COMPONENT,
                             "items": operation,
                         },
                         "obligations": {"type": "array", "items": obligation},
+                        # True only when redrafting: this component's contract
+                        # is carried forward from the previous design exactly,
+                        # and its operations and obligations are omitted.
+                        "unchanged": {"type": "boolean"},
                     },
                     "required": [
                         "layer",
@@ -321,10 +328,15 @@ def decode_proposal(document: Mapping[str, Any]) -> DecompositionProposal:
             raise ArchitectProposalError(
                 f"unknown layer {layer!r}; expected one of {sorted(LAYER_NODE_IDS)}"
             )
+        unchanged = entry.get("unchanged", False)
+        if not isinstance(unchanged, bool):
+            raise ArchitectProposalError(
+                f"component {layer!r}: 'unchanged' must be true or false"
+            )
         operations = tuple(
             _decode_operation(item) for item in _sequence(entry, "operations", layer)
         )
-        if not operations:
+        if not operations and not unchanged:
             raise ArchitectProposalError(
                 f"component {layer!r} declares no operations"
             )
@@ -351,6 +363,7 @@ def decode_proposal(document: Mapping[str, Any]) -> DecompositionProposal:
                     _decode_obligation(item, layer)
                     for item in _sequence(entry, "obligations", layer)
                 ),
+                unchanged=unchanged,
             )
         )
 
@@ -443,18 +456,81 @@ def _optional_name(value: Any) -> str | None:
     return text or None
 
 
+@dataclass(frozen=True, slots=True)
+class PreviousDesign:
+    """The approved spec and architecture a redraft starts from."""
+
+    project: ProjectSpec
+    architecture: ArchitectureSpec
+
+
+def _carried_contract(
+    project: ProjectSpec,
+    component: ComponentProposal,
+    previous: PreviousDesign | None,
+) -> Contract:
+    """The previous design's contract for this layer, if it may be reused.
+
+    Change locality is computed over contracts, so a redraft that reworded a
+    contract it did not need to change would stale every consumer for nothing.
+    Reuse is exact -- the same Contract object -- and allowed only when the
+    component existed before, serves the same requirements, and every one of
+    those requirements is identical in the amended specification. Anything else
+    is a rejection with the reason, so the architect redrafts that component
+    instead of silently carrying a promise the spec no longer makes.
+    """
+
+    layer = component.layer
+    if previous is None:
+        raise ArchitectProposalError(
+            f"component {layer!r} is marked unchanged but there is no previous "
+            "design to carry it from"
+        )
+    node_id = LAYER_NODE_IDS[layer]
+    node = previous.architecture.node_index.get(node_id)
+    if node is None or node.contract_id is None:
+        raise ArchitectProposalError(
+            f"component {layer!r} is marked unchanged but the previous design "
+            "has no such component"
+        )
+    proposed = tuple(sorted(set(component.requirement_ids)))
+    if proposed != tuple(sorted(node.requirement_ids)):
+        raise ArchitectProposalError(
+            f"component {layer!r} is marked unchanged but its requirements "
+            f"differ from the previous design ({sorted(node.requirement_ids)}); "
+            "redraft it or keep its allocation"
+        )
+    previous_index = previous.project.requirement_index
+    changed = [
+        requirement_id
+        for requirement_id in proposed
+        if requirement_id not in previous_index
+        or previous_index[requirement_id].to_dict()
+        != project.requirement_index[requirement_id].to_dict()
+    ]
+    if changed:
+        raise ArchitectProposalError(
+            f"component {layer!r} is marked unchanged but requirements it "
+            f"serves changed in this revision: {changed}; redraft it"
+        )
+    contracts = {contract.id: contract for contract in previous.architecture.contracts}
+    return contracts[node.contract_id]
+
+
 def compile_decomposition(
     project: ProjectSpec,
     proposal: DecompositionProposal,
     *,
     target_pack: str,
     architecture_id: str | None = None,
+    previous: PreviousDesign | None = None,
 ) -> ArchitectureSpec:
     """Assemble a validated architecture from a decomposition.
 
     Every identifier, path and edge below is derived. The model chose what the
     components are and what they promise; it did not choose how they are wired,
-    because that is not a judgement call.
+    because that is not a judgement call. A component marked unchanged keeps
+    the previous design's contract exactly, when the spec still lets it.
     """
 
     known = set(project.requirement_index)
@@ -484,11 +560,16 @@ def compile_decomposition(
     # provider's entry type has to exist before the consumer's port can name it.
     skipped: list[str] = []
     contracts_by_layer = {
-        layer: _component_contract(
-            project, by_layer[layer], LAYER_NODE_IDS[layer], skipped
+        layer: (
+            _carried_contract(project, by_layer[layer], previous)
+            if by_layer[layer].unchanged
+            else _component_contract(
+                project, by_layer[layer], LAYER_NODE_IDS[layer], skipped
+            )
         )
         for layer in layers
     }
+    carried = tuple(layer for layer in layers if by_layer[layer].unchanged)
     dependencies = tuple(
         (consumer, provider)
         for consumer, provider in LAYER_DEPENDENCIES
@@ -595,6 +676,8 @@ def compile_decomposition(
             # What the vocabulary could not express, kept where a reviewer will
             # see it rather than silently discarded.
             "dropped_obligations": list(skipped),
+            # Which components kept their previous contract exactly.
+            "carried_forward": list(carried),
         },
     )
     architecture.validate_against_project(project)
@@ -897,8 +980,46 @@ _COMPOSITION_OUTPUT = ValueType.from_dict(
 )
 
 
+def _previous_components(previous: PreviousDesign) -> list[dict[str, Any]]:
+    """The previous design as the model should see it: compact, by layer."""
+
+    contracts = {contract.id: contract for contract in previous.architecture.contracts}
+    described = []
+    for layer, node_id in sorted(LAYER_NODE_IDS.items()):
+        node = previous.architecture.node_index.get(node_id)
+        if node is None or node.contract_id is None:
+            continue
+        contract = contracts[node.contract_id]
+        described.append(
+            {
+                "layer": layer,
+                "purpose": str(node.metadata.get("purpose", "")),
+                "requirement_ids": sorted(node.requirement_ids),
+                "operations": [
+                    {
+                        "name": operation.name,
+                        "description": operation.description,
+                        "input": operation.input_type.to_dict()
+                        if operation.input_type is not None
+                        else None,
+                        "output": operation.output_type.to_dict()
+                        if operation.output_type is not None
+                        else None,
+                    }
+                    for operation in contract.operations
+                ],
+                "obligations": len(contract.obligations),
+            }
+        )
+    return described
+
+
 def architect_prompt(
-    project: ProjectSpec, *, target_pack: str, repair: str | None = None
+    project: ProjectSpec,
+    *,
+    target_pack: str,
+    repair: str | None = None,
+    previous: PreviousDesign | None = None,
 ) -> tuple[str, str]:
     """Return the (system, user) prompt pair for one architect attempt."""
 
@@ -946,6 +1067,19 @@ def architect_prompt(
         "Prefer few, meaningful operations over one per requirement. Prefer "
         "obligations that a wrong implementation would actually fail."
     )
+    if previous is not None:
+        system_prompt += (
+            "\n\nThis is a redraft of an approved design after the specification "
+            "was amended. previous_components shows what each layer promised. "
+            "Return every layer you keep. For a layer whose promise need not "
+            "change, set \"unchanged\": true and omit its operations and "
+            "obligations: its contract is carried forward exactly, and only a "
+            "layer that serves a requirement that changed, or whose requirement "
+            "allocation changes, may not be unchanged. Every contract you "
+            "rewrite makes its consumers rebuild, so change the fewest layers "
+            "the amendment genuinely requires, and where you do change one keep "
+            "its operation names and types wherever you can."
+        )
     document = {
         "project": {
             "id": project.id,
@@ -961,6 +1095,8 @@ def architect_prompt(
             scenario.to_dict() for scenario in project.acceptance_scenarios
         ],
     }
+    if previous is not None:
+        document["previous_components"] = _previous_components(previous)
     user_prompt = (
         "Decompose this approved specification.\n"
         + json.dumps(document, ensure_ascii=False, sort_keys=True, indent=None)
@@ -979,6 +1115,7 @@ def assemble(
     *,
     target_pack: str,
     architecture_id: str | None = None,
+    previous: PreviousDesign | None = None,
 ) -> ArchitectureSpec:
     """Decode and assemble one model answer, or raise a repairable message."""
 
@@ -989,6 +1126,7 @@ def assemble(
             proposal,
             target_pack=target_pack,
             architecture_id=architecture_id,
+            previous=previous,
         )
     except ModelValidationError as exc:
         # Surfaced as a proposal error so a caller has one exception type to
@@ -1061,6 +1199,7 @@ def propose_architecture(
     timeout_seconds: float = ARCHITECT_TIMEOUT_SECONDS,
     architecture_id: str | None = None,
     initial_repair: str | None = None,
+    previous: PreviousDesign | None = None,
 ) -> ArchitectOutcome:
     """Ask a model for a decomposition, and keep asking only while it is learning.
 
@@ -1081,7 +1220,7 @@ def propose_architecture(
     repair: str | None = initial_repair
     for attempt in range(1, max_attempts + 1):
         system_prompt, user_prompt = architect_prompt(
-            project, target_pack=target_pack, repair=repair
+            project, target_pack=target_pack, repair=repair, previous=previous
         )
         response = gateway.generate(
             ModelRequest(
@@ -1111,6 +1250,7 @@ def propose_architecture(
                 document,
                 target_pack=target_pack,
                 architecture_id=architecture_id,
+                previous=previous,
             )
         except ArchitectProposalError as exc:
             repair = str(exc)
@@ -1181,6 +1321,7 @@ class ModelArchitect:
         *,
         target_pack: str,
         repair: str | None = None,
+        previous: PreviousDesign | None = None,
     ) -> ArchitectureProposal:
         outcome = propose_architecture(
             spec,
@@ -1194,12 +1335,25 @@ class ModelArchitect:
             max_cost_usd=self.attempt_cost_usd,
             max_attempts=self.max_attempts,
             initial_repair=repair,
+            previous=previous,
+        )
+        carried = outcome.architecture.metadata.get("carried_forward") or []
+        decisions = tuple(
+            item
+            for item in (
+                outcome.rationale,
+                (
+                    "Carried forward unchanged from the previous design: "
+                    + ", ".join(str(layer) for layer in carried)
+                )
+                if carried
+                else "",
+            )
+            if item
         )
         return ArchitectureProposal(
             architecture=outcome.architecture,
-            decisions=(
-                (outcome.rationale,) if outcome.rationale else ()
-            ),
+            decisions=decisions,
             # The rejections travel as risks so a fallback is legible: the
             # reviewer sees the baseline *and* what the model got wrong.
             risks=outcome.rejections,

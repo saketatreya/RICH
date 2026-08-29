@@ -18,6 +18,9 @@ import { api, type ChangePlan, type ChangeRevisions } from '../lib/api'
 interface Props {
   projectId: string
   revisions: ChangeRevisions | null
+  /** Mark the stale components, then build over the newest approved design. */
+  onApplyAndBuild?: () => void
+  busy?: boolean
 }
 
 function Bucket({
@@ -47,7 +50,7 @@ function Bucket({
   )
 }
 
-export default function ChangeCost({ projectId, revisions }: Props) {
+export default function ChangeCost({ projectId, revisions, onApplyAndBuild, busy: outerBusy }: Props) {
   const [plan, setPlan] = useState<ChangePlan | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -90,9 +93,9 @@ export default function ChangeCost({ projectId, revisions }: Props) {
       </p>
 
       {!revisions && (
-        <p className="plane-note-warn">
-          Two approved revisions are needed to compare. Amend the specification
-          and approve it, then come back.
+        <p className="plane-note">
+          Amend the specification, approve it, and approve a redrafted architecture:
+          the cost is computed between the last two approved designs.
         </p>
       )}
 
@@ -114,6 +117,21 @@ export default function ChangeCost({ projectId, revisions }: Props) {
               }
             >
               {busy === 'apply' ? 'Marking…' : 'Mark these stale'}
+            </button>
+          )}
+          {change && onApplyAndBuild && (
+            <button
+              className="go"
+              disabled={!!busy || !!outerBusy}
+              onClick={async () => {
+                if (!applied && change.stale.length > 0) {
+                  await run('apply', () => api.applyChange(projectId, revisions))
+                }
+                onApplyAndBuild()
+              }}
+              title="Forget the stale components' remembered answers, then build over the newest approved design; every gate runs again regardless"
+            >
+              Apply and build →
             </button>
           )}
         </div>

@@ -694,3 +694,54 @@ def test_interview_turn_guards_the_draft_revision_and_the_message(tmp_path):
         control_plane.interview_turn(project["id"], message="Again.", expected_draft_revision=0)
     with pytest.raises(ValueError, match="needs a message"):
         control_plane.interview_turn(project["id"], message="   ", expected_draft_revision=1)
+
+
+def test_a_redraft_starts_from_the_last_approved_design(tmp_path):
+    """The architect is handed the approved spec and architecture it is
+    redrafting from, so a layer the amendment does not touch can keep its
+    contract exactly -- and before any design is approved it is handed nothing."""
+
+    class RecordingArchitect:
+        def __init__(self):
+            self.previous = []
+
+        def propose(self, spec, *, target_pack, repair=None, previous=None):
+            from richbuild.planner import plan_nextjs_architecture
+
+            self.previous.append(previous)
+            return plan_nextjs_architecture(spec)
+
+    architect = RecordingArchitect()
+    control_plane = ControlPlane(RichStore(tmp_path), architect=architect)
+    project = control_plane.create_project(project_id="project.todo", name="Founder Todo")
+    spec = control_plane.submit_interview(
+        project_id=project["id"], project_name=project["name"], answers=_answers(), expected_revision=0
+    )
+    control_plane.decide_approval(spec.approval["id"], approved=True, actor="founder")
+    assert control_plane.approved_designs(project["id"]) == []
+
+    first = control_plane.draft_architecture(
+        project_id=project["id"], spec_revision_id=spec.revision.id, spec_approval_id=spec.approval["id"]
+    )
+    assert architect.previous == [None]
+
+    recorded = control_plane.revise_architecture(
+        project_id=project["id"],
+        spec_revision_id=spec.revision.id,
+        spec_approval_id=spec.approval["id"],
+        expected_revision=1,
+        document=first.architecture.to_dict(),
+    )
+    control_plane.decide_approval(recorded.approval["id"], approved=True, actor="founder")
+    designs = control_plane.approved_designs(project["id"])
+    assert [d["architecture_revision_id"] for d in designs] == [recorded.revision.id]
+    assert designs[0]["spec_revision_id"] == spec.revision.id
+
+    control_plane.draft_architecture(
+        project_id=project["id"], spec_revision_id=spec.revision.id, spec_approval_id=spec.approval["id"]
+    )
+    previous = architect.previous[1]
+    assert previous is not None
+    assert previous.architecture.to_dict() == first.architecture.to_dict()
+    assert previous.project.to_dict() == spec.spec.to_dict()
+    assert control_plane.project_state(project["id"])["approved_designs"] == designs
