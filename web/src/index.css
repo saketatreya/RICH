@@ -1130,3 +1130,5 @@ button.plane-secondary:disabled { opacity: .55; cursor: default; }
 .plane-push-error { color: var(--failed); }
 .plane-push-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 3px; color: var(--ink-dim); }
 .plane-push-list a { color: var(--ink); }
+.plane-owner-note { margin: 8px 0 0; font-size: 13px; line-height: 1.5; color: var(--ink-dim); }
+.plane-owner-note b { color: var(--ink); font-family: var(--mono); font-weight: 600; }

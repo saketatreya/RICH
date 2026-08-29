@@ -39,12 +39,15 @@ export default function RunMonitor({
   onBuildAgain,
   onAmend,
   onInspect,
+  onRebuildNode,
 }: {
   run: Run
   events: RunEvent[]
   onBuildAgain: () => void
   onAmend: () => void
   onInspect: () => void
+  /** Forget one node's generation and build again; the run names which. */
+  onRebuildNode?: (nodeId: string) => void | Promise<void>
 }) {
   const [usage, setUsage] = useState<RunUsage | null>(null)
   const [timeline, setTimeline] = useState<RunTimeline | null>(null)
@@ -106,6 +109,16 @@ export default function RunMonitor({
         event.sequence > executionError.sequence &&
         ['run.execution_requested', 'run.execution_finished'].includes(event.event_type),
     )
+  // A browser scenario that fails on a page another component owns reopens
+  // that component; when the owners have no attempts left the run stops
+  // there and says so. Naming them is what makes "rebuild" a specific act.
+  const withheld = [...events]
+    .reverse()
+    .find((event) => event.event_type === 'task.retry_withheld')
+  const exhaustedOwners: string[] = Array.isArray(withheld?.payload.exhausted_node_ids)
+    ? (withheld!.payload.exhausted_node_ids as unknown[]).map(String)
+    : []
+  const reopenings = events.filter((event) => event.event_type === 'task.reopened').length
   const spent = usage?.used ? Number(usage.used.cost_usd) : 0
   const ceiling = usage ? Number(usage.budget.max_cost_usd) : 0
   const fraction = ceiling > 0 ? Math.min(1, spent / ceiling) : 0
@@ -188,6 +201,16 @@ export default function RunMonitor({
               same approved design and every unchanged part replays from memory instead of being
               paid for twice; or change the design first.
             </p>
+            {exhaustedOwners.length > 0 && (
+              <p className="plane-owner-note">
+                <b>{exhaustedOwners.join(', ')}</b>{' '}
+                {exhaustedOwners.length === 1 ? 'owns' : 'own'} the pages the browser scenarios
+                failed on and used every attempt
+                {reopenings > 0 && ` (reopened ${reopenings} time${reopenings === 1 ? '' : 's'})`}.
+                Rebuilding {exhaustedOwners.length === 1 ? 'it' : 'them'} starts a fresh generation
+                that is shown what failed.
+              </p>
+            )}
             {lastFailure && (
               <div className="plane-failure">
                 <span className="plane-eyebrow">
@@ -204,7 +227,16 @@ export default function RunMonitor({
             )}
           </div>
           <div className="plane-next-buttons">
-            <button className="primary" onClick={onBuildAgain}>Build again →</button>
+            {exhaustedOwners.length > 0 && onRebuildNode
+              ? exhaustedOwners.map((nodeId) => (
+                  <button className="primary" key={nodeId} onClick={() => void onRebuildNode(nodeId)}>
+                    Rebuild {nodeId} and build again →
+                  </button>
+                ))
+              : <button className="primary" onClick={onBuildAgain}>Build again →</button>}
+            {exhaustedOwners.length > 0 && (
+              <button onClick={onBuildAgain}>Build again as is</button>
+            )}
             <button onClick={onInspect}>Rebuild one component</button>
             <button onClick={onAmend}>Amend the design</button>
           </div>
