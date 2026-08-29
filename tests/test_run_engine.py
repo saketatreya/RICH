@@ -1156,7 +1156,7 @@ def test_default_executor_recovers_budget_only_after_claiming_lease(
     continue_construction = threading.Event()
     recovered_usage = {}
 
-    def runtime_builder(budget, *, event_history, event_sink, route=None):
+    def runtime_builder(budget, *, event_history, event_sink, route=None, cache_root=None):
         approved = RunBudget.from_mapping(budget)
         usage = recover_model_usage(event_history)
         recovered_usage["value"] = usage
@@ -2017,3 +2017,33 @@ def test_a_failed_acceptance_names_its_failed_steps_leniently():
     assert _observed_acceptance_failures(
         ExecutionResult(argv=("pnpm",), returncode=0, stdout="clean\n", stderr="", duration_seconds=1.0)
     ) == []
+
+
+def test_gates_see_the_shared_cache_read_only(tmp_path):
+    """The bootstrap wrote it; no gate may. The browsers path follows the cache."""
+    from richbuild.executor import BubblewrapExecutor, ExecutionResult, SandboxPolicy
+    from richbuild.run_engine import BubblewrapCommandRunner, VerificationCommand
+
+    seen = {}
+
+    class RecordingExecutor(BubblewrapExecutor):
+        def run(self, root, argv, policy=None, *, cancellation=None, deadline=None):
+            assert isinstance(policy, SandboxPolicy)
+            seen["policy"] = policy
+            return ExecutionResult(argv=tuple(argv), returncode=0, stdout="", stderr="", duration_seconds=0.01)
+
+    cache_root = tmp_path / "cache"
+    runner = BubblewrapCommandRunner(RecordingExecutor(executable="/usr/bin/python3"), cache_root=cache_root)
+    assert runner.playwright_browsers_path == "/opt/rich-cache/playwright"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    runner.run(workspace, VerificationCommand(kind="lint", argv=("pnpm", "run", "lint")))
+
+    policy = seen["policy"]
+    assert policy.environment["PLAYWRIGHT_BROWSERS_PATH"] == "/opt/rich-cache/playwright"
+    assert [(m.guest_path, m.writable) for m in policy.cache_mounts] == [
+        ("/opt/rich-cache/pnpm-store", False),
+        ("/opt/rich-cache/playwright", False),
+    ]
+    assert policy.network is False

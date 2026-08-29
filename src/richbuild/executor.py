@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import contextlib
+import fcntl
 import json
 import math
 import os
@@ -15,7 +17,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Callable, Mapping, Sequence
+from typing import Iterator, Callable, Mapping, Sequence
 
 import yaml
 
@@ -58,6 +60,8 @@ class SandboxPolicy:
     working_directory: str = "."
     network: bool = False
     environment: Mapping[str, str] = field(default_factory=dict)
+    # Shared caches below /opt/rich-cache; see CacheMount for the trust rule.
+    cache_mounts: tuple[CacheMount, ...] = ()
     timeout_seconds: float = 60
     max_memory_bytes: int = 1_073_741_824
     max_file_bytes: int = 268_435_456
@@ -79,6 +83,14 @@ class SandboxPolicy:
         _safe_relative(self.working_directory)
         for path in self.writable_paths:
             _safe_relative(path)
+        guests = [PurePosixPath(mount.guest_path) for mount in self.cache_mounts]
+        if len(set(guests)) != len(guests):
+            raise SandboxPolicyError("cache mounts must target distinct guest paths")
+        for guest in guests:
+            if not guest.is_absolute() or CACHE_GUEST_ROOT not in guest.parents:
+                raise SandboxPolicyError(
+                    f"cache mounts must target a child of {CACHE_GUEST_ROOT}"
+                )
         if any(
             not isinstance(key, str)
             or not isinstance(value, str)
@@ -136,6 +148,59 @@ class ToolMount:
                 "tool mounts must target a child of /opt/rich-tools"
             )
         return host, guest
+
+
+CACHE_GUEST_ROOT = PurePosixPath("/opt/rich-cache")
+CACHE_STORE_GUEST = str(CACHE_GUEST_ROOT / "pnpm-store")
+CACHE_BROWSERS_GUEST = str(CACHE_GUEST_ROOT / "playwright")
+
+
+@dataclass(frozen=True, slots=True)
+class CacheMount:
+    """A shared dependency cache mounted below /opt/rich-cache.
+
+    Writable only during the trusted bootstrap -- pnpm and Playwright's own
+    installers, lifecycle scripts disabled, no generated code running -- and
+    read-only for every gate, so a run's own source can never alter the
+    store a later run installs from or the browser a later run is judged by.
+    """
+
+    host_path: Path
+    guest_path: str
+    writable: bool = False
+
+    def validated(self) -> tuple[Path, PurePosixPath]:
+        host = Path(self.host_path).resolve(strict=True)
+        if not host.is_dir():
+            raise SandboxPolicyError(f"cache mount is not a directory: {host}")
+        guest = PurePosixPath(self.guest_path)
+        if (
+            not guest.is_absolute()
+            or guest == CACHE_GUEST_ROOT
+            or CACHE_GUEST_ROOT not in guest.parents
+            or ".." in guest.parts
+        ):
+            raise SandboxPolicyError(
+                f"cache mounts must target a child of {CACHE_GUEST_ROOT}"
+            )
+        return host, guest
+
+
+def cache_mounts_for(cache_root: str | Path, *, writable: bool) -> tuple[CacheMount, ...]:
+    """The two mounts a shared cache root provides: the pnpm store and the browsers.
+
+    Created here so a first run finds them; a later run finds them full.
+    """
+
+    root = Path(cache_root).resolve()
+    store = root / "pnpm-store"
+    browsers = root / "playwright"
+    for directory in (store, browsers):
+        directory.mkdir(parents=True, exist_ok=True)
+    return (
+        CacheMount(store, CACHE_STORE_GUEST, writable),
+        CacheMount(browsers, CACHE_BROWSERS_GUEST, writable),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +303,11 @@ class WorkspaceBootstrapper:
 
     runtime: TrustedNodePnpmRuntime
     runtime_directory: str = ".rich/runtime"
+    # A shared cache root on the host. Set, the pnpm store and the Playwright
+    # browsers live there across runs -- mounted writable for this trusted
+    # install only, and read-only for every gate -- so a second build does not
+    # download the world again. Unset, both live inside the workspace.
+    cache_root: str | Path | None = None
     # One budget covers both installs. A cold bootstrap of the Next.js pack
     # measured ~7 minutes for the frozen dependency graph (~1.6 GiB) and ~4 for
     # Chromium (~650 MiB), which overran the previous 600s ceiling on a healthy
@@ -292,6 +362,13 @@ class WorkspaceBootstrapper:
         runtime_path = str(_safe_relative(self.runtime_directory))
         store_path = f"{runtime_path}/pnpm-store"
         browser_path = f"{runtime_path}/playwright"
+        cache_mounts: tuple[CacheMount, ...] = ()
+        store_guest = f"/workspace/{store_path}"
+        browsers_guest = f"/workspace/{browser_path}"
+        if self.cache_root is not None:
+            cache_mounts = cache_mounts_for(self.cache_root, writable=True)
+            store_guest = CACHE_STORE_GUEST
+            browsers_guest = CACHE_BROWSERS_GUEST
         writable_paths = tuple(
             dict.fromkeys(
                 (
@@ -320,13 +397,14 @@ class WorkspaceBootstrapper:
             "NODE_OPTIONS": (
                 "--disable-wasm-trap-handler --max-old-space-size=1536"
             ),
-            "PLAYWRIGHT_BROWSERS_PATH": f"/workspace/{browser_path}",
+            "PLAYWRIGHT_BROWSERS_PATH": browsers_guest,
             "PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT": "60000",
         }
         policy = SandboxPolicy(
             writable_paths=writable_paths,
             network=True,
             environment=common_environment,
+            cache_mounts=cache_mounts,
             timeout_seconds=self.timeout_seconds,
             max_memory_bytes=3_221_225_472,
             max_file_bytes=536_870_912,
@@ -334,6 +412,23 @@ class WorkspaceBootstrapper:
             max_cpu_seconds=max(1, int(self.timeout_seconds)),
             max_output_bytes=self.max_output_bytes,
         )
+        # Two bootstraps writing one cache at once could leave a half-installed
+        # browser for the other to find; a lock on the cache root serializes
+        # them. Bootstraps with no shared cache do not wait on each other.
+        with _cache_lock(self.cache_root):
+            return self._install(
+                root, policy, store_guest, install_browser, cancellation, bootstrap_deadline
+            )
+
+    def _install(
+        self,
+        root: Path,
+        policy: SandboxPolicy,
+        store_guest: str,
+        install_browser: bool,
+        cancellation: Callable[[], bool] | None,
+        bootstrap_deadline: float,
+    ) -> WorkspaceBootstrapResult:
         dependency_install = self.runtime.executor.run(
             root,
             self.runtime.pnpm_argv(
@@ -343,7 +438,7 @@ class WorkspaceBootstrapper:
                 "--strict-peer-dependencies",
                 "--verify-store-integrity",
                 "--store-dir",
-                f"/workspace/{store_path}",
+                store_guest,
                 "--network-concurrency",
                 str(self.max_network_concurrency),
                 "--fetch-retries",
@@ -400,6 +495,21 @@ class WorkspaceBootstrapper:
         """Wait until the trusted executor owns no live process group."""
 
         return self.runtime.executor.wait_for_idle(timeout)
+
+
+@contextlib.contextmanager
+def _cache_lock(cache_root: str | Path | None) -> Iterator[None]:
+    if cache_root is None:
+        yield
+        return
+    root = Path(cache_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / ".bootstrap.lock").open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _safe_relative(value: str) -> PurePosixPath:
@@ -534,6 +644,14 @@ class BubblewrapExecutor:
             for alias in self.tool_aliases:
                 target, guest_path = alias.validated()
                 command.extend(["--symlink", str(target), str(guest_path)])
+
+        if policy.cache_mounts:
+            command.extend(["--dir", str(CACHE_GUEST_ROOT)])
+            for cache in policy.cache_mounts:
+                host_path, guest_path = cache.validated()
+                command.extend(
+                    ["--bind" if cache.writable else "--ro-bind", str(host_path), str(guest_path)]
+                )
 
         mounted: set[PurePosixPath] = set()
         for relative in sorted(

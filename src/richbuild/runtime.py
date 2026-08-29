@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from decimal import Decimal
 import os
+from pathlib import Path
 from typing import Any
 
 from .architect import ModelArchitect
@@ -185,6 +186,7 @@ class DefaultRunRuntimeFactory:
         budget: RunBudget | Mapping[str, Any],
         *,
         event_history: Iterable[Mapping[str, Any]] = (),
+        cache_root: str | Path | None = None,
     ) -> DefaultRunRuntime:
         approved_budget = (
             budget
@@ -228,7 +230,7 @@ class DefaultRunRuntimeFactory:
             model_provider=provider,
             gateway=gateway,
             toolchain=toolchain,
-            bootstrapper=WorkspaceBootstrapper(toolchain),
+            bootstrapper=WorkspaceBootstrapper(toolchain, cache_root=cache_root),
             commands=PinnedRunCommands.for_toolchain(toolchain),
             provider_name=MODEL_ROUTES[self.route],
             route=self.route,
@@ -247,6 +249,7 @@ def default_run_runtime(
         trusted_node_pnpm_runtime
     ),
     route: str = API_ROUTE,
+    cache_root: str | Path | None = None,
 ) -> DefaultRunRuntime:
     """Construct the default runtime through a convenient callable interface."""
 
@@ -256,7 +259,7 @@ def default_run_runtime(
         transport=transport,
         toolchain_factory=toolchain_factory,
         route=route,
-    )(budget, event_history=event_history)
+    )(budget, event_history=event_history, cache_root=cache_root)
 
 
 def _environment_anthropic_api_key() -> str:

@@ -280,6 +280,14 @@ Dependency and Chromium installation is a distinct network-enabled bootstrap. It
 the frozen lockfile, strict peers, store-integrity verification, ignored lifecycle
 scripts, bounded fetch concurrency/retries, and one pnpm import worker.
 
+The pnpm store and the Playwright browsers live in one shared cache per state directory
+(`<state>/../cache`, beside the workspaces), mounted below `/opt/rich-cache`: writable only
+during that trusted bootstrap — pnpm's and Playwright's own installers, lifecycle scripts
+disabled, no generated code running, under a lock so two bootstraps never write it at
+once — and read-only for every gate, so a run's own source can never alter the store a
+later run installs from or the browser a later run is judged by. A second build installs
+from what the first one downloaded instead of downloading the world again.
+
 All sandbox processes run in dedicated process groups. Caller cancellation, lease loss,
 and timeout share the same bounded termination-and-reaping path.
 

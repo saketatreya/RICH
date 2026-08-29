@@ -183,11 +183,16 @@ class DefaultRunExecutor:
             )
             model_events.bind(execution_owner.owner_token)
 
+            # One shared cache per state directory, beside the workspaces: the
+            # pnpm store and the browsers survive across runs, so a second
+            # build installs from what the first one downloaded.
+            cache_root = self.store.root.parent / "cache"
             runtime = self.runtime_builder(
                 run["budget"],
                 event_history=event_history,
                 event_sink=model_events,
                 route=self.route,
+                cache_root=cache_root,
             )
             commands = runtime.commands
             config = RunEngineConfig(
@@ -209,6 +214,7 @@ class DefaultRunExecutor:
                 command_runner=BubblewrapCommandRunner(
                     runtime.executor,
                     timeout_seconds=600,
+                    cache_root=cache_root,
                 ),
                 provider=runtime.provider_name,
                 model=runtime.model,

@@ -141,3 +141,27 @@ def test_availability_names_a_toolchain_that_drifted(tmp_path, monkeypatch):
     reason = DefaultRunExecutor(RichStore(tmp_path)).availability()
     assert reason is not None
     assert "expected 22.23.2, found 23.0.0" in reason and "rich doctor" in reason
+
+
+def test_the_cache_root_lives_beside_the_workspaces(tmp_path):
+    """One shared cache per state directory, so a second build installs from
+    what the first one downloaded. Captured at the runtime builder, which is
+    the one place both the bootstrap and the gates learn it from."""
+    from richbuild.execution import DefaultRunExecutor
+
+    store = RichStore(tmp_path / "state")
+    run = _run(store)
+    captured = {}
+
+    class Stop(Exception):
+        pass
+
+    def builder(budget, *, event_history, event_sink, route, cache_root):
+        captured["cache_root"] = cache_root
+        raise Stop()
+
+    workspace = tmp_path / "workspaces" / "demo"
+    workspace.mkdir(parents=True)
+    with pytest.raises(Stop):
+        DefaultRunExecutor(store, runtime_builder=builder).execute(run_id=run["id"], workspace=workspace)
+    assert captured["cache_root"] == (tmp_path / "state").parent / "cache"

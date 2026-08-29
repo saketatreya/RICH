@@ -396,3 +396,102 @@ def test_bubblewrap_conformance_read_write_and_isolation(tmp_path):
     assert result.passed, result.stderr
     assert (tmp_path / "out" / "result.txt").read_text() == "written"
     assert not (tmp_path / "result.txt").exists()
+
+
+# --------------------------------------------------------------------------
+# A shared dependency cache: written by the trusted bootstrap only, read-only
+# for every gate, so a second build does not download the world again and a
+# run's own source can never alter what a later run installs or is judged by.
+# --------------------------------------------------------------------------
+
+
+def test_cache_mounts_live_below_the_cache_root_and_must_exist(tmp_path):
+    from richbuild.executor import CacheMount, SandboxPolicyError
+
+    store = tmp_path / "pnpm-store"
+    store.mkdir()
+    host, guest = CacheMount(store, "/opt/rich-cache/pnpm-store", True).validated()
+    assert host == store.resolve() and str(guest) == "/opt/rich-cache/pnpm-store"
+    with pytest.raises(SandboxPolicyError, match="child of /opt/rich-cache"):
+        CacheMount(store, "/opt/rich-tools/pnpm-store").validated()
+    with pytest.raises(SandboxPolicyError, match="child of /opt/rich-cache"):
+        CacheMount(store, "/opt/rich-cache").validated()
+    with pytest.raises(FileNotFoundError):
+        CacheMount(tmp_path / "missing", "/opt/rich-cache/x").validated()
+
+
+def test_the_sandbox_binds_the_cache_writable_or_read_only_as_told(tmp_path):
+    from richbuild.executor import SandboxPolicy, SandboxPolicyError, cache_mounts_for
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cache_root = tmp_path / "cache"
+    executor = BubblewrapExecutor()
+    if not executor.available():
+        pytest.skip("Bubblewrap is not installed")
+
+    writable = executor.command(
+        workspace, ("true",), SandboxPolicy(cache_mounts=cache_mounts_for(cache_root, writable=True))
+    )
+    read_only = executor.command(
+        workspace, ("true",), SandboxPolicy(cache_mounts=cache_mounts_for(cache_root, writable=False))
+    )
+
+    store = str((cache_root / "pnpm-store").resolve())
+    browsers = str((cache_root / "playwright").resolve())
+    assert (cache_root / "pnpm-store").is_dir() and (cache_root / "playwright").is_dir()
+    assert ["--dir", "/opt/rich-cache"] == writable[writable.index("--dir", writable.index("/opt/rich-tools")) : writable.index("--dir", writable.index("/opt/rich-tools")) + 2] or "/opt/rich-cache" in writable
+    assert ["--bind", store, "/opt/rich-cache/pnpm-store"] == writable[writable.index(store) - 1 : writable.index(store) + 2]
+    assert ["--bind", browsers, "/opt/rich-cache/playwright"] == writable[writable.index(browsers) - 1 : writable.index(browsers) + 2]
+    assert ["--ro-bind", store, "/opt/rich-cache/pnpm-store"] == read_only[read_only.index(store) - 1 : read_only.index(store) + 2]
+    assert ["--ro-bind", browsers, "/opt/rich-cache/playwright"] == read_only[read_only.index(browsers) - 1 : read_only.index(browsers) + 2]
+    with pytest.raises(SandboxPolicyError, match="distinct guest paths"):
+        SandboxPolicy(cache_mounts=cache_mounts_for(cache_root, writable=True) * 2).validate()
+
+
+def test_the_bootstrap_installs_into_the_shared_cache_under_a_lock(tmp_path):
+    from richbuild.executor import ExecutionResult
+
+    workspace = tmp_path / "workspace"
+    (workspace / "apps" / "web").mkdir(parents=True)
+    (workspace / "package.json").write_text(json.dumps({"packageManager": "pnpm@10.34.5"}))
+    (workspace / "apps" / "web" / "package.json").write_text(json.dumps({"name": "@app/web"}))
+    (workspace / "pnpm-lock.yaml").write_text(
+        "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  apps/web: {}\n"
+    )
+    cache_root = tmp_path / "cache"
+
+    class RecordingExecutor(_DirectProcessExecutor):
+        def __init__(self):
+            super().__init__(executable="/usr/bin/python3")
+            self.calls = []
+
+        def run(self, root, argv, policy=None, *, cancellation=None, deadline=None):
+            self.calls.append((tuple(argv), policy))
+            return ExecutionResult(argv=tuple(argv), returncode=0, stdout="", stderr="", duration_seconds=0.01)
+
+    executor = RecordingExecutor()
+    runtime = TrustedNodePnpmRuntime(
+        executor=executor,
+        node_executable="/opt/rich-tools/node/bin/node",
+        pnpm_script="/opt/rich-tools/pnpm/bin/pnpm.cjs",
+    )
+    bootstrapper = WorkspaceBootstrapper(runtime, timeout_seconds=5, cache_root=cache_root)
+
+    result = bootstrapper.bootstrap(workspace)
+
+    assert result.dependency_install.passed
+    install_argv, install_policy = executor.calls[0]
+    assert install_argv[install_argv.index("--store-dir") + 1] == "/opt/rich-cache/pnpm-store"
+    assert install_policy.environment["PLAYWRIGHT_BROWSERS_PATH"] == "/opt/rich-cache/playwright"
+    assert [(m.guest_path, m.writable) for m in install_policy.cache_mounts] == [
+        ("/opt/rich-cache/pnpm-store", True),
+        ("/opt/rich-cache/playwright", True),
+    ]
+    assert (cache_root / ".bootstrap.lock").is_file()
+    # And without a cache root, everything stays inside the workspace as before.
+    executor.calls.clear()
+    WorkspaceBootstrapper(runtime, timeout_seconds=5).bootstrap(workspace)
+    argv, policy = executor.calls[0]
+    assert argv[argv.index("--store-dir") + 1] == "/workspace/.rich/runtime/pnpm-store"
+    assert policy.cache_mounts == ()

@@ -56,8 +56,10 @@ from .budget import RunBudget
 from .compiler import CompiledArchitecture, CompiledTask, compile_architecture
 from .executor import (
     BubblewrapExecutor,
+    CACHE_BROWSERS_GUEST,
     ExecutionResult,
     SandboxPolicy,
+    cache_mounts_for,
 )
 from .models import ArchitectureSpec, EvidenceKind, ProjectSpec
 from .providers import ModelGateway
@@ -355,10 +357,20 @@ class BubblewrapCommandRunner:
     playwright_browsers_path: str = (
         "/workspace/.rich/runtime/playwright"
     )
+    # A shared cache root on the host. Set, every gate sees the pnpm store and
+    # the Playwright browsers below /opt/rich-cache, read-only: the bootstrap
+    # that filled them was trusted, and a gate that could write them could
+    # alter what a later run installs or is judged by.
+    cache_root: str | Path | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.executor, BubblewrapExecutor):
             raise TypeError("executor must be a BubblewrapExecutor")
+        if (
+            self.cache_root is not None
+            and self.playwright_browsers_path == "/workspace/.rich/runtime/playwright"
+        ):
+            object.__setattr__(self, "playwright_browsers_path", CACHE_BROWSERS_GUEST)
         if (
             isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))
@@ -388,11 +400,14 @@ class BubblewrapCommandRunner:
             )
         if (
             not isinstance(self.playwright_browsers_path, str)
-            or not self.playwright_browsers_path.startswith("/workspace/")
+            or not (
+                self.playwright_browsers_path.startswith("/workspace/")
+                or self.playwright_browsers_path == CACHE_BROWSERS_GUEST
+            )
             or "\x00" in self.playwright_browsers_path
         ):
             raise ValueError(
-                "Playwright browser path must be inside the workspace"
+                "Playwright browser path must be inside the workspace or the shared cache"
             )
 
     def run(
@@ -455,6 +470,11 @@ class BubblewrapCommandRunner:
                     writable_paths=self.writable_paths,
                     network=False,
                     environment=environment,
+                    cache_mounts=(
+                        cache_mounts_for(self.cache_root, writable=False)
+                        if self.cache_root is not None
+                        else ()
+                    ),
                     timeout_seconds=self.timeout_seconds,
                     max_memory_bytes=(
                         self.acceptance_max_address_space_bytes
