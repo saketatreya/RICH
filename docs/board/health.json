@@ -1,10 +1,10 @@
 {
-  "commit": "5bfc052",
-  "fingerprint": "abc216b4c1c9",
-  "verified_at": "2026-08-29 14:05 UTC",
-  "ruff_ok": true,
+  "commit": "6cfd9e8",
+  "fingerprint": "a447da44a58a",
+  "verified_at": "2026-08-29 14:09 UTC",
+  "ruff_ok": false,
   "pytest_ok": true,
-  "passed": 727,
+  "passed": 730,
   "failed": 0,
   "skipped": 25,
   "typecheck_ok": true
