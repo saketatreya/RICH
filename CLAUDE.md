@@ -173,6 +173,7 @@ of the customer scenario is not on the plan.
 Resolved lazily from env, never persisted in run documents or model events:
 `ANTHROPIC_API_KEY` (the `api` route; the `claude-code` route needs no key and
 deliberately does not inherit one, so an expired login fails closed instead of
-silently changing payer), `NEON_API_TOKEN` + `VERCEL_TOKEN` (previews). No
+silently changing payer), `NEON_API_TOKEN` + `VERCEL_TOKEN` (previews), `GITHUB_TOKEN` (repository
+pushes over https; `file://` remotes need none). No
 generated Node process ever receives the preview database credential —
 migrations run through trusted Python/psycopg only.

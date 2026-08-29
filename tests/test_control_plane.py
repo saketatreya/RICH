@@ -745,3 +745,104 @@ def test_a_redraft_starts_from_the_last_approved_design(tmp_path):
     assert previous.architecture.to_dict() == first.architecture.to_dict()
     assert previous.project.to_dict() == spec.spec.to_dict()
     assert control_plane.project_state(project["id"])["approved_designs"] == designs
+
+
+class RecordingPusher:
+    """Stands in for git: records what it was asked to push and answers like a push."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, snapshot, *, run_id, snapshot_digest, target, committed_at):
+        from richbuild.repository import RepositoryPush
+
+        self.calls.append(
+            {
+                "snapshot": snapshot,
+                "run_id": run_id,
+                "snapshot_digest": snapshot_digest,
+                "target": target,
+                "committed_at": committed_at,
+            }
+        )
+        return RepositoryPush(
+            run_id=run_id,
+            remote=target.remote,
+            branch=target.branch,
+            commit_sha="f" * 40,
+            snapshot_digest=snapshot_digest,
+            file_count=3,
+            committed_at=committed_at.isoformat(),
+            repository_url=target.repository_url,
+            created_repository=target.create,
+            already_current=False,
+        )
+
+
+def test_repository_push_sends_the_stored_snapshot_and_records_a_receipt(tmp_path):
+    orchestrator = RecordingPreviewOrchestrator()
+    control_plane, prepared, _destination = _scaffolded_preview_run(
+        tmp_path, orchestrator
+    )
+    pusher = RecordingPusher()
+    control_plane._repository_pusher = pusher
+    run_id = prepared.run["id"]
+    control_plane.store.append_event(run_id, "run.execution_finished", {"status": "succeeded"})
+
+    push = control_plane.push_repository(
+        run_id=run_id, remote="https://github.com/maya/tracker.git", create=True
+    )
+
+    (call,) = pusher.calls
+    release = [
+        record
+        for record in control_plane.store.list_run_artifacts(run_id)
+        if record["role"] == "source:release-snapshot"
+    ][-1]
+    stored = control_plane.store.get_artifact(release["digest"])
+    assert call["snapshot"] == stored.path.read_bytes()
+    assert call["snapshot_digest"] == stored.digest
+    assert call["target"].token_handle == "github.token"
+    assert call["target"].create is True and call["target"].private is True
+    finished = [
+        event
+        for event in control_plane.store.list_events(run_id)
+        if event["event_type"] == "run.execution_finished"
+    ][-1]
+    assert call["committed_at"].isoformat() == finished["created_at"]
+    assert push["commit_sha"] == "f" * 40
+    assert push["repository_url"] == "https://github.com/maya/tracker"
+    receipts = [
+        record
+        for record in control_plane.store.list_run_artifacts(run_id)
+        if record["role"] == "repository-push"
+    ]
+    assert len(receipts) == 1
+    assert control_plane.list_repository_pushes(run_id) == [
+        {**push, "receipt_digest": receipts[0]["digest"]}
+    ]
+
+
+def test_repository_push_needs_a_succeeded_run_and_an_acceptable_target(tmp_path):
+    orchestrator = RecordingPreviewOrchestrator()
+    control_plane, prepared, _destination = _scaffolded_preview_run(
+        tmp_path, orchestrator
+    )
+    pusher = RecordingPusher()
+    control_plane._repository_pusher = pusher
+    run_id = prepared.run["id"]
+    with pytest.raises(ValueError, match="https:// or file://"):
+        control_plane.push_repository(run_id=run_id, remote="git@github.com:maya/x.git")
+    with pytest.raises(ValueError, match="<owner>/<repository>"):
+        control_plane.push_repository(run_id=run_id, remote="https://github.com/maya")
+    assert pusher.calls == []
+    unfinished = control_plane.prepare_run(
+        architecture_approval_id=control_plane.store.list_approvals(
+            prepared.run["project_id"]
+        )[-1]["id"],
+        budget=_budget(),
+    )
+    with pytest.raises(ValueError, match="succeeded run"):
+        control_plane.push_repository(
+            run_id=unfinished.run["id"], remote="https://github.com/maya/x.git"
+        )

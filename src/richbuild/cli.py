@@ -141,6 +141,21 @@ def _parser() -> argparse.ArgumentParser:
     preview_request.add_argument("--neon-parent-branch-id")
     preview_request.add_argument("--vercel-project-id")
     preview_request.add_argument("--vercel-team-id")
+    push_repository = add_parser(
+        "push-repository",
+        help="push a succeeded run's verified release snapshot to a Git repository",
+    )
+    push_repository.add_argument("run_id")
+    push_repository.add_argument(
+        "remote", help="https://github.com/<owner>/<repo>.git or a file:// URL"
+    )
+    push_repository.add_argument("--branch", default="main")
+    push_repository.add_argument(
+        "--create", action="store_true", help="create the GitHub repository if missing"
+    )
+    push_repository.add_argument(
+        "--public", action="store_true", help="create it public (default private)"
+    )
 
     preview_deploy = add_parser(
         "preview-deploy",
@@ -346,6 +361,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {
                     "preview": submitted.preview,
                     "approval": submitted.approval,
+                }
+            )
+        elif args.command == "push-repository":
+            _print_json(
+                {
+                    "push": control_plane.push_repository(
+                        run_id=args.run_id,
+                        remote=args.remote,
+                        branch=args.branch,
+                        create=args.create,
+                        private=not args.public,
+                    )
                 }
             )
         elif args.command == "preview-deploy":

@@ -10,6 +10,22 @@ export interface Health {
   status: 'ok'
   api_version: string
   store_schema_version: number
+  version?: string
+  repository_push?: { token_configured: boolean }
+}
+
+export interface RepositoryPush {
+  run_id: string
+  remote: string
+  branch: string
+  commit_sha: string
+  snapshot_digest: string
+  file_count: number
+  committed_at: string
+  repository_url: string | null
+  created_repository: boolean
+  already_current: boolean
+  receipt_digest?: string
 }
 
 export interface Project {
@@ -645,10 +661,21 @@ const put = <T>(path: string, body: Record<string, unknown>) =>
   )
 
 export const api = {
-  health: async (): Promise<Health> =>
-    (await request<{ status: Health['status']; api_version: string; store_schema_version: number }>(
-      '/v1/health',
-    )),
+  health: async (): Promise<Health> => request<Health>('/v1/health'),
+
+  pushRepository: async (
+    runId: string,
+    body: { remote: string; branch?: string; create: boolean; private: boolean },
+  ): Promise<RepositoryPush> =>
+    (await post<{ push: RepositoryPush }>(
+      `/v1/runs/${encodeURIComponent(runId)}/repository-pushes`,
+      body,
+    )).push,
+
+  repositoryPushes: async (runId: string): Promise<RepositoryPush[]> =>
+    (await request<{ pushes: RepositoryPush[] }>(
+      `/v1/runs/${encodeURIComponent(runId)}/repository-pushes`,
+    )).pushes,
 
   getProject: async (projectId: string): Promise<Project> =>
     (await request<{ project: Project }>(

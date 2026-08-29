@@ -1513,3 +1513,116 @@ def test_health_names_the_version_that_answers(tmp_path):
     application = Application(RichStore(tmp_path))
     health = application.handle("GET", "/v1/health")
     assert health.body["version"] == __version__
+
+
+def _succeeded_run_with_release(tmp_path):
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.push")
+    run = store.create_run(
+        project["id"],
+        spec_revision_id=None,
+        architecture_revision_id=None,
+        status="ready",
+    )
+    source = tmp_path / "generated"
+    source.mkdir()
+    (source / "package.json").write_text('{"name":"demo"}')
+    store.set_run_status(run["id"], "running", expected_status="ready")
+    store.set_run_status(run["id"], "verifying", expected_status="running")
+    store.set_run_status(run["id"], "succeeded", expected_status="verifying")
+    release = store.put_artifact(
+        create_deployment_snapshot(source),
+        media_type="application/vnd.rich.release-source+zip",
+    )
+    store.attach_artifact(run["id"], release.digest, role="source:release-snapshot")
+    return store, run, release
+
+
+def test_repository_push_over_http_records_and_lists_the_push(tmp_path):
+    from richbuild.repository import RepositoryPush
+
+    store, run, release = _succeeded_run_with_release(tmp_path)
+    calls = []
+
+    def pusher(snapshot, *, run_id, snapshot_digest, target, committed_at):
+        calls.append(target)
+        return RepositoryPush(
+            run_id=run_id,
+            remote=target.remote,
+            branch=target.branch,
+            commit_sha="e" * 40,
+            snapshot_digest=snapshot_digest,
+            file_count=1,
+            committed_at=committed_at.isoformat(),
+            repository_url=target.repository_url,
+            created_repository=False,
+            already_current=False,
+        )
+
+    application = Application(store, repository_pusher=pusher)
+    response = application.handle(
+        "POST",
+        f"/v1/runs/{run['id']}/repository-pushes",
+        body={"remote": "https://github.com/maya/tracker", "branch": "release"},
+        headers=_headers("push-1"),
+    )
+    assert response.status == 201, response.body
+    assert response.body["push"]["commit_sha"] == "e" * 40
+    assert response.body["push"]["snapshot_digest"] == release.digest
+    assert calls[0].branch == "release"
+    assert calls[0].create is False and calls[0].private is True
+
+    listed = application.handle(
+        "GET", f"/v1/runs/{run['id']}/repository-pushes", headers=_headers("push-list")
+    )
+    assert listed.status == 200
+    assert [push["commit_sha"] for push in listed.body["pushes"]] == ["e" * 40]
+
+    refused = application.handle(
+        "POST",
+        f"/v1/runs/{run['id']}/repository-pushes",
+        body={"remote": "git@github.com:maya/tracker.git"},
+        headers=_headers("push-2"),
+    )
+    assert refused.status == 400
+    assert "https:// or file://" in refused.body["message"]
+    handled = application.handle(
+        "POST",
+        f"/v1/runs/{run['id']}/repository-pushes",
+        body={"remote": "https://github.com/maya/tracker", "token_handle": "x"},
+        headers=_headers("push-3"),
+    )
+    assert handled.status == 400
+    assert len(calls) == 1
+
+
+def test_a_failed_push_is_a_gateway_error_without_the_secret(tmp_path):
+    from richbuild.repository import RepositoryError
+
+    store, run, _release = _succeeded_run_with_release(tmp_path)
+
+    def pusher(snapshot, **_kwargs):
+        raise RepositoryError("git push failed: remote refused [REDACTED_SECRET]")
+
+    application = Application(store, repository_pusher=pusher)
+    response = application.handle(
+        "POST",
+        f"/v1/runs/{run['id']}/repository-pushes",
+        body={"remote": "https://github.com/maya/tracker"},
+        headers=_headers("push-fail"),
+    )
+    assert response.status == 502
+    assert response.body["error"] == "RepositoryError"
+    assert "remote refused" in response.body["message"]
+
+
+def test_health_says_whether_a_repository_token_is_configured(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    application = Application(RichStore(tmp_path))
+    assert application.handle("GET", "/v1/health").body["repository_push"] == {
+        "token_configured": False
+    }
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_x")
+    assert application.handle("GET", "/v1/health").body["repository_push"] == {
+        "token_configured": True
+    }

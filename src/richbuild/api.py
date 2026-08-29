@@ -7,9 +7,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import threading
-from typing import Any, Mapping
+from typing import Any, Mapping, Callable
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
@@ -24,6 +25,7 @@ from .control_plane import (
 )
 from .execution import DefaultRunExecutor
 from .run_engine import ConcurrentExecutionError
+from .repository import RepositoryError, RepositoryRefused
 from .preview import (
     PreviewError,
     PreviewOrchestrator,
@@ -166,6 +168,7 @@ class Application:
         run_executor: RunExecutor | None = None,
         architect: ArchitectProposer | None = None,
         interviewer: InterviewerProposer | None = None,
+        repository_pusher: Callable[..., Any] | None = None,
         route: str = CLAUDE_CODE_ROUTE,
     ):
         self.store = store
@@ -184,6 +187,7 @@ class Application:
             run_executor=trusted_run_executor,
             architect=architect,
             interviewer=interviewer,
+            repository_pusher=repository_pusher,
             # The boundary belongs to the control plane, not to this dispatch
             # table: an HTTP caller names a directory over the network, and
             # every path into the engine has to refuse the same escapes.
@@ -273,6 +277,11 @@ class Application:
                     "api_version": "v1",
                     "version": __version__,
                     "store_schema_version": STORE_SCHEMA_VERSION,
+                    # What the canvas may offer: a push needs a token where
+                    # the server runs, and the page should say so up front.
+                    "repository_push": {
+                        "token_configured": bool(os.environ.get("GITHUB_TOKEN"))
+                    },
                 },
             )
         if parts == ["v1", "vocabulary", "acceptance"] and method == "GET":
@@ -714,6 +723,38 @@ class Application:
         if (
             len(parts) == 4
             and parts[:2] == ["v1", "runs"]
+            and parts[3] == "repository-pushes"
+            and method == "POST"
+        ):
+            if "token_handle" in body:
+                raise ValueError(
+                    "the repository secret handle is configured by the trusted server"
+                )
+            return ApiResponse(
+                201,
+                {
+                    "push": self.control_plane.push_repository(
+                        run_id=parts[2],
+                        remote=_required(body, "remote"),
+                        branch=_optional_string(body, "branch") or "main",
+                        create=_optional_flag(body, "create", default=False),
+                        private=_optional_flag(body, "private", default=True),
+                    )
+                },
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v1", "runs"]
+            and parts[3] == "repository-pushes"
+            and method == "GET"
+        ):
+            return ApiResponse(
+                200,
+                {"pushes": self.control_plane.list_repository_pushes(parts[2])},
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v1", "runs"]
             and parts[3] == "preview-requests"
             and method == "POST"
         ):
@@ -947,7 +988,9 @@ def _error_response(exc: Exception) -> ApiResponse:
         status = 503
     elif isinstance(exc, (RevisionConflict, DestinationNotEmptyError)):
         status = 409
-    elif isinstance(exc, PreviewError):
+    elif isinstance(exc, RepositoryRefused):
+        status = 400
+    elif isinstance(exc, (PreviewError, RepositoryError)):
         status = 502
     elif isinstance(exc, StoreError) and "in progress" in str(exc):
         status = 409
@@ -1085,6 +1128,13 @@ def _required_datetime(body: Mapping[str, Any], key: str) -> datetime:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{key} must be an ISO 8601 timestamp") from exc
+
+
+def _optional_flag(body: Mapping[str, Any], key: str, *, default: bool) -> bool:
+    value = body.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be true or false")
+    return value
 
 
 def _optional_string(body: Mapping[str, Any], key: str) -> str | None:

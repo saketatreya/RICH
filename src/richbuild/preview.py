@@ -968,6 +968,7 @@ def environment_secret_resolver(handle: str) -> str:
     aliases = {
         "neon.api_token": "NEON_API_TOKEN",
         "vercel.api_token": "VERCEL_TOKEN",
+        "github.token": "GITHUB_TOKEN",
     }
     variable = aliases.get(handle)
     if variable is None:

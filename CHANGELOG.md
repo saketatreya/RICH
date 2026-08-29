@@ -18,6 +18,12 @@ tree a wheel could not install, so the program's releases are numbered 2.0,
   and runs everything downstream again. Owners out of attempts withhold the
   retry instead of spending it on the root. Step messages lose their ANSI
   colour codes.
+- **Push the verified snapshot to a repository.** `POST
+  /v1/runs/{id}/repository-pushes` and `rich push-repository` commit the
+  run's stored release snapshot — never the working tree — as one
+  deterministic commit on top of the branch, create the GitHub repository on
+  request, and record a receipt on the run; the canvas offers it beside the
+  ZIP download. The token reaches `git` only through `GIT_ASKPASS`.
 - **The example scenarios open their requirement's page**, where the generated
   application puts a requirement's form, instead of the home page that only
   lists capabilities; the interviewer's prompt says the same.

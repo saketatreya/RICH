@@ -123,3 +123,46 @@ def test_version_is_reported(capsys):
     assert stop.value.code == 0
     assert __version__ in capsys.readouterr().out
     assert __version__ and __version__ != ""
+
+
+def test_push_repository_lands_the_verified_snapshot_in_a_real_repository(tmp_path, capsys):
+    import subprocess
+
+    from richbuild.preview import create_deployment_snapshot
+    from richbuild.store import RichStore
+
+    state = tmp_path / "state"
+    store = RichStore(state)
+    project = store.create_project("Demo", project_id="project.cli-push")
+    run = store.create_run(
+        project["id"], spec_revision_id=None, architecture_revision_id=None, status="ready"
+    )
+    source = tmp_path / "generated"
+    source.mkdir()
+    (source / "README.md").write_text("verified by RICH\n")
+    store.set_run_status(run["id"], "running", expected_status="ready")
+    store.set_run_status(run["id"], "verifying", expected_status="running")
+    store.set_run_status(run["id"], "succeeded", expected_status="verifying")
+    release = store.put_artifact(
+        create_deployment_snapshot(source),
+        media_type="application/vnd.rich.release-source+zip",
+    )
+    store.attach_artifact(run["id"], release.digest, role="source:release-snapshot")
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+
+    assert (
+        main(["--state-dir", str(state), "push-repository", run["id"], bare.as_uri()])
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)["push"]
+    assert output["snapshot_digest"] == release.digest
+    head = subprocess.run(
+        ["git", "-C", str(bare), "rev-parse", "main"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert head == output["commit_sha"]
+    shown = subprocess.run(
+        ["git", "-C", str(bare), "show", "main:README.md"], capture_output=True, text=True, check=True
+    ).stdout
+    assert shown == "verified by RICH\n"

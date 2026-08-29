@@ -26,6 +26,7 @@ import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
 import PreviewPanel from './PreviewPanel'
 import RunMonitor from './RunMonitor'
+import { RepositoryPushPanel } from './RepositoryPushPanel'
 import Inspector from './Inspector'
 import Waiting from './Waiting'
 import IntentStage from './intent/IntentStage'
@@ -1035,6 +1036,12 @@ export default function ControlPlane() {
                 <span className={`chip ${statusClass(prepared.run.status)}`}>{prepared.run.status}</span>
               </div>
             </div>
+            {prepared.run.status === 'succeeded' && (
+              <RepositoryPushPanel
+                runId={prepared.run.id}
+                tokenConfigured={health?.repository_push?.token_configured ?? null}
+              />
+            )}
             <div className="plane-plan">
               {prepared.compiled.tasks.map((task, index) => (
                 <div className="plane-plan-task" key={task.task_id}>

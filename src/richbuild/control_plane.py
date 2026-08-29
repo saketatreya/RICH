@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import partial
 import hashlib
 import json
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
-from typing import Any, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Iterable, Mapping, Protocol, Sequence, Callable
 from uuid import uuid4
 
 from .budget import RunBudget
@@ -22,6 +23,12 @@ from .architect import PreviousDesign
 from .change import compile_change
 from .models import ApprovalGate, ArchitectureSpec, ProjectSpec
 from .planner import ArchitectureProposal, plan_nextjs_architecture
+from .repository import (
+    GITHUB_TOKEN_HANDLE,
+    RepositoryPush,
+    RepositoryTarget,
+    push_snapshot,
+)
 from .preview import (
     PreviewOrchestrator,
     PreviewRequest,
@@ -29,7 +36,9 @@ from .preview import (
     PreviewTeardown,
     create_deployment_snapshot,
     extract_deployment_snapshot,
+    environment_secret_resolver,
 )
+from .canonical import canonical_json_bytes
 from .store import Revision, RichStore, StoredArtifact, StoreError
 from .target_packs.nextjs import (
     NextJsTargetPack,
@@ -159,12 +168,17 @@ class ControlPlane:
         architect: ArchitectProposer | None = None,
         interviewer: InterviewerProposer | None = None,
         workspace_root: str | Path | None = None,
+        repository_pusher: Callable[..., RepositoryPush] | None = None,
     ):
         self.store = store
         self.preview_orchestrator = preview_orchestrator
         self.run_executor = run_executor
         self.architect = architect
         self.interviewer = interviewer
+        # The push is git plus one secret handle; tests hand in a recorder.
+        self._repository_pusher = repository_pusher or partial(
+            push_snapshot, secret_resolver=environment_secret_resolver
+        )
         # Confinement belongs to whoever built this control plane, because
         # whether it is needed depends on who supplies the path. A network
         # caller must never name a directory outside the root the operator
@@ -1093,31 +1107,9 @@ class ControlPlane:
         preview_id = f"preview_{uuid4().hex}"
         snapshot_content = create_deployment_snapshot(source)
         live_snapshot_digest = hashlib.sha256(snapshot_content).hexdigest()
-        release_candidates = [
-            attachment
-            for attachment in self.store.list_run_artifacts(run_id)
-            if attachment["role"] == "source:release-snapshot"
-        ]
-        if not release_candidates:
-            raise ValueError(
-                "preview requires the release source snapshot verified by the run"
-            )
-        final_attempts = {
-            (task["node_id"], int(task["attempt"]))
-            for task in self.store.list_tasks(run_id)
-            if task["status"] in {"succeeded", "cached"}
-        }
-        final_candidates = [
-            attachment
-            for attachment in release_candidates
-            if (
-                attachment["metadata"].get("node_id"),
-                attachment["metadata"].get("attempt"),
-            )
-            in final_attempts
-        ]
-        if final_candidates:
-            release_candidates = final_candidates
+        release_candidates = self._release_snapshot_candidates(
+            run_id, purpose="preview"
+        )
         matching = [
             attachment
             for attachment in release_candidates
@@ -1354,6 +1346,120 @@ class ControlPlane:
             },
         )
         return destroyed
+
+    def push_repository(
+        self,
+        *,
+        run_id: str,
+        remote: str,
+        branch: str = "main",
+        create: bool = False,
+        private: bool = True,
+    ) -> dict[str, Any]:
+        """Push the run's verified release snapshot to a repository as one commit.
+
+        The bytes pushed are the stored snapshot the acceptance evidence is
+        bound to; no working tree is consulted, so nothing can have drifted.
+        There is no approval gate: the repository is the customer's own, and
+        the push, like the ZIP download, hands them what was verified.
+        """
+
+        run = self.store.get_run(run_id)
+        if run["status"] != "succeeded":
+            raise ValueError(
+                "a repository push requires a succeeded run with release "
+                f"evidence; run is {run['status']!r}"
+            )
+        candidates = self._release_snapshot_candidates(
+            run_id, purpose="a repository push"
+        )
+        if len(candidates) != 1:
+            raise ValueError(
+                "the run does not have exactly one verified release snapshot"
+            )
+        artifact = self.store.get_artifact(candidates[0]["digest"])
+        content = artifact.path.read_bytes()
+        if hashlib.sha256(content).hexdigest() != artifact.digest:
+            raise StoreError("release snapshot failed content verification")
+        target = RepositoryTarget(
+            remote=remote,
+            branch=branch,
+            create=create,
+            private=private,
+            token_handle=(
+                GITHUB_TOKEN_HANDLE if remote.startswith("https://") else None
+            ),
+        )
+        push = self._repository_pusher(
+            content,
+            run_id=run_id,
+            snapshot_digest=artifact.digest,
+            target=target,
+            committed_at=self._run_finished_at(run_id),
+        )
+        document = push.to_dict()
+        receipt = self.store.put_artifact(
+            canonical_json_bytes(document),
+            media_type="application/vnd.rich.repository-push+json",
+            metadata={"run_id": run_id, "kind": "repository_push"},
+        )
+        self.store.attach_artifact(run_id, receipt.digest, role="repository-push")
+        self.store.append_event(
+            run_id,
+            "repository.pushed",
+            {**document, "receipt_digest": receipt.digest},
+        )
+        return document
+
+    def list_repository_pushes(self, run_id: str) -> list[dict[str, Any]]:
+        self.store.get_run(run_id)
+        return [
+            dict(event["payload"])
+            for event in self.store.list_events(run_id)
+            if event["event_type"] == "repository.pushed"
+        ]
+
+    def _release_snapshot_candidates(
+        self, run_id: str, *, purpose: str
+    ) -> list[dict[str, Any]]:
+        """The release snapshots the run's final attempts produced."""
+
+        release_candidates = [
+            attachment
+            for attachment in self.store.list_run_artifacts(run_id)
+            if attachment["role"] == "source:release-snapshot"
+        ]
+        if not release_candidates:
+            raise ValueError(
+                f"{purpose} requires the release source snapshot verified by the run"
+            )
+        final_attempts = {
+            (task["node_id"], int(task["attempt"]))
+            for task in self.store.list_tasks(run_id)
+            if task["status"] in {"succeeded", "cached"}
+        }
+        final_candidates = [
+            attachment
+            for attachment in release_candidates
+            if (
+                attachment["metadata"].get("node_id"),
+                attachment["metadata"].get("attempt"),
+            )
+            in final_attempts
+        ]
+        return final_candidates or release_candidates
+
+    def _run_finished_at(self, run_id: str) -> datetime:
+        """When the run settled -- the commit's date, so a re-push is the same commit."""
+
+        for event in reversed(self.store.list_events(run_id)):
+            if event["event_type"] == "run.execution_finished":
+                return datetime.fromisoformat(str(event["created_at"]))
+        run = self.store.get_run(run_id)
+        for key in ("updated_at", "created_at"):
+            if run.get(key):
+                return datetime.fromisoformat(str(run[key]))
+        return datetime.now(timezone.utc)
 
     def _preview_orchestrator(self) -> PreviewOrchestrator:
         if self.preview_orchestrator is None:

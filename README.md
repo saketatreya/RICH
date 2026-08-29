@@ -54,7 +54,9 @@ monorepo target pack. It includes:
 - gate output fed back into the next attempt, redacted to what the failing task
   is allowed to read;
 - cooperative durable cancellation, observable from any surface;
-- an immutable full-source ZIP tied to the acceptance evidence; and
+- an immutable full-source ZIP tied to the acceptance evidence;
+- that same snapshot pushed to a Git repository as one deterministic commit
+  (`rich push-repository`, `POST /v1/runs/{id}/repository-pushes`); and
 - digest-bound, separately approved Neon/Vercel previews, immutable uploads,
   trusted SQL-only migrations, and teardown.
 
@@ -89,7 +91,7 @@ digest-gated.
 For a model-backed run you need either `ANTHROPIC_API_KEY` or an existing
 `claude` login — the two routes are chosen explicitly and are never fallbacks
 for one another. Preview deployment additionally uses `NEON_API_TOKEN` and
-`VERCEL_TOKEN`. Credentials resolve lazily and are never written into run
+`VERCEL_TOKEN`; a repository push over https uses `GITHUB_TOKEN`. Credentials resolve lazily and are never written into run
 documents or model events.
 
 The default test suite is offline:

@@ -474,6 +474,21 @@ Python code reads only bounded, convention-named UTF-8 SQL files and applies the
 [Neon branch workflow](https://neon.com/docs/get-started-with-neon/workflow-primer) and
 [Vercel API integration guidance](https://vercel.com/docs/integrations/create-integration/vercel-api-integrations).
 
+**Getting the software out.** Two exits hand the customer exactly what was
+verified and nothing else. `GET /v1/runs/{id}/release` streams the release
+snapshot with its digest in a header. `POST /v1/runs/{id}/repository-pushes`
+(`rich push-repository`) pushes that same stored snapshot — never the working
+tree, so drift is impossible — as one deterministic commit (`repository.py`: a
+fixed author, the run's finish time as both dates, the digest in the message),
+landing on top of whatever the branch already holds, so a repository
+accumulates one commit per verified release and a re-push of the same run is
+a no-op. The token comes from the closed secret-handle map (`github.token` →
+`GITHUB_TOKEN`) and reaches `git` only through `GIT_ASKPASS`; it is never in
+argv, in the repository's configuration, or in an error message. Only
+`https://` and `file://` remotes are accepted. There is no approval gate: the
+repository is the customer's own, and the push, like the download, is theirs
+to take. The receipt is an artifact on the run and a `repository.pushed` event.
+
 ## Trust boundaries
 
 | Component | Trusted for | Not trusted for |
