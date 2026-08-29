@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { type Run, type RunEvent, type RunTimeline, type RunUsage, api } from '../lib/api'
+import { exhaustedOwners as exhaustedOwnersOf, reopenings as reopeningsIn } from '../lib/runs'
 import { shortId, statusClass } from '../lib/format'
 
 /**
@@ -112,13 +113,8 @@ export default function RunMonitor({
   // A browser scenario that fails on a page another component owns reopens
   // that component; when the owners have no attempts left the run stops
   // there and says so. Naming them is what makes "rebuild" a specific act.
-  const withheld = [...events]
-    .reverse()
-    .find((event) => event.event_type === 'task.retry_withheld')
-  const exhaustedOwners: string[] = Array.isArray(withheld?.payload.exhausted_node_ids)
-    ? (withheld!.payload.exhausted_node_ids as unknown[]).map(String)
-    : []
-  const reopenings = events.filter((event) => event.event_type === 'task.reopened').length
+  const exhaustedOwners = exhaustedOwnersOf(events)
+  const reopenings = reopeningsIn(events)
   const spent = usage?.used ? Number(usage.used.cost_usd) : 0
   const ceiling = usage ? Number(usage.budget.max_cost_usd) : 0
   const fraction = ceiling > 0 ? Math.min(1, spent / ceiling) : 0
