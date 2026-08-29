@@ -1,7 +1,7 @@
 ---
 id: m0-path-guard-parity
-title: "The models path guard has the same rules"
-status: doing
+title: The models path guard has the same rules
+status: next
 track: E
 tag: engine
 milestone: M0

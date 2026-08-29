@@ -1,7 +1,7 @@
 ---
 id: m0-ghost-files
-title: "Ghost v1 caches removed"
-status: doing
+title: Ghost v1 caches removed
+status: next
 track: E
 tag: codebase
 milestone: M0

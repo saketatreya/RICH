@@ -1,7 +1,7 @@
 ---
 id: m0-test-hygiene
-title: "Shared fixtures, one login helper, execution.py tested"
-status: doing
+title: Shared fixtures, one login helper, execution.py tested
+status: next
 track: E
 tag: codebase
 milestone: M0

@@ -1,7 +1,7 @@
 ---
 id: m0-dead-workflow-block
-title: "Dead workflow validation deleted"
-status: doing
+title: Dead workflow validation deleted
+status: next
 track: E
 tag: codebase
 milestone: M0

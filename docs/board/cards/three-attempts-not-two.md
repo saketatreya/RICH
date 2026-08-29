@@ -1,7 +1,7 @@
 ---
 id: three-attempts-not-two
-title: "Three attempts, not two"
-status: doing
+title: Three attempts, not two
+status: next
 track: E
 tag: engine
 milestone: M0

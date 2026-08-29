@@ -1,7 +1,7 @@
 ---
 id: m0-pack-version-drift
-title: "One pack version constant"
-status: doing
+title: One pack version constant
+status: next
 track: E
 tag: engine
 milestone: M0
