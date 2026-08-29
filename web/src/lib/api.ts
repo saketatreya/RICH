@@ -341,6 +341,31 @@ export interface InterviewNeeds {
   complete: boolean
 }
 
+/** The in-progress interview, kept on the server so a reload loses nothing. */
+export interface InterviewDraft {
+  project_id: string
+  draft_revision: number
+  document: Record<string, JsonValue>
+  submitted_revision_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * Everything needed to pick a project back up, in the shapes the submission
+ * calls return -- so restoring state is the same as receiving it the first time.
+ */
+export interface ProjectState {
+  project: Project
+  spec: SpecSubmission | null
+  architecture: ArchitectureSubmission | null
+  runs: Run[]
+  prepared: PreparedRun | null
+  scaffold: ScaffoldResult | null
+  previews: Preview[]
+  interview: InterviewDraft | null
+}
+
 export interface ChangePlan {
   project_id: string
   change: {
@@ -534,6 +559,13 @@ const post = <T>(path: string, body: Record<string, unknown>) =>
     true,
   )
 
+const put = <T>(path: string, body: Record<string, unknown>) =>
+  request<T>(
+    path,
+    { method: 'PUT', body: JSON.stringify(body) },
+    true,
+  )
+
 export const api = {
   health: async (): Promise<Health> =>
     (await request<{ status: Health['status']; api_version: string; store_schema_version: number }>(
@@ -547,6 +579,35 @@ export const api = {
 
   listProjects: async (): Promise<Project[]> =>
     (await request<{ projects: Project[] }>('/v1/projects')).projects,
+
+  /** One call restores a project: its latest spec, architecture, run and draft. */
+  projectState: async (projectId: string): Promise<ProjectState> =>
+    request<ProjectState>(
+      `/v1/projects/${encodeURIComponent(projectId)}/state`,
+    ),
+
+  getInterview: async (projectId: string): Promise<InterviewDraft | null> =>
+    (await request<{ draft: InterviewDraft | null }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/interview`,
+    )).draft,
+
+  /**
+   * Save the in-progress interview. The expected revision is what this tab
+   * last saw; a stale one is a conflict, never a silent overwrite.
+   */
+  saveInterview: async (
+    projectId: string,
+    document: Record<string, unknown>,
+    expectedDraftRevision: number,
+  ): Promise<InterviewDraft> =>
+    (await put<{ draft: InterviewDraft }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/interview`,
+      { document, expected_draft_revision: expectedDraftRevision },
+    )).draft,
+
+  /** Where a succeeded run's verified release ZIP downloads from. */
+  releaseUrl: (runId: string): string =>
+    `/v1/runs/${encodeURIComponent(runId)}/release`,
 
   createProject: async (projectId: string, name: string): Promise<Project> =>
     (await post<{ project: Project }>('/v1/projects', {

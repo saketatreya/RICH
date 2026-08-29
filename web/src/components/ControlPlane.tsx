@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { type Dispatch, type SetStateAction, useEffect, useMemo, useState } from 'react'
 import {
   type ArchitectureDraft,
   type ArchitectureSubmission,
@@ -7,9 +7,11 @@ import {
   type InterviewAnswers,
   type PreparedRun,
   type Project,
+  type ProjectState,
   type RunEvent,
   type ScaffoldResult,
   type SpecSubmission,
+  V2ApiError,
   api,
   type DurableTask,
   type InterviewNeeds,
@@ -28,15 +30,22 @@ import { ScenarioList } from './intent/Editors'
 import type { IntentDraft } from './intent/types'
 import { commaList, errorMessage, lines, shortId, statusClass } from '../lib/format'
 
+/**
+ * What survives a reload on this browser: a pointer to the project and who is
+ * deciding. Everything the project holds -- spec, architecture, runs, the
+ * interview draft -- comes back from the server, so nothing here can go stale.
+ */
 type SavedSession = {
-  project: Project | null
-  spec: SpecSubmission | null
-  architecture: ArchitectureSubmission | null
-  prepared: PreparedRun | null
-  scaffold: ScaffoldResult | null
+  projectId: string | null
+  actor: string
+  reason: string
 }
 
 const SESSION_KEY = 'rich.control-plane.session'
+const DEFAULT_ACTOR = 'founder'
+const DEFAULT_REASON = 'Reviewed against the product intent.'
+const architectureDraftKey = (projectId: string) =>
+  `rich.architecture-draft.${projectId}`
 
 const defaultDraft: IntentDraft = {
   goal: 'Give technical founders a trustworthy way to turn approved product intent into a working web application.',
@@ -103,20 +112,55 @@ const defaultDraft: IntentDraft = {
   concurrencyPolicy: '',
 }
 
-const emptySession: SavedSession = {
-  project: null,
-  spec: null,
-  architecture: null,
-  prepared: null,
-  scaffold: null,
-}
-
 function restoreSession(): SavedSession {
+  const fallback: SavedSession = {
+    projectId: null,
+    actor: DEFAULT_ACTOR,
+    reason: DEFAULT_REASON,
+  }
   try {
     const raw = localStorage.getItem(SESSION_KEY)
-    return raw ? { ...emptySession, ...JSON.parse(raw) } : emptySession
+    if (!raw) return fallback
+    const parsed = JSON.parse(raw)
+    return {
+      // Earlier sessions stored full copies of server objects; only the
+      // pointer is kept from them.
+      projectId:
+        typeof parsed.projectId === 'string'
+          ? parsed.projectId
+          : typeof parsed.project?.id === 'string'
+            ? parsed.project.id
+            : null,
+      actor:
+        typeof parsed.actor === 'string' && parsed.actor.trim()
+          ? parsed.actor
+          : DEFAULT_ACTOR,
+      reason: typeof parsed.reason === 'string' ? parsed.reason : DEFAULT_REASON,
+    }
   } catch {
-    return emptySession
+    return fallback
+  }
+}
+
+/** The interview form as the server stored it, if it is still the form's shape. */
+function draftFromDocument(document: unknown): IntentDraft | null {
+  if (!document || typeof document !== 'object') return null
+  const form = (document as { form?: unknown }).form
+  if (!form || typeof form !== 'object') return null
+  const candidate = form as Partial<IntentDraft>
+  return typeof candidate.goal === 'string' &&
+    Array.isArray(candidate.capabilities) &&
+    Array.isArray(candidate.scenarios)
+    ? { ...defaultDraft, ...candidate }
+    : null
+}
+
+function readArchitectureDraft(projectId: string): ArchitectureDraft | null {
+  try {
+    const raw = localStorage.getItem(architectureDraftKey(projectId))
+    return raw ? (JSON.parse(raw) as ArchitectureDraft) : null
+  } catch {
+    return null
   }
 }
 
@@ -124,30 +168,32 @@ export default function ControlPlane() {
   const restored = useMemo(restoreSession, [])
   const [health, setHealth] = useState<Health | null>(null)
   const [connectionError, setConnectionError] = useState('')
-  const [project, setProject] = useState<Project | null>(restored.project)
-  const [spec, setSpec] = useState<SpecSubmission | null>(restored.spec)
+  const [project, setProject] = useState<Project | null>(null)
+  const [spec, setSpec] = useState<SpecSubmission | null>(null)
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
   const [interviewNeeds, setInterviewNeeds] = useState<InterviewNeeds | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
   const [runTasks, setRunTasks] = useState<DurableTask[]>([])
-  const [architecture, setArchitecture] = useState<ArchitectureSubmission | null>(
-    restored.architecture,
-  )
+  const [architecture, setArchitecture] = useState<ArchitectureSubmission | null>(null)
   const [architectureDraft, setArchitectureDraft] =
     useState<ArchitectureDraft | null>(null)
-  const [prepared, setPrepared] = useState<PreparedRun | null>(restored.prepared)
-  const [scaffold, setScaffold] = useState<ScaffoldResult | null>(restored.scaffold)
+  const [prepared, setPrepared] = useState<PreparedRun | null>(null)
+  const [scaffold, setScaffold] = useState<ScaffoldResult | null>(null)
   const [events, setEvents] = useState<RunEvent[]>([])
   const [execution, setExecution] = useState<ExecutionStatus | null>(null)
-  const [projectId, setProjectId] = useState(restored.project?.id || 'project.rich-demo')
-  const [projectName, setProjectName] = useState(restored.project?.name || 'RICH Demo')
+  const [projectId, setProjectId] = useState(restored.projectId || 'project.rich-demo')
+  const [projectName, setProjectName] = useState('RICH Demo')
   const [draft, setDraft] = useState<IntentDraft>(defaultDraft)
-  const [actor, setActor] = useState('founder')
-  const [reason, setReason] = useState('Reviewed against the product intent.')
+  // The server's counter for the interview draft, and whether this tab has
+  // edits the server has not seen yet.
+  const [draftRevision, setDraftRevision] = useState(0)
+  const [draftDirty, setDraftDirty] = useState(false)
+  const [actor, setActor] = useState(restored.actor)
+  const [reason, setReason] = useState(restored.reason)
   const [maxAttempts, setMaxAttempts] = useState('20')
   const [maxCost, setMaxCost] = useState('10.00')
   const [destination, setDestination] = useState(
-    `rich-${(restored.project?.id || 'demo').split('.').pop()}`,
+    `rich-${(restored.projectId || 'demo').split('.').pop()}`,
   )
   const [packageScope, setPackageScope] = useState('@rich-app')
   const [busy, setBusy] = useState('')
@@ -155,13 +201,73 @@ export default function ControlPlane() {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
 
-  const persist = (
-    next: Partial<SavedSession> = {},
-    base: SavedSession = { project, spec, architecture, prepared, scaffold },
-  ) => {
-    const session = { ...base, ...next }
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session))
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({ projectId: project?.id ?? null, actor, reason }),
+      )
+    } catch {
+      // A browser that refuses storage still works; it just starts fresh.
+    }
+  }, [project?.id, actor, reason])
+
+  // An unapplied architecture proposal is the one object worth keeping that
+  // the server has not recorded -- by design, since nothing is recorded until
+  // a human applies it. It is remembered per project on this browser only.
+  useEffect(() => {
+    if (!project) return
+    try {
+      if (architectureDraft) {
+        localStorage.setItem(
+          architectureDraftKey(project.id),
+          JSON.stringify(architectureDraft),
+        )
+      } else {
+        localStorage.removeItem(architectureDraftKey(project.id))
+      }
+    } catch {
+      // Best effort.
+    }
+  }, [architectureDraft, project?.id])
+
+  const editDraft: Dispatch<SetStateAction<IntentDraft>> = (update) => {
+    setDraft(update)
+    setDraftDirty(true)
   }
+
+  // The interview draft is saved to the server shortly after each edit, so a
+  // reload never loses a word. The revision this tab last saw travels with the
+  // save; a stale one is a conflict, and the server's version wins visibly.
+  useEffect(() => {
+    if (!project || !draftDirty) return
+    const targetProject = project.id
+    const timer = window.setTimeout(async () => {
+      try {
+        const saved = await api.saveInterview(
+          targetProject,
+          { form: draft },
+          draftRevision,
+        )
+        setDraftRevision(saved.draft_revision)
+        setDraftDirty(false)
+      } catch (saveError) {
+        if (saveError instanceof V2ApiError && saveError.status === 409) {
+          const latest = await api.getInterview(targetProject).catch(() => null)
+          if (latest) {
+            const theirs = draftFromDocument(latest.document)
+            if (theirs) setDraft(theirs)
+            setDraftRevision(latest.draft_revision)
+            setDraftDirty(false)
+            setNotice('The interview was changed elsewhere; showing the latest version.')
+          }
+        }
+        // Any other failure leaves the draft local and dirty; the next edit
+        // retries, and the connection banner owns the explanation.
+      }
+    }, 900)
+    return () => window.clearTimeout(timer)
+  }, [draft, draftDirty, draftRevision, project?.id])
 
   const runAction = async (label: string, action: () => Promise<void>) => {
     setBusy(label)
@@ -197,6 +303,8 @@ export default function ControlPlane() {
       .then(setProjects)
       // The banner owns connection errors; an empty list is a fine first run.
       .catch(() => setProjects([]))
+    if (restored.projectId) loadProject(restored.projectId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -232,40 +340,43 @@ export default function ControlPlane() {
     }
   }, [prepared?.run.id])
 
-  const resetAfterProject = (nextProject: Project) => {
-    setProject(nextProject)
-    setSpec(null)
-    setArchitecture(null)
-    setPrepared(null)
-    setScaffold(null)
+  // Everything a project holds, as the server has it. Presence is restored
+  // exactly as it would have been received the first time, so a reload or a
+  // switch lands on the truth rather than on wherever this browser last was.
+  const restoreProject = (state: ProjectState) => {
+    setProject(state.project)
+    setProjectId(state.project.id)
+    setProjectName(state.project.name)
+    setSpec(state.spec)
+    setArchitecture(state.architecture)
+    setPrepared(state.prepared)
+    setScaffold(state.scaffold)
     setExecution(null)
     setEvents([])
-    setProjectId(nextProject.id)
-    setProjectName(nextProject.name)
-    setDestination(`rich-${nextProject.id.split('.').pop()}`)
-    persist(
-      { project: nextProject, spec: null, architecture: null, prepared: null, scaffold: null },
-      emptySession,
-    )
+    setRunTasks([])
+    setSelectedNode(null)
+    setInterviewNeeds(null)
+    setDestination(`rich-${state.project.id.split('.').pop()}`)
+    setDraft(draftFromDocument(state.interview?.document) ?? defaultDraft)
+    setDraftRevision(state.interview?.draft_revision ?? 0)
+    setDraftDirty(false)
+    setArchitectureDraft(readArchitectureDraft(state.project.id))
   }
 
   const createProject = () =>
     runAction('create-project', async () => {
       const result = await api.createProject(projectId.trim(), projectName.trim())
-      resetAfterProject(result)
+      restoreProject(await api.projectState(result.id))
       setNotice(`Created ${result.id}. Intent compilation is ready.`)
     })
 
   const loadProject = (id?: string) =>
     runAction('load-project', async () => {
-      const result = await api.getProject((id ?? projectId).trim())
-      if (project?.id === result.id) {
-        setProject(result)
-        persist({ project: result })
-      } else {
-        resetAfterProject(result)
-      }
-      setNotice(`Loaded ${result.id} at revision ${result.current_revision}.`)
+      const state = await api.projectState((id ?? projectId).trim())
+      restoreProject(state)
+      setNotice(
+        `Loaded ${state.project.id} at revision ${state.project.current_revision}.`,
+      )
     })
 
   const answers = (): InterviewAnswers => {
@@ -316,13 +427,6 @@ export default function ControlPlane() {
       setPrepared(null)
       setScaffold(null)
       setExecution(null)
-      persist({
-        project: refreshed,
-        spec: result,
-        architecture: null,
-        prepared: null,
-        scaffold: null,
-      })
       setNotice('Intent compiled into a versioned spec. Human approval is now required.')
     })
   }
@@ -331,9 +435,7 @@ export default function ControlPlane() {
     if (!spec) return
     runAction('spec-decision', async () => {
       const approval = await api.decideApproval(spec.approval.id, approved, actor, reason)
-      const next = { ...spec, approval }
-      setSpec(next)
-      persist({ spec: next })
+      setSpec({ ...spec, approval })
       setNotice(approved ? 'Product specification approved.' : 'Product specification rejected.')
     })
   }
@@ -374,7 +476,6 @@ export default function ControlPlane() {
       setPrepared(null)
       setScaffold(null)
       setExecution(null)
-      persist({ project: refreshed, architecture: result, prepared: null, scaffold: null })
       setNotice('Architecture recorded as a new revision. It needs its own approval.')
     })
   }
@@ -393,12 +494,6 @@ export default function ControlPlane() {
       setPrepared(null)
       setScaffold(null)
       setExecution(null)
-      persist({
-        project: refreshed,
-        architecture: result,
-        prepared: null,
-        scaffold: null,
-      })
       setNotice('Architecture compiled. Review ownership, risks, and dependency boundaries.')
     })
   }
@@ -412,9 +507,7 @@ export default function ControlPlane() {
         actor,
         reason,
       )
-      const next = { ...architecture, approval }
-      setArchitecture(next)
-      persist({ architecture: next })
+      setArchitecture({ ...architecture, approval })
       setNotice(approved ? 'Architecture approved.' : 'Architecture rejected.')
     })
   }
@@ -432,7 +525,6 @@ export default function ControlPlane() {
       setPrepared(result)
       setScaffold(null)
       setExecution(null)
-      persist({ prepared: result, scaffold: null })
       setNotice(`Durable run ${shortId(result.run.id)} is ready with ${result.tasks.length} tasks.`)
     })
   }
@@ -446,7 +538,6 @@ export default function ControlPlane() {
         packageScope.trim() || undefined,
       )
       setScaffold(result)
-      persist({ scaffold: result })
       setNotice(`Scaffold written to ${result.destination}.`)
       setEvents(await api.events(prepared.run.id))
     })
@@ -473,10 +564,14 @@ export default function ControlPlane() {
     setProject(null)
     setSpec(null)
     setArchitecture(null)
+    setArchitectureDraft(null)
     setPrepared(null)
     setScaffold(null)
     setExecution(null)
     setEvents([])
+    setDraft(defaultDraft)
+    setDraftRevision(0)
+    setDraftDirty(false)
     setNotice('')
     setError('')
   }
@@ -573,6 +668,16 @@ export default function ControlPlane() {
             <div className="v2-wordmark">RI<span>CH</span></div>
             <div className="v2-submark">software development compiler</div>
           </div>
+        </div>
+        <div className="v2-identity" aria-label="Approval identity">
+          <label>
+            <span>Deciding as</span>
+            <input value={actor} onChange={(event) => setActor(event.target.value)} />
+          </label>
+          <label>
+            <span>Reason on record</span>
+            <input value={reason} onChange={(event) => setReason(event.target.value)} />
+          </label>
         </div>
         <div className="v2-health">
           <span className={`dot ${health ? '' : 'pulse'}`} />
@@ -726,7 +831,7 @@ export default function ControlPlane() {
           <IntentStage
             project={project}
             draft={draft}
-            setDraft={setDraft}
+            setDraft={editDraft}
             answers={answers}
             busy={busy}
             setBusy={setBusy}
@@ -905,7 +1010,19 @@ export default function ControlPlane() {
                 <span className="v2-eyebrow">Run · {shortId(prepared.run.id)}</span>
                 <h2>Compiled build plan</h2>
               </div>
-              <span className={`chip ${statusClass(prepared.run.status)}`}>{prepared.run.status}</span>
+              <div className="v2-run-state">
+                {prepared.run.status === 'succeeded' && (
+                  <a
+                    className="v2-download"
+                    href={api.releaseUrl(prepared.run.id)}
+                    download
+                    title="The exact source the gates verified, as a ZIP bound to this run's evidence"
+                  >
+                    Download release ZIP
+                  </a>
+                )}
+                <span className={`chip ${statusClass(prepared.run.status)}`}>{prepared.run.status}</span>
+              </div>
             </div>
             <div className="v2-plan">
               {prepared.compiled.tasks.map((task, index) => (
@@ -1063,15 +1180,6 @@ export default function ControlPlane() {
             onSelectNode={setSelectedNode}
           />
         )}
-
-        <section className="v2-authority">
-          <div>
-            <span className="v2-eyebrow">Approval identity</span>
-            <h3>Human decisions are durable evidence</h3>
-          </div>
-          <label><span>Actor</span><input value={actor} onChange={(event) => setActor(event.target.value)} /></label>
-          <label><span>Decision reason</span><input value={reason} onChange={(event) => setReason(event.target.value)} /></label>
-        </section>
 
         <footer className="v2-footer">
           <span>RICH · local state, explicit authority, layered evidence</span>

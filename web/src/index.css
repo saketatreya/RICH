@@ -603,11 +603,23 @@ label { font-size: 12px; color: var(--ink-dim); }
 .v2-event-feed article small { color: var(--ink-faint); font-size: 9px; }
 .v2-event-feed article > code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-dim); }
 
-.v2-authority {
-  display: grid; grid-template-columns: 1fr .5fr 1fr; gap: 12px; align-items: end;
-  background: rgba(14, 16, 23, .55);
+/* Who is deciding lives in the header: every gate on the page reads it, and it
+   used to sit under the Inspector where a disabled Approve button could not
+   explain itself. */
+.v2-identity { display: flex; gap: 10px; align-items: flex-end; }
+.v2-identity label { display: flex; flex-direction: column; gap: 3px; }
+.v2-identity span {
+  font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint);
 }
-.v2-authority h3 { margin: 5px 0 0; font-size: 15px; }
+.v2-identity input { width: 150px; padding: 5px 8px; font-size: 12px; }
+.v2-identity label:last-child input { width: 230px; }
+.v2-run-state { display: flex; align-items: center; gap: 10px; }
+.v2-download {
+  font-size: 12px; font-weight: 500; color: var(--verified); text-decoration: none;
+  border: 1px solid var(--verified); border-radius: 3px; padding: 4px 10px;
+}
+.v2-download:hover, .v2-download:focus-visible { background: rgba(47, 211, 160, .12); }
+@media (max-width: 1100px) { .v2-identity { display: none; } }
 .v2-footer { display: flex; justify-content: space-between; color: var(--ink-faint); font-size: 10px; padding: 20px 7px; }
 .v2-banner {
   display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding: 11px 13px;
