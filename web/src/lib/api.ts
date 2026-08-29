@@ -732,10 +732,10 @@ export const api = {
   acceptanceVocabulary: async (): Promise<AcceptanceVocabulary> =>
     request<AcceptanceVocabulary>('/v1/vocabulary/acceptance'),
 
-  createProject: async (projectId: string, name: string): Promise<Project> =>
+  createProject: async (name: string, projectId?: string): Promise<Project> =>
     (await post<{ project: Project }>('/v1/projects', {
-      project_id: projectId,
       name,
+      ...(projectId ? { project_id: projectId } : {}),
     })).project,
 
   submitSpec: async (

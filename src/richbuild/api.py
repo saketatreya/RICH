@@ -300,8 +300,10 @@ class Application:
             # value the step constructor will refuse.
             return ApiResponse(200, acceptance_vocabulary())
         if parts == ["v1", "projects"] and method == "POST":
+            # The id is the server's to mint; a caller that has one (a drive,
+            # a script) may still name it.
             project = self.control_plane.create_project(
-                project_id=_required(body, "project_id"),
+                project_id=_optional_string(body, "project_id"),
                 name=_required(body, "name"),
             )
             return ApiResponse(201, {"project": project})

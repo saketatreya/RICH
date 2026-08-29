@@ -18,7 +18,14 @@ const base = process.env.RICH_URL || 'http://127.0.0.1:8792'
 const minutes = Number(process.env.RICH_DRIVE_MINUTES || 30)
 const shots = process.env.RICH_SHOTS || '.rich/drive-m4'
 const stamp = Date.now().toString(36)
-const projectId = `project.drive-m4-${stamp}`
+let projectId = `project.drive-m4-${stamp}`
+const projectName = `Drive M4 ${stamp}`
+const projectIdByName = async (name) => {
+  const response = await fetch(`${base}/v1/projects`)
+  const found = (await response.json()).projects.find((item) => item.name === name)
+  if (!found) throw new Error(`no project named ${name}`)
+  return found.id
+}
 const amended = 'All actions are reachable with the keyboard alone, and focus order follows reading order.'
 
 const browser = await chromium.launch()
@@ -95,14 +102,14 @@ const modelAttemptsFor = (events, node) =>
   ).length
 
 const approveSpec = async () => {
-  await page.getByRole('button', { name: /Compile product specification/ }).click()
-  await page.getByText('Intent compiled into a versioned spec').waitFor()
+  await page.getByRole('button', { name: /Write the specification/ }).click()
+  await page.getByText('The specification is ready for your approval').waitFor()
   await page.getByRole('button', { name: /^Approve/ }).first().click()
   await page.getByText('Product specification approved.').waitFor()
 }
 const approvePlannedArchitecture = async () => {
   await page.getByRole('button', { name: 'Use the deterministic plan' }).click()
-  await page.getByText('Architecture compiled').waitFor()
+  await page.getByText('The architecture is ready for your approval').waitFor()
   await page.getByRole('button', { name: /^Approve/ }).first().click()
   await page.getByText('Architecture approved.').waitFor()
 }
@@ -113,10 +120,10 @@ let secondRun = null
 await step('create a project and approve the example specification', async () => {
   await page.goto(base)
   await page.getByText('Control plane online').waitFor()
-  await projectForm().getByLabel('Stable project id').fill(projectId)
-  await projectForm().getByLabel('Project name').fill('Drive M4')
+    await projectForm().getByLabel('Project name').fill(projectName)
   await page.getByRole('button', { name: 'Create', exact: true }).click()
-  await page.getByText(`Created ${projectId}`).waitFor()
+  await page.getByText(`Created ${projectName}`).waitFor()
+  projectId = await projectIdByName(projectName)
   await page.getByRole('button', { name: 'Start from an example' }).click()
   await approveSpec()
 })

@@ -332,18 +332,16 @@ export default function ControlPlane() {
 
   const createProject = () =>
     runAction('create-project', async () => {
-      const result = await api.createProject(projectId.trim(), projectName.trim())
+      const result = await api.createProject(projectName.trim())
       restoreProject(await api.projectState(result.id))
-      setNotice(`Created ${result.id}. Intent compilation is ready.`)
+      setNotice(`Created ${result.name}. Say what you want built.`)
     })
 
   const loadProject = (id?: string) =>
     runAction('load-project', async () => {
       const state = await api.projectState((id ?? projectId).trim())
       restoreProject(state)
-      setNotice(
-        `Loaded ${state.project.id} at revision ${state.project.current_revision}.`,
-      )
+      setNotice(`Loaded ${state.project.name}.`)
     })
 
   const answers = (): InterviewAnswers => trimAnswers(draft.answers ?? emptyAnswers())
@@ -378,7 +376,7 @@ export default function ControlPlane() {
       setPrepared(null)
       setScaffold(null)
       setExecution(null)
-      setNotice('Intent compiled into a versioned spec. Human approval is now required.')
+      setNotice('The specification is ready for your approval.')
     })
   }
 
@@ -445,7 +443,7 @@ export default function ControlPlane() {
       setPrepared(null)
       setScaffold(null)
       setExecution(null)
-      setNotice('Architecture compiled. Review ownership, risks, and dependency boundaries.')
+      setNotice('The architecture is ready for your approval. Read the contracts, then decide.')
     })
   }
 
@@ -599,7 +597,7 @@ export default function ControlPlane() {
       id: 'stage-run',
       label: 'Run',
       detail: prepared
-        ? `Run ${shortId(prepared.run.id)} · ${prepared.run.status}`
+        ? `Run · ${prepared.run.status}`
         : 'Set a budget and prepare',
       state: prepared
         ? prepared.run.status === 'succeeded'
@@ -654,9 +652,7 @@ export default function ControlPlane() {
           <div>
             <b>{health ? 'Control plane online' : 'Control plane offline'}</b>
             <span>
-              {health
-                ? `${health.api_version} · store schema ${health.store_schema_version}`
-                : 'Start the local Canvas API'}
+              {health ? (health.version ? `RICH ${health.version}` : 'Ready') : 'Start rich serve'}
             </span>
           </div>
           <button className="tiny ghost" onClick={checkHealth}>Retry</button>
@@ -727,7 +723,6 @@ export default function ControlPlane() {
             {project && (
               <div className="plane-project-state">
                 <span className="chip ok">selected</span>
-                <code>rev {project.current_revision}</code>
               </div>
             )}
           </div>
@@ -746,53 +741,35 @@ export default function ControlPlane() {
                   }}
                 >
                   <b>{item.name}</b>
-                  <small>
-                    <code>{item.id}</code> · rev {item.current_revision}
-                  </small>
+                  <small>last changed {new Date(item.updated_at).toLocaleString()}</small>
                 </button>
               ))}
             </div>
           )}
           <div className="plane-project-form">
             <label>
-              <span>Stable project id</span>
-              <input
-                className="mono"
-                value={projectId}
-                onChange={(event) => setProjectId(event.target.value)}
-                placeholder="project.example"
-              />
-            </label>
-            <label>
               <span>Project name</span>
               <input
                 value={projectName}
                 onChange={(event) => setProjectName(event.target.value)}
-                placeholder="Example"
+                placeholder="What are you building?"
               />
             </label>
             <div className="plane-project-buttons">
               <button
                 className="primary"
-                disabled={!!busy || !projectId.trim() || !projectName.trim()}
+                disabled={!!busy || !projectName.trim()}
                 onClick={createProject}
               >
                 {busy === 'create-project' ? 'Creating…' : 'Create'}
-              </button>
-              <button
-                disabled={!!busy || !projectId.trim()}
-                onClick={() => loadProject()}
-              >
-                {busy === 'load-project' ? 'Loading…' : 'Load existing'}
               </button>
               {project && <button className="ghost danger" onClick={clearSession}>Clear session</button>}
             </div>
           </div>
           {project && (
             <div className="plane-object-bar">
-              <div><span>Project</span><code title={project.id}>{project.id}</code></div>
-              <div><span>Revision</span><b>{project.current_revision}</b></div>
-              <div><span>Updated</span><b>{new Date(project.updated_at).toLocaleString()}</b></div>
+              <div><span>Project</span><b>{project.name}</b></div>
+              <div><span>Last changed</span><b>{new Date(project.updated_at).toLocaleString()}</b></div>
             </div>
           )}
         </section>
@@ -817,16 +794,14 @@ export default function ControlPlane() {
             <section className="plane-panel">
               <div className="plane-section-title">
                 <div>
-                  <span className="plane-eyebrow">Versioned artifact</span>
-                  <h2>{spec.spec.name} · product specification</h2>
+                  <span className="plane-eyebrow">Specification · version {spec.revision.number}</span>
+                  <h2>{spec.spec.name}</h2>
                 </div>
-                <code>{shortId(spec.revision.id)}</code>
+                <small className="plane-when">written {new Date(spec.revision.created_at).toLocaleString()}</small>
               </div>
               <div className="plane-spec-summary">
                 <div><span>Requirements</span><b>{spec.spec.requirements.length}</b></div>
                 <div><span>Scenarios</span><b>{spec.spec.acceptance_scenarios.length}</b></div>
-                <div><span>Coverage</span><b className="plane-green">100%</b></div>
-                <div><span>Schema</span><b>{spec.spec.schema_version}</b></div>
               </div>
               <ScenarioList scenarios={spec.spec.acceptance_scenarios} />
             </section>
@@ -848,7 +823,7 @@ export default function ControlPlane() {
                     <Waiting
                       since={busySince}
                       what="The architect is designing the decomposition"
-                      typical="one bounded model call, usually 1–3 minutes"
+                      typical="usually one to three minutes"
                     />
                   )}
                 </div>
@@ -936,7 +911,7 @@ export default function ControlPlane() {
                     <Waiting
                       since={busySince}
                       what="The architect is designing an alternative"
-                      typical="one bounded model call, usually 1–3 minutes"
+                      typical="usually one to three minutes"
                     />
                   )}
                 </div>
@@ -1175,7 +1150,7 @@ export default function ControlPlane() {
 
         <footer className="plane-footer">
           <span>RICH · local state, explicit authority, layered evidence</span>
-          <code>{project?.id || 'no project selected'}</code>
+          <span>{project?.name || 'no project selected'}</span>
         </footer>
       </div>
     </main>

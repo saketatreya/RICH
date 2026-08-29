@@ -48,8 +48,8 @@ const step = async (name, run) => {
 await step('open the canvas and load the project', async () => {
   await page.goto(base)
   await page.getByText('Control plane online').waitFor()
-  await page.locator('.plane-project-chip', { hasText: seed.project_id }).click()
-  await page.getByText(`Loaded ${seed.project_id}`).waitFor()
+  await page.locator('.plane-project-chip', { hasText: 'Drive M6' }).click()
+  await page.getByText('Loaded Drive M6').waitFor()
   await page.getByText('Compiled build plan').waitFor()
 })
 

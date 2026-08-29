@@ -4,7 +4,7 @@
  * being approved rather than just ask for a click. */
 
 import type { Approval } from '../lib/api'
-import { shortId, statusClass } from '../lib/format'
+import { statusClass } from '../lib/format'
 
 export default function ApprovalGate({
   title,
@@ -30,13 +30,11 @@ export default function ApprovalGate({
             <span className="plane-eyebrow">Human authority</span>
             <h3>{title}</h3>
           </div>
-          <span className={`chip ${statusClass(approval.status)}`}>{approval.status}</span>
+          <span className={`chip ${statusClass(approval.status)}`} title={approval.id}>
+            {approval.status}
+          </span>
         </div>
         <p>{description}</p>
-        <div className="plane-idline" title={approval.id}>
-          <span>Approval</span>
-          <code>{shortId(approval.id)}</code>
-        </div>
         {approval.decision && (
           <div className="plane-decision">
             Decided by <b>{String(approval.decision.actor || 'unknown')}</b>
@@ -50,7 +48,7 @@ export default function ApprovalGate({
               disabled={busy || !actor.trim()}
               onClick={() => onDecision(true)}
             >
-              Approve gate
+              Approve
             </button>
             <button
               className="danger"

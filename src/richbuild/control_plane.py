@@ -208,7 +208,7 @@ class ControlPlane:
             raise ValueError(f"{label} cannot be the workspace root itself")
         return resolved
 
-    def create_project(self, *, project_id: str, name: str) -> dict[str, Any]:
+    def create_project(self, *, name: str, project_id: str | None = None) -> dict[str, Any]:
         return self.store.create_project(name, project_id=project_id)
 
     def project_state(self, project_id: str) -> dict[str, Any]:

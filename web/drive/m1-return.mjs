@@ -13,8 +13,15 @@ import { chromium } from 'playwright'
 
 const base = process.env.RICH_URL || 'http://127.0.0.1:8790'
 const stamp = Date.now().toString(36)
-const projectId = `project.drive-${stamp}`
-const otherProjectId = `${projectId}-b`
+let projectId = `project.drive-${stamp}`
+const projectName = `Drive M1 ${stamp}`
+const otherName = `Drive M1 B ${stamp}`
+const projectIdByName = async (name) => {
+  const response = await fetch(`${base}/v1/projects`)
+  const found = (await response.json()).projects.find((item) => item.name === name)
+  if (!found) throw new Error(`no project named ${name}`)
+  return found.id
+}
 // Kept free of the words the adaptive interview reacts to, so the demo draft
 // still compiles without a policy answer.
 const goal = `Drive ${stamp}: an interview whose words survive a reload.`
@@ -63,10 +70,10 @@ await step('open the canvas', async () => {
 })
 
 await step('create a project', async () => {
-  await projectForm().getByLabel('Stable project id').fill(projectId)
-  await projectForm().getByLabel('Project name').fill('Drive M1')
+    await projectForm().getByLabel('Project name').fill(projectName)
   await page.getByRole('button', { name: 'Create', exact: true }).click()
-  await page.getByText(`Created ${projectId}`).waitFor()
+  await page.getByText(`Created ${projectName}`).waitFor()
+  projectId = await projectIdByName(projectName)
 })
 
 await step('start from the example, then type into the interview; the server holds it within a second', async () => {
@@ -82,33 +89,32 @@ await step('start from the example, then type into the interview; the server hol
 
 await step('reload: the interview is still there', async () => {
   await page.reload()
-  await page.getByText(`Loaded ${projectId}`).waitFor()
+  await page.getByText(`Loaded ${projectName}`).waitFor()
   assert.equal(await page.getByLabel('Outcome and problem').inputValue(), goal)
 })
 
 await step('compile the specification and approve it', async () => {
-  await page.getByRole('button', { name: /Compile product specification/ }).click()
-  await page.getByText('Intent compiled into a versioned spec').waitFor()
+  await page.getByRole('button', { name: /Write the specification/ }).click()
+  await page.getByText('The specification is ready for your approval').waitFor()
   await page.getByRole('button', { name: /^Approve/ }).first().click()
   await page.getByText('Product specification approved.').waitFor()
 })
 
 await step('reload: the approved specification is still there', async () => {
   await page.reload()
-  await page.getByText(`Loaded ${projectId}`).waitFor()
+  await page.getByText(`Loaded ${projectName}`).waitFor()
   await page.getByText('Specification approved').waitFor()
   await page.getByText('product specification', { exact: false }).first().waitFor()
   assert.equal(await page.getByLabel('Outcome and problem').inputValue(), goal)
 })
 
 await step('switch to another project, then back: each restores intact', async () => {
-  await projectForm().getByLabel('Stable project id').fill(otherProjectId)
-  await projectForm().getByLabel('Project name').fill('Drive M1 B')
+    await projectForm().getByLabel('Project name').fill(otherName)
   await page.getByRole('button', { name: 'Create', exact: true }).click()
-  await page.getByText(`Created ${otherProjectId}`).waitFor()
+  await page.getByText(`Created ${otherName}`).waitFor()
   assert.equal(await page.getByText('Specification approved').count(), 0)
-  await page.locator('.plane-project-chip', { hasText: projectId }).click()
-  await page.getByText(`Loaded ${projectId}`).waitFor()
+  await page.locator('.plane-project-chip', { hasText: projectName }).click()
+  await page.getByText(`Loaded ${projectName}`).waitFor()
   await page.getByText('Specification approved').waitFor()
   assert.equal(await page.getByLabel('Outcome and problem').inputValue(), goal)
 })
@@ -116,7 +122,7 @@ await step('switch to another project, then back: each restores intact', async (
 await step('a fresh tab after closing this one lands on the same project', async () => {
   const fresh = await context.newPage()
   await fresh.goto(base)
-  await fresh.getByText(`Loaded ${projectId}`).waitFor()
+  await fresh.getByText(`Loaded ${projectName}`).waitFor()
   await fresh.getByText('Specification approved').waitFor()
   await fresh.close()
 })

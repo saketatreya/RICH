@@ -73,15 +73,15 @@ export default function ConversationPanel({
         )}
         {outcome?.source === 'form-fallback' && (
           <p className="plane-chat-note">
-            No model route is configured on this server, so these are the fixed
-            questions. The draft on the right is yours to fill in.
+            This server has no model connected, so these are the fixed questions.
+            The draft on the right is yours to fill in.
           </p>
         )}
         {sending && (
           <Waiting
             since={busySince}
             what="The interviewer is thinking"
-            typical="one bounded model call, usually under a minute"
+            typical="usually under a minute"
           />
         )}
       </div>

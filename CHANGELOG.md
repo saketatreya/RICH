@@ -18,6 +18,14 @@ tree a wheel could not install, so the program's releases are numbered 2.0,
   and runs everything downstream again. Owners out of attempts withhold the
   retry instead of spending it on the root. Step messages lose their ANSI
   colour codes.
+- **No ids on screen.** A project is created with a name alone (the server
+  mints the id; `project_id` is optional on `POST /v1/projects`); the project
+  list, banners, footer and stage rail show names and dates, not ids or
+  revision counters; the specification panel shows its version and when it
+  was written instead of a revision id, a schema version and a hard-coded
+  "Coverage 100%"; approval ids and store schema numbers leave the page; the
+  "test id" way of finding an element leaves the step editor; "Compile product
+  specification" is "Write the specification". Found by the M12 re-audit.
 - **A seccomp profile for the image.** `docker/seccomp.json` is Docker's
   default profile with only the namespace and mount syscalls Bubblewrap uses
   admitted; CI runs the container with it and requires `rich doctor` green.

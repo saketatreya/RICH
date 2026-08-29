@@ -17,7 +17,7 @@ export const commaList = (value: string) =>
 
 export const errorMessage = (error: unknown) =>
   error instanceof ApiError
-    ? `${error.kind}${error.status ? ` (${error.status})` : ''}: ${error.message}`
+    ? error.message
     : error instanceof Error
       ? error.message
       : String(error)

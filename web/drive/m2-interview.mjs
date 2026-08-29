@@ -14,7 +14,14 @@ import { chromium } from 'playwright'
 
 const base = process.env.RICH_URL || 'http://127.0.0.1:8791'
 const stamp = Date.now().toString(36)
-const projectId = `project.drive-m2-${stamp}`
+let projectId = `project.drive-m2-${stamp}`
+const projectName = `Drive M2 ${stamp}`
+const projectIdByName = async (name) => {
+  const response = await fetch(`${base}/v1/projects`)
+  const found = (await response.json()).projects.find((item) => item.name === name)
+  if (!found) throw new Error(`no project named ${name}`)
+  return found.id
+}
 const prose = `Drive ${stamp}: a reading list where I add books and mark the ones I finished.`
 
 const browser = await chromium.launch()
@@ -41,10 +48,10 @@ const projectForm = () => page.locator('.plane-project-form')
 await step('open the canvas and create a project', async () => {
   await page.goto(base)
   await page.getByText('Control plane online').waitFor()
-  await projectForm().getByLabel('Stable project id').fill(projectId)
-  await projectForm().getByLabel('Project name').fill('Drive M2')
+    await projectForm().getByLabel('Project name').fill(projectName)
   await page.getByRole('button', { name: 'Create', exact: true }).click()
-  await page.getByText(`Created ${projectId}`).waitFor()
+  await page.getByText(`Created ${projectName}`).waitFor()
+  projectId = await projectIdByName(projectName)
 })
 
 await step('say what you want in prose; the interviewer answers', async () => {
@@ -78,8 +85,8 @@ await step('change a step\'s target through the controls', async () => {
 })
 
 await step('compile the specification and approve it', async () => {
-  await page.getByRole('button', { name: /Compile product specification/ }).click()
-  await page.getByText('Intent compiled into a versioned spec').waitFor()
+  await page.getByRole('button', { name: /Write the specification/ }).click()
+  await page.getByText('The specification is ready for your approval').waitFor()
   // The compiled spec renders its steps as the same sentences.
   await page.getByText("Type ‘Example project’ into the field labelled ‘Project title’").first().waitFor()
   await page.getByRole('button', { name: /^Approve/ }).first().click()
@@ -88,7 +95,7 @@ await step('compile the specification and approve it', async () => {
 
 await step('reload: the conversation and the draft are still there', async () => {
   await page.reload()
-  await page.getByText(`Loaded ${projectId}`).waitFor()
+  await page.getByText(`Loaded ${projectName}`).waitFor()
   await page.locator('.plane-chat-line.user').getByText(prose).waitFor()
   await page.getByText('Specification approved').waitFor()
 })

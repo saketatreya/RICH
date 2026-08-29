@@ -98,7 +98,7 @@ export default function ScenarioStepEditor({
                         )
                       }}
                     >
-                      {vocabulary.locator_kinds.map((kind) => (
+                      {vocabulary.locator_kinds.filter((kind) => kind !== 'test_id').map((kind) => (
                         <option key={kind} value={kind}>
                           {LOCATOR_KIND_LABELS[kind]}
                         </option>

@@ -1664,3 +1664,19 @@ def test_serve_binds_beyond_loopback_only_when_told_the_port_is_published_to_loo
 
     with pytest.raises(ValueError, match="published-on-loopback"):
         serve(tmp_path / "state", host="0.0.0.0", port=0, route="none")
+
+
+def test_a_project_needs_only_a_name(tmp_path):
+    application = Application(RichStore(tmp_path))
+    created = application.handle(
+        "POST", "/v1/projects", body={"name": "Task tracker"}, headers=_headers("name-only")
+    )
+    assert created.status == 201
+    project = created.body["project"]
+    assert project["name"] == "Task tracker"
+    assert project["id"].startswith("project_")
+    # A caller that has an id may still name it (drives and scripts do).
+    named = application.handle(
+        "POST", "/v1/projects", body={"name": "Named", "project_id": "project.named"}, headers=_headers("named")
+    )
+    assert named.body["project"]["id"] == "project.named"

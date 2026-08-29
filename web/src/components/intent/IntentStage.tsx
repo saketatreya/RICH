@@ -35,7 +35,6 @@ export interface IntentStageProps {
 }
 
 export default function IntentStage({
-  project,
   document,
   vocabulary,
   editAnswers,
@@ -55,7 +54,7 @@ export default function IntentStage({
     <section className="plane-panel" id="stage-intent">
       <div className="plane-section-title">
         <div>
-          <span className="plane-eyebrow">Intent · revision {project.current_revision + 1}</span>
+          <span className="plane-eyebrow">Intent</span>
           <h2>Say what you want built</h2>
         </div>
         <span className="chip">draft</span>
@@ -146,7 +145,7 @@ export default function IntentStage({
             </div>
             <div className="plane-submit-actions">
               <button className="primary" disabled={!!busy || !ready} onClick={onSubmit}>
-                {busy === 'submit-spec' ? 'Compiling intent…' : 'Compile product specification →'}
+                {busy === 'submit-spec' ? 'Writing…' : 'Write the specification →'}
               </button>
             </div>
           </div>
