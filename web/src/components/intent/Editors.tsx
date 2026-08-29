@@ -19,8 +19,8 @@ export function RequirementEditor({
     onChange(items.map((item, i) => (i === index ? { ...item, ...patch } : item)))
 
   return (
-    <div className="v2-form-section">
-      <div className="v2-form-section-head">
+    <div className="plane-form-section">
+      <div className="plane-form-section-head">
         <div>
           <h4>{title}</h4>
           <p>{note}</p>
@@ -37,9 +37,9 @@ export function RequirementEditor({
           + Add
         </button>
       </div>
-      <div className="v2-editor-list">
+      <div className="plane-editor-list">
         {items.map((item, index) => (
-          <div className="v2-editor-card" key={`${item.id}-${index}`}>
+          <div className="plane-editor-card" key={`${item.id}-${index}`}>
             <input
               aria-label={`${title} ${index + 1} id`}
               className="mono"
@@ -61,7 +61,7 @@ export function RequirementEditor({
             />
             {items.length > 1 && (
               <button
-                className="tiny ghost danger v2-remove"
+                className="tiny ghost danger plane-remove"
                 aria-label={`Remove ${title} ${index + 1}`}
                 onClick={() => onChange(items.filter((_, i) => i !== index))}
               >
@@ -86,8 +86,8 @@ export function ScenarioEditor({
     onChange(items.map((item, i) => (i === index ? { ...item, ...patch } : item)))
 
   return (
-    <div className="v2-form-section">
-      <div className="v2-form-section-head">
+    <div className="plane-form-section">
+      <div className="plane-form-section-head">
         <div>
           <h4>Acceptance scenarios</h4>
           <p>Every requirement needs a Given/When/Then behavioral oracle.</p>
@@ -118,9 +118,9 @@ export function ScenarioEditor({
           + Add
         </button>
       </div>
-      <div className="v2-editor-list">
+      <div className="plane-editor-list">
         {items.map((item, index) => (
-          <div className="v2-editor-card v2-scenario-card" key={`${item.id}-${index}`}>
+          <div className="plane-editor-card plane-scenario-card" key={`${item.id}-${index}`}>
             <input
               aria-label={`Scenario ${index + 1} id`}
               className="mono"
@@ -141,7 +141,7 @@ export function ScenarioEditor({
               onChange={(event) => update(index, { requirementIds: event.target.value })}
               placeholder="req.one, req.two"
             />
-            <div className="v2-gwt">
+            <div className="plane-gwt">
               <label>
                 <span>Given</span>
                 <textarea
@@ -167,7 +167,7 @@ export function ScenarioEditor({
                 />
               </label>
             </div>
-            <label className="v2-oracle">
+            <label className="plane-oracle">
               <span>Executable browser oracle · approved JSON steps</span>
               <textarea
                 className="mono"
@@ -178,7 +178,7 @@ export function ScenarioEditor({
             </label>
             {items.length > 1 && (
               <button
-                className="tiny ghost danger v2-remove"
+                className="tiny ghost danger plane-remove"
                 aria-label={`Remove scenario ${index + 1}`}
                 onClick={() => onChange(items.filter((_, i) => i !== index))}
               >
@@ -194,15 +194,15 @@ export function ScenarioEditor({
 
 export function ScenarioList({ scenarios }: { scenarios: AcceptanceScenario[] }) {
   return (
-    <div className="v2-evidence-grid">
+    <div className="plane-evidence-grid">
       {scenarios.map((scenario) => (
-        <article className="v2-evidence-card" key={scenario.id}>
-          <div className="v2-card-top">
+        <article className="plane-evidence-card" key={scenario.id}>
+          <div className="plane-card-top">
             <code>{scenario.id}</code>
             <span>{scenario.requirement_ids.join(', ')}</span>
           </div>
           <h4>{scenario.title}</h4>
-          <div className="v2-gwt-read">
+          <div className="plane-gwt-read">
             {!!scenario.given.length && <p><b>Given</b> {scenario.given.join(' · ')}</p>}
             <p><b>When</b> {scenario.when.join(' · ')}</p>
             <p><b>Then</b> {scenario.then.join(' · ')}</p>

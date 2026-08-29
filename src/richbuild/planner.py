@@ -56,7 +56,7 @@ _TEXT = ValueType(
 # outcome.  These are placeholders in content but not in kind -- unlike the
 # untyped `{request: string}` they replace, they are finitely sampleable, so an
 # obligation over them is something a gate can actually run.  An architect model
-# is what replaces the content (see docs/v2-architecture.md).
+# is what replaces the content (see docs/architecture.md).
 _REQUEST_TYPE = ValueType(
     kind=ValueTypeKind.RECORD,
     record_fields=(

@@ -1,7 +1,7 @@
 /** Small shared formatters. Extracted so a stage component can render a
  * status or an error without pulling in the whole control plane. */
 
-import { V2ApiError } from './api'
+import { ApiError } from './api'
 
 export const lines = (value: string) =>
   value
@@ -16,7 +16,7 @@ export const commaList = (value: string) =>
     .filter(Boolean)
 
 export const errorMessage = (error: unknown) =>
-  error instanceof V2ApiError
+  error instanceof ApiError
     ? `${error.kind}${error.status ? ` (${error.status})` : ''}: ${error.message}`
     : error instanceof Error
       ? error.message

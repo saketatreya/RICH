@@ -239,10 +239,10 @@ export default function Inspector({
 
   if (error) {
     return (
-      <section className="v2-panel">
-        <div className="v2-section-title">
+      <section className="plane-panel">
+        <div className="plane-section-title">
           <div>
-            <span className="v2-eyebrow">Inspector</span>
+            <span className="plane-eyebrow">Inspector</span>
             <h2>Generated source</h2>
           </div>
         </div>
@@ -252,20 +252,20 @@ export default function Inspector({
   }
 
   return (
-    <section className="v2-panel">
-      <div className="v2-section-title">
+    <section className="plane-panel">
+      <div className="plane-section-title">
         <div>
-          <span className="v2-eyebrow">Inspector</span>
+          <span className="plane-eyebrow">Inspector</span>
           <h2>What each node produced</h2>
         </div>
         <span className="chip">{tasks.length} nodes</span>
       </div>
 
-      <div className="v2-node-grid">
+      <div className="plane-node-grid">
         {tasks.map((task) => (
           <button
             key={task.id}
-            className={`v2-node-card${selectedTask?.id === task.id ? ' selected' : ''}`}
+            className={`plane-node-card${selectedTask?.id === task.id ? ' selected' : ''}`}
             onClick={() => {
               const next = selectedTask?.id === task.id ? null : task.id
               setSelected(next)
@@ -284,12 +284,12 @@ export default function Inspector({
       </div>
 
       {selectedTask && (
-        <div className="v2-inspect">
-          <div className="v2-inspect-head">
+        <div className="plane-inspect">
+          <div className="plane-inspect-head">
             <h3>{selectedTask.node_id}</h3>
             {projectId && (
               <button
-                className="v2-secondary"
+                className="plane-secondary"
                 disabled={rebuilding}
                 onClick={async () => {
                   setRebuilding(true)
@@ -318,10 +318,10 @@ export default function Inspector({
               </button>
             )}
           </div>
-          {rebuilt && <p className="v2-note">{rebuilt}</p>}
+          {rebuilt && <p className="plane-note">{rebuilt}</p>}
 
           <h4>Responsible for</h4>
-          <div className="v2-owns">
+          <div className="plane-owns">
             {ownedRequirements.length ? (
               ownedRequirements.map((id) => (
                 <span className="chip" key={id}>{id}</span>
@@ -334,7 +334,7 @@ export default function Inspector({
           {contract && <Behaviour contract={contract} />}
 
           <h4>Evidence</h4>
-          <div className="v2-evidence">
+          <div className="plane-evidence">
             {evidenceFor(events, selectedTask.id).map((record) => (
               <div key={record.sequence}>
                 <span className={`chip ${record.status}`}>{record.status}</span>
@@ -350,7 +350,7 @@ export default function Inspector({
             )}
           </div>
 
-          <details className="v2-audit">
+          <details className="plane-audit">
             <summary>
               <b>Read the source this node wrote</b>
               <small>

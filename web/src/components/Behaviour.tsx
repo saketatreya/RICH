@@ -126,7 +126,7 @@ export default function Behaviour({ contract }: { contract: ContractDoc }) {
     operations.find((operation) => operation.id === id)?.name ?? id
 
   return (
-    <div className="v2-behaviour">
+    <div className="plane-behaviour">
       <h4>Behaviour</h4>
       {operations.length === 0 && (
         <p className="muted">This component declares no operations.</p>
@@ -138,7 +138,7 @@ export default function Behaviour({ contract }: { contract: ContractDoc }) {
             obligation.witness_operation_id === operation.id,
         )
         return (
-          <article className="v2-operation" key={operation.id}>
+          <article className="plane-operation" key={operation.id}>
             <header>
               <code>{operation.name}</code>
               <span>
@@ -147,13 +147,13 @@ export default function Behaviour({ contract }: { contract: ContractDoc }) {
             </header>
             {operation.description && <p>{operation.description}</p>}
             {(operation.errors?.length ?? 0) > 0 && (
-              <p className="v2-operation-errors">
+              <p className="plane-operation-errors">
                 May fail with{' '}
                 {operation.errors!.map((error) => error.code).join(', ')}.
               </p>
             )}
             {claims.length > 0 && (
-              <ul className="v2-claims">
+              <ul className="plane-claims">
                 {claims.map((obligation) => (
                   <li key={obligation.id}>
                     {claim(obligation, nameOf)}
@@ -170,7 +170,7 @@ export default function Behaviour({ contract }: { contract: ContractDoc }) {
       {(contract.invariants?.length ?? 0) > 0 && (
         <>
           <h4>Always true</h4>
-          <ul className="v2-claims">
+          <ul className="plane-claims">
             {contract.invariants!.map((invariant) => (
               <li key={invariant.id}>{invariant.statement}</li>
             ))}

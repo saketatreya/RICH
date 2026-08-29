@@ -50,7 +50,7 @@ const eventually = async (check, what, timeoutMs = 10_000) => {
 // The project form's fields, scoped: once a spec exists, the compiled scenario list
 // renders its oracle's "Project name" locator as text, and a bare label match is
 // a substring match.
-const projectForm = () => page.locator('.v2-project-form')
+const projectForm = () => page.locator('.plane-project-form')
 
 const serverDraft = async () => {
   const response = await fetch(`${base}/v1/projects/${encodeURIComponent(projectId)}/interview`)
@@ -104,7 +104,7 @@ await step('switch to another project, then back: each restores intact', async (
   await page.getByRole('button', { name: 'Create', exact: true }).click()
   await page.getByText(`Created ${otherProjectId}`).waitFor()
   assert.equal(await page.getByText('Specification approved').count(), 0)
-  await page.locator('.v2-project-chip', { hasText: projectId }).click()
+  await page.locator('.plane-project-chip', { hasText: projectId }).click()
   await page.getByText(`Loaded ${projectId}`).waitFor()
   await page.getByText('Specification approved').waitFor()
   assert.equal(await page.getByLabel('Outcome and problem').inputValue(), goal)

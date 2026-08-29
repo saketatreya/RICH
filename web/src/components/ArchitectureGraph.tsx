@@ -172,7 +172,7 @@ export default function ArchitectureGraph({
   )
 
   return (
-    <div className="v2-graph">
+    <div className="plane-graph">
       <ReactFlow
         nodes={nodes}
         edges={edges}

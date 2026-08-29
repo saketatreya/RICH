@@ -33,9 +33,9 @@ function Bucket({
 }) {
   if (nodes.length === 0) return null
   return (
-    <div className={`v2-change-bucket ${tone}`}>
+    <div className={`plane-change-bucket ${tone}`}>
       <b>{title}</b>
-      <div className="v2-change-nodes">
+      <div className="plane-change-nodes">
         {nodes.map((node) => (
           <span className="chip" key={node}>
             {node}
@@ -68,10 +68,10 @@ export default function ChangeCost({ projectId, revisions }: Props) {
   const applied = plan?.forgotten !== undefined
 
   return (
-    <section className="v2-panel" id="stage-change">
-      <div className="v2-section-title">
+    <section className="plane-panel" id="stage-change">
+      <div className="plane-section-title">
         <div>
-          <span className="v2-eyebrow">Change</span>
+          <span className="plane-eyebrow">Change</span>
           <h2>What this amendment costs</h2>
         </div>
         {change && (
@@ -90,14 +90,14 @@ export default function ChangeCost({ projectId, revisions }: Props) {
       </p>
 
       {!revisions && (
-        <p className="v2-note-warn">
+        <p className="plane-note-warn">
           Two approved revisions are needed to compare. Amend the specification
           and approve it, then come back.
         </p>
       )}
 
       {revisions && (
-        <div className="v2-submit-actions">
+        <div className="plane-submit-actions">
           <button
             className="primary"
             disabled={!!busy}
@@ -107,7 +107,7 @@ export default function ChangeCost({ projectId, revisions }: Props) {
           </button>
           {change && change.stale.length > 0 && !applied && (
             <button
-              className="v2-secondary"
+              className="plane-secondary"
               disabled={!!busy}
               onClick={() =>
                 run('apply', () => api.applyChange(projectId, revisions))
@@ -119,14 +119,14 @@ export default function ChangeCost({ projectId, revisions }: Props) {
         </div>
       )}
 
-      {error && <p className="v2-note-warn">{error}</p>}
+      {error && <p className="plane-note-warn">{error}</p>}
 
       {change && (
         <>
           {(change.requirements.modified.length > 0 ||
             change.requirements.added.length > 0 ||
             change.requirements.removed.length > 0) && (
-            <div className="v2-change-requirements">
+            <div className="plane-change-requirements">
               {(
                 [
                   ['modified', change.requirements.modified],
@@ -143,7 +143,7 @@ export default function ChangeCost({ projectId, revisions }: Props) {
             </div>
           )}
 
-          <div className="v2-change-grid">
+          <div className="plane-change-grid">
             <Bucket
               title="Rebuilt"
               nodes={change.directly_stale}
@@ -170,14 +170,14 @@ export default function ChangeCost({ projectId, revisions }: Props) {
             />
           </div>
 
-          <ul className="v2-change-notes">
+          <ul className="plane-change-notes">
             {change.notes.map((note) => (
               <li key={note}>{note}</li>
             ))}
           </ul>
 
           {applied && (
-            <p className="v2-note">
+            <p className="plane-note">
               Marked stale:{' '}
               {Object.entries(plan.forgotten ?? {})
                 .map(([node, count]) => `${node} (${count})`)

@@ -42,27 +42,27 @@ export default function IntentStage({
 }: IntentStageProps) {
   const submitSpec = onSubmit
   return (
-        <section className="v2-panel" id="stage-intent">
-          <div className="v2-section-title">
+        <section className="plane-panel" id="stage-intent">
+          <div className="plane-section-title">
             <div>
-              <span className="v2-eyebrow">Intent · revision {project.current_revision + 1}</span>
+              <span className="plane-eyebrow">Intent · revision {project.current_revision + 1}</span>
               <h2>Define the product truth</h2>
             </div>
             <span className="chip">draft</span>
           </div>
-          <p className="v2-panel-lead">
+          <p className="plane-panel-lead">
             Requirements describe observable behavior. Scenarios define the evidence that
             makes each requirement provable.
           </p>
-          <div className="v2-intent-form">
-            <label className="v2-span-2">
+          <div className="plane-intent-form">
+            <label className="plane-span-2">
               <span>Outcome and problem</span>
               <textarea
                 value={draft.goal}
                 onChange={(event) => setDraft({ ...draft, goal: event.target.value })}
               />
             </label>
-            <label className="v2-span-2">
+            <label className="plane-span-2">
               <span>Audiences · one per line</span>
               <textarea
                 value={draft.audiences}
@@ -86,13 +86,13 @@ export default function IntentStage({
             items={draft.scenarios}
             onChange={(scenarios) => setDraft({ ...draft, scenarios })}
           />
-          <details className="v2-adaptive">
+          <details className="plane-adaptive">
             <summary>Adaptive policies for identity, data, integrations, or realtime work</summary>
             <p>
               Fill the relevant policy if the goal or capabilities mention these concerns.
               The compiler fails closed when a relevant policy is missing.
             </p>
-            <div className="v2-adaptive-grid">
+            <div className="plane-adaptive-grid">
               {[
                 ['Roles and permissions', 'roles', draft.roles],
                 ['Data lifecycle', 'dataPolicy', draft.dataPolicy],
@@ -112,9 +112,9 @@ export default function IntentStage({
             </div>
           </details>
           {interviewNeeds && (
-            <div className="v2-needs">
+            <div className="plane-needs">
               {interviewNeeds.complete ? (
-                <p className="v2-needs-done">
+                <p className="plane-needs-done">
                   Nothing outstanding — every question this project raises has an answer.
                 </p>
               ) : (
@@ -132,14 +132,14 @@ export default function IntentStage({
               )}
             </div>
           )}
-          <div className="v2-submit-row">
+          <div className="plane-submit-row">
             <div>
               <b>{draft.capabilities.length + draft.qualityConstraints.length} requirements</b>
               <span>{draft.scenarios.length} acceptance scenarios</span>
             </div>
-            <div className="v2-submit-actions">
+            <div className="plane-submit-actions">
               <button
-                className="v2-secondary"
+                className="plane-secondary"
                 disabled={!!busy || !project}
                 onClick={async () => {
                   if (!project) return

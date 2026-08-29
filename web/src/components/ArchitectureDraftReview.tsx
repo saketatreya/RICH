@@ -84,10 +84,10 @@ export default function ArchitectureDraftReview({
   const changes = useMemo(() => diffNodes(current, draft.architecture), [current, draft])
 
   return (
-    <section className="v2-panel v2-draft">
-      <div className="v2-section-title">
+    <section className="plane-panel plane-draft">
+      <div className="plane-section-title">
         <div>
-          <span className="v2-eyebrow">
+          <span className="plane-eyebrow">
             Proposed by {draft.source === 'model' ? 'the architect' : 'the deterministic planner'}
           </span>
           <h2>Review before anything is recorded</h2>
@@ -97,7 +97,7 @@ export default function ArchitectureDraftReview({
 
       {draft.rationale && <p className="muted">{draft.rationale}</p>}
 
-      <div className="v2-draft-diff">
+      <div className="plane-draft-diff">
         {changes.length === 0 && (
           <p className="muted">
             This proposal matches the current architecture. Applying it would
@@ -115,7 +115,7 @@ export default function ArchitectureDraftReview({
       </div>
 
       {draft.decisions.length > 0 && (
-        <div className="v2-decision-grid">
+        <div className="plane-decision-grid">
           <div>
             <h4>Decisions</h4>
             <ul>
@@ -137,7 +137,7 @@ export default function ArchitectureDraftReview({
         </div>
       )}
 
-      <label className="v2-repair">
+      <label className="plane-repair">
         <span>Ask for a different design</span>
         <textarea
           rows={2}
@@ -147,7 +147,7 @@ export default function ArchitectureDraftReview({
         />
       </label>
 
-      <div className="v2-draft-actions">
+      <div className="plane-draft-actions">
         <button className="primary" disabled={busy} onClick={onApply}>
           Apply as a new revision
         </button>
@@ -162,7 +162,7 @@ export default function ArchitectureDraftReview({
           Discard
         </button>
       </div>
-      <p className="muted v2-draft-note">
+      <p className="muted plane-draft-note">
         Applying records a new immutable revision that needs its own approval.
         Nothing has been stored yet.
       </p>

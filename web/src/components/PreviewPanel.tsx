@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 
 import {
   api,
-  type Approval,
   type Preview,
+  type PreviewSubmission,
   type Run,
 } from '../lib/api'
 
@@ -20,7 +20,12 @@ import {
 
 interface Props {
   run: Run
-  destination: string
+  /**
+   * The scaffold destination the run built in -- the only directory the API
+   * accepts as a preview source, because it is the one the run's recorded
+   * events name. Null until a scaffold exists.
+   */
+  sourceDir: string | null
   actor: string
 }
 
@@ -31,9 +36,12 @@ function defaultExpiry(): string {
   return when.toISOString().slice(0, 16)
 }
 
-export default function PreviewPanel({ run, destination, actor }: Props) {
+export default function PreviewPanel({ run, sourceDir, actor }: Props) {
   const [previews, setPreviews] = useState<Preview[]>([])
-  const [approval, setApproval] = useState<Approval | null>(null)
+  // The request just made and not yet decided: its approval binds the digest,
+  // and its preview is the one that deploys -- not whichever preview happens
+  // to be last in the list.
+  const [pending, setPending] = useState<PreviewSubmission | null>(null)
   const [neonProjectId, setNeonProjectId] = useState('')
   const [vercelProjectId, setVercelProjectId] = useState('')
   const [expiresAt, setExpiresAt] = useState(defaultExpiry)
@@ -68,10 +76,10 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
   const latest = previews[previews.length - 1] ?? null
 
   return (
-    <section className="v2-panel">
-      <div className="v2-section-title">
+    <section className="plane-panel">
+      <div className="plane-section-title">
         <div>
-          <span className="v2-eyebrow">Preview</span>
+          <span className="plane-eyebrow">Preview</span>
           <h2>Deploy exactly what was verified</h2>
         </div>
         {latest && <span className={`chip ${latest.status}`}>{latest.status}</span>}
@@ -85,13 +93,13 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
       </p>
 
       {run.status !== 'succeeded' && (
-        <p className="v2-note-warn">
+        <p className="plane-note-warn">
           This run has not succeeded yet. Only a verified release can be
           previewed.
         </p>
       )}
 
-      <div className="v2-preview-form">
+      <div className="plane-preview-form">
         <label>
           <span>Neon project</span>
           <input
@@ -118,21 +126,23 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
         </label>
       </div>
 
-      <div className="v2-submit-actions">
+      <div className="plane-submit-actions">
         <button
           className="primary"
           disabled={
-            !!busy || run.status !== 'succeeded' || !neonProjectId.trim()
+            !!busy || run.status !== 'succeeded' || !neonProjectId.trim() || !sourceDir
           }
           onClick={() =>
             guard('request-preview', async () => {
-              const submission = await api.requestPreview(run.id, {
-                sourceDir: destination,
-                neonProjectId: neonProjectId.trim(),
-                expiresAt: new Date(expiresAt).toISOString(),
-                vercelProjectId: vercelProjectId.trim() || undefined,
-              })
-              setApproval(submission.approval)
+              if (!sourceDir) return
+              setPending(
+                await api.requestPreview(run.id, {
+                  sourceDir,
+                  neonProjectId: neonProjectId.trim(),
+                  expiresAt: new Date(expiresAt).toISOString(),
+                  vercelProjectId: vercelProjectId.trim() || undefined,
+                }),
+              )
             })
           }
         >
@@ -140,7 +150,7 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
         </button>
         {latest && (
           <button
-            className="v2-secondary"
+            className="plane-secondary"
             disabled={!!busy}
             onClick={() =>
               guard('destroy-preview', async () => {
@@ -153,43 +163,43 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
         )}
       </div>
 
-      {approval && approval.status === 'requested' && (
-        <div className="v2-needs">
+      {pending && pending.approval.status === 'requested' && (
+        <div className="plane-needs">
           <b>Approve this deployment</b>
           <p className="muted">
-            Bound to source <code>{String(approval.request?.source_digest ?? '')}</code>
+            Bound to source <code>{String(pending.approval.request?.source_digest ?? '')}</code>
           </p>
-          <div className="v2-submit-actions">
+          <div className="plane-submit-actions">
             <button
               className="primary"
               disabled={!!busy}
               onClick={() =>
                 guard('deploy-preview', async () => {
                   await api.decideApproval(
-                    approval.id,
+                    pending.approval.id,
                     true,
                     actor,
                     'Approved for preview deployment',
                   )
-                  if (latest) await api.deployPreview(latest.id, approval.id)
-                  setApproval(null)
+                  await api.deployPreview(pending.preview.id, pending.approval.id)
+                  setPending(null)
                 })
               }
             >
               {busy === 'deploy-preview' ? 'Deploying…' : 'Approve and deploy →'}
             </button>
             <button
-              className="v2-secondary"
+              className="plane-secondary"
               disabled={!!busy}
               onClick={() =>
                 guard('reject-preview', async () => {
                   await api.decideApproval(
-                    approval.id,
+                    pending.approval.id,
                     false,
                     actor,
                     'Not deploying this build',
                   )
-                  setApproval(null)
+                  setPending(null)
                 })
               }
             >
@@ -199,10 +209,10 @@ export default function PreviewPanel({ run, destination, actor }: Props) {
         </div>
       )}
 
-      {error && <p className="v2-note-warn">{error}</p>}
+      {error && <p className="plane-note-warn">{error}</p>}
 
       {previews.length > 0 && (
-        <div className="v2-preview-list">
+        <div className="plane-preview-list">
           {previews.map((preview) => (
             <article key={preview.id}>
               <div>

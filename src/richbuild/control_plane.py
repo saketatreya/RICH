@@ -373,7 +373,7 @@ class ControlPlane:
     ) -> dict[str, Any]:
         """Mark one architecture node stale so the next run regenerates it.
 
-        The Canvas is built around this operation and v2 had no equivalent: its
+        The Canvas is built around this operation and the earlier engine had no equivalent: its
         only granularity was the whole run, so correcting one component meant
         re-paying for every component beside it.
 

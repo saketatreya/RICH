@@ -18,7 +18,7 @@ _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
 class ModelValidationError(ValueError):
-    """A v2 document is structurally invalid or internally inconsistent."""
+    """A document is structurally invalid or internally inconsistent."""
 
 
 class UnsupportedSchemaVersion(ModelValidationError):
@@ -549,7 +549,7 @@ def _unique_by_id(items: Iterable[Any], label: str) -> dict[str, Any]:
 def _relative_owned_path(value: str, label: str) -> str:
     # Deliberately not delegating to paths.safe_relative_path, which every
     # other caller in the package now shares: models.py is the bottom of the
-    # v2 layering and imports no sibling module, and a domain vocabulary that
+    # models layering and imports no sibling module, and a domain vocabulary that
     # reaches sideways for a helper stops being one. The rules below are the
     # same rules, applied to a path that is being *declared* in a spec rather
     # than written to a disk.

@@ -11,14 +11,13 @@ import {
   type RunEvent,
   type ScaffoldResult,
   type SpecSubmission,
-  V2ApiError,
+  ApiError,
   api,
   type DurableTask,
   type InterviewNeeds,
 } from '../lib/api'
 import ApprovalGate from './ApprovalGate'
 import Assurance from './Assurance'
-import ChangeCost from './ChangeCost'
 import type { ContractDoc } from './Behaviour'
 import ArchitectureDraftReview from './ArchitectureDraftReview'
 import ArchitectureGraph from './ArchitectureGraph'
@@ -252,7 +251,7 @@ export default function ControlPlane() {
         setDraftRevision(saved.draft_revision)
         setDraftDirty(false)
       } catch (saveError) {
-        if (saveError instanceof V2ApiError && saveError.status === 409) {
+        if (saveError instanceof ApiError && saveError.status === 409) {
           const latest = await api.getInterview(targetProject).catch(() => null)
           if (latest) {
             const theirs = draftFromDocument(latest.document)
@@ -660,16 +659,16 @@ export default function ControlPlane() {
   ]
 
   return (
-    <main className="v2-shell">
-      <header className="v2-header">
-        <div className="v2-brand">
+    <main className="plane-shell">
+      <header className="plane-header">
+        <div className="plane-brand">
           <div className="brand-mark" />
           <div>
-            <div className="v2-wordmark">RI<span>CH</span></div>
-            <div className="v2-submark">software development compiler</div>
+            <div className="plane-wordmark">RI<span>CH</span></div>
+            <div className="plane-submark">software development compiler</div>
           </div>
         </div>
-        <div className="v2-identity" aria-label="Approval identity">
+        <div className="plane-identity" aria-label="Approval identity">
           <label>
             <span>Deciding as</span>
             <input value={actor} onChange={(event) => setActor(event.target.value)} />
@@ -679,7 +678,7 @@ export default function ControlPlane() {
             <input value={reason} onChange={(event) => setReason(event.target.value)} />
           </label>
         </div>
-        <div className="v2-health">
+        <div className="plane-health">
           <span className={`dot ${health ? '' : 'pulse'}`} />
           <div>
             <b>{health ? 'Control plane online' : 'Control plane offline'}</b>
@@ -693,12 +692,12 @@ export default function ControlPlane() {
         </div>
       </header>
 
-      <aside className="v2-rail">
-        <div className="v2-rail-label">Compilation</div>
+      <aside className="plane-rail">
+        <div className="plane-rail-label">Compilation</div>
         {stages.map((item, index) => (
           <button
             type="button"
-            className={`v2-stage ${item.state}`}
+            className={`plane-stage ${item.state}`}
             key={item.id}
             aria-current={item.state === 'active' ? 'step' : undefined}
             onClick={() =>
@@ -711,36 +710,36 @@ export default function ControlPlane() {
             <div><b>{item.label}</b><small>{item.detail}</small></div>
           </button>
         ))}
-        <div className="v2-rail-principle">
+        <div className="plane-rail-principle">
           <span>Principle</span>
           <p>Intent and code are coequal artifacts. Neither advances without traceable evidence.</p>
         </div>
       </aside>
 
-      <div className="v2-workspace">
+      <div className="plane-workspace">
         {connectionError && (
-          <div className="v2-banner bad">
+          <div className="plane-banner bad">
             <b>API unavailable</b>
             <span>{connectionError}</span>
           </div>
         )}
         {error && (
-          <div className="v2-banner bad" role="alert">
+          <div className="plane-banner bad" role="alert">
             <b>Action stopped</b>
             <span>{error}</span>
             <button className="tiny ghost" onClick={() => setError('')}>Dismiss</button>
           </div>
         )}
         {notice && (
-          <div className="v2-banner ok" role="status">
+          <div className="plane-banner ok" role="status">
             <b>State updated</b>
             <span>{notice}</span>
             <button className="tiny ghost" onClick={() => setNotice('')}>Dismiss</button>
           </div>
         )}
 
-        <section className="v2-hero">
-          <span className="v2-eyebrow">RICH · local-first</span>
+        <section className="plane-hero">
+          <span className="plane-eyebrow">RICH · local-first</span>
           <h1>Compile intent into<br /><em>evidence-backed software.</em></h1>
           <p>
             Define observable outcomes, approve the behavioral contract, inspect the
@@ -748,26 +747,26 @@ export default function ControlPlane() {
           </p>
         </section>
 
-        <section className="v2-panel" id="stage-project">
-          <div className="v2-section-title">
+        <section className="plane-panel" id="stage-project">
+          <div className="plane-section-title">
             <div>
-              <span className="v2-eyebrow">Workspace</span>
+              <span className="plane-eyebrow">Workspace</span>
               <h2>Create or select a project</h2>
             </div>
             {project && (
-              <div className="v2-project-state">
+              <div className="plane-project-state">
                 <span className="chip ok">selected</span>
                 <code>rev {project.current_revision}</code>
               </div>
             )}
           </div>
           {projects.length > 0 && (
-            <div className="v2-project-list">
+            <div className="plane-project-list">
               {projects.map((item) => (
                 <button
                   type="button"
                   key={item.id}
-                  className={`v2-project-chip${project?.id === item.id ? ' selected' : ''}`}
+                  className={`plane-project-chip${project?.id === item.id ? ' selected' : ''}`}
                   disabled={!!busy}
                   onClick={() => {
                     setProjectId(item.id)
@@ -783,7 +782,7 @@ export default function ControlPlane() {
               ))}
             </div>
           )}
-          <div className="v2-project-form">
+          <div className="plane-project-form">
             <label>
               <span>Stable project id</span>
               <input
@@ -801,7 +800,7 @@ export default function ControlPlane() {
                 placeholder="Example"
               />
             </label>
-            <div className="v2-project-buttons">
+            <div className="plane-project-buttons">
               <button
                 className="primary"
                 disabled={!!busy || !projectId.trim() || !projectName.trim()}
@@ -819,7 +818,7 @@ export default function ControlPlane() {
             </div>
           </div>
           {project && (
-            <div className="v2-object-bar">
+            <div className="plane-object-bar">
               <div><span>Project</span><code title={project.id}>{project.id}</code></div>
               <div><span>Revision</span><b>{project.current_revision}</b></div>
               <div><span>Updated</span><b>{new Date(project.updated_at).toLocaleString()}</b></div>
@@ -844,18 +843,18 @@ export default function ControlPlane() {
 
         {spec && (
           <>
-            <section className="v2-panel">
-              <div className="v2-section-title">
+            <section className="plane-panel">
+              <div className="plane-section-title">
                 <div>
-                  <span className="v2-eyebrow">Versioned artifact</span>
+                  <span className="plane-eyebrow">Versioned artifact</span>
                   <h2>{spec.spec.name} · product specification</h2>
                 </div>
                 <code>{shortId(spec.revision.id)}</code>
               </div>
-              <div className="v2-spec-summary">
+              <div className="plane-spec-summary">
                 <div><span>Requirements</span><b>{spec.spec.requirements.length}</b></div>
                 <div><span>Scenarios</span><b>{spec.spec.acceptance_scenarios.length}</b></div>
-                <div><span>Coverage</span><b className="v2-green">100%</b></div>
+                <div><span>Coverage</span><b className="plane-green">100%</b></div>
                 <div><span>Schema</span><b>{spec.spec.schema_version}</b></div>
               </div>
               <ScenarioList scenarios={spec.spec.acceptance_scenarios} />
@@ -869,9 +868,9 @@ export default function ControlPlane() {
               onDecision={decideSpec}
             />
             {spec.approval.status === 'approved' && !architecture && (
-              <section className="v2-panel v2-next-step">
+              <section className="plane-panel plane-next-step">
                 <div>
-                  <span className="v2-eyebrow">Compiler stage</span>
+                  <span className="plane-eyebrow">Compiler stage</span>
                   <h2>Plan owned architecture boundaries</h2>
                   <p>The Next.js target pack will derive nodes, typed ports, dependencies, and requirement traces.</p>
                   {busy === 'draft-architecture' && (
@@ -882,7 +881,7 @@ export default function ControlPlane() {
                     />
                   )}
                 </div>
-                <div className="v2-draft-actions">
+                <div className="plane-draft-actions">
                   <button className="primary" disabled={!!busy} onClick={() => draftArchitecture()}>
                     {busy === 'draft-architecture' ? 'Designing…' : 'Draft with the architect →'}
                   </button>
@@ -907,10 +906,10 @@ export default function ControlPlane() {
 
         {architecture && (
           <>
-            <section className="v2-panel" id="stage-architecture">
-              <div className="v2-section-title">
+            <section className="plane-panel" id="stage-architecture">
+              <div className="plane-section-title">
                 <div>
-                  <span className="v2-eyebrow">Architecture · {architecture.architecture.target_pack}</span>
+                  <span className="plane-eyebrow">Architecture · {architecture.architecture.target_pack}</span>
                   <h2>Ownership and dependency graph</h2>
                 </div>
                 <span className="chip">{architecture.architecture.nodes.length} nodes</span>
@@ -923,10 +922,10 @@ export default function ControlPlane() {
                   setSelectedNode(nodeId === selectedNode ? null : nodeId)
                 }
               />
-              <div className="v2-architecture-grid">
+              <div className="plane-architecture-grid">
                 {architecture.architecture.nodes.map((node) => (
                   <article
-                    className={`v2-node-card${selectedNode === node.id ? ' selected' : ''}`}
+                    className={`plane-node-card${selectedNode === node.id ? ' selected' : ''}`}
                     key={node.id}
                   >
                     <div><code>{node.id}</code><span>{node.kind}</span></div>
@@ -935,7 +934,7 @@ export default function ControlPlane() {
                   </article>
                 ))}
               </div>
-              <div className="v2-decision-grid">
+              <div className="plane-decision-grid">
                 <div>
                   <h4>Decisions</h4>
                   <ul>{architecture.decisions.map((item) => <li key={item}>{item}</li>)}</ul>
@@ -957,9 +956,9 @@ export default function ControlPlane() {
               />
             )}
             {!architectureDraft && architecture.approval.status !== 'approved' && (
-              <section className="v2-panel v2-next-step">
+              <section className="plane-panel plane-next-step">
                 <div>
-                  <span className="v2-eyebrow">Not what you wanted?</span>
+                  <span className="plane-eyebrow">Not what you wanted?</span>
                   <h2>Ask for a different decomposition</h2>
                   <p>Rejecting alone leaves nothing to build. A new draft can be reviewed and applied as the next revision.</p>
                   {busy === 'draft-architecture' && (
@@ -984,14 +983,14 @@ export default function ControlPlane() {
               onDecision={decideArchitecture}
             />
             {architecture.approval.status === 'approved' && !prepared && (
-              <section className="v2-panel" id="stage-run">
-                <div className="v2-section-title">
+              <section className="plane-panel" id="stage-run">
+                <div className="plane-section-title">
                   <div>
-                    <span className="v2-eyebrow">Budget boundary</span>
+                    <span className="plane-eyebrow">Budget boundary</span>
                     <h2>Prepare a durable run</h2>
                   </div>
                 </div>
-                <div className="v2-budget-row">
+                <div className="plane-budget-row">
                   <label><span>Maximum model attempts</span><input type="number" min="1" value={maxAttempts} onChange={(event) => setMaxAttempts(event.target.value)} /></label>
                   <label><span>Maximum cost · USD</span><input value={maxCost} onChange={(event) => setMaxCost(event.target.value)} /></label>
                   <button className="primary" disabled={!!busy} onClick={prepareRun}>
@@ -1004,16 +1003,16 @@ export default function ControlPlane() {
         )}
 
         {prepared && (
-          <section className="v2-panel">
-            <div className="v2-section-title">
+          <section className="plane-panel">
+            <div className="plane-section-title">
               <div>
-                <span className="v2-eyebrow">Run · {shortId(prepared.run.id)}</span>
+                <span className="plane-eyebrow">Run · {shortId(prepared.run.id)}</span>
                 <h2>Compiled build plan</h2>
               </div>
-              <div className="v2-run-state">
+              <div className="plane-run-state">
                 {prepared.run.status === 'succeeded' && (
                   <a
-                    className="v2-download"
+                    className="plane-download"
                     href={api.releaseUrl(prepared.run.id)}
                     download
                     title="The exact source the gates verified, as a ZIP bound to this run's evidence"
@@ -1024,20 +1023,20 @@ export default function ControlPlane() {
                 <span className={`chip ${statusClass(prepared.run.status)}`}>{prepared.run.status}</span>
               </div>
             </div>
-            <div className="v2-plan">
+            <div className="plane-plan">
               {prepared.compiled.tasks.map((task, index) => (
-                <div className="v2-plan-task" key={task.task_id}>
+                <div className="plane-plan-task" key={task.task_id}>
                   <span>{String(index + 1).padStart(2, '0')}</span>
                   <div><code>{task.node_id}</code><small>{task.owned_paths.join(' · ')}</small></div>
                   <b>{task.dependency_ids.length ? `${task.dependency_ids.length} deps` : 'root'}</b>
                 </div>
               ))}
             </div>
-            <div className="v2-digest">
+            <div className="plane-digest">
               <span>Immutable plan artifact</span>
               <code>{prepared.plan_artifact_digest}</code>
             </div>
-            <div className="v2-scaffold-form">
+            <div className="plane-scaffold-form">
               <label>
                 <span>Workspace-relative destination · must be absent or empty</span>
                 <input className="mono" value={destination} onChange={(event) => setDestination(event.target.value)} />
@@ -1051,7 +1050,7 @@ export default function ControlPlane() {
               </button>
             </div>
             {scaffold && (
-              <div className="v2-execution-row">
+              <div className="plane-execution-row">
                 <div>
                   <b>Trusted execution</b>
                   <span>
@@ -1081,7 +1080,7 @@ export default function ControlPlane() {
                 </button>
                 {execution?.active && (
                   <button
-                    className="v2-secondary"
+                    className="plane-secondary"
                     disabled={busy === 'cancel-run'}
                     onClick={async () => {
                       setBusy('cancel-run')
@@ -1105,22 +1104,22 @@ export default function ControlPlane() {
         )}
 
         {prepared && (
-          <section className="v2-panel">
-            <div className="v2-section-title">
+          <section className="plane-panel">
+            <div className="plane-section-title">
               <div>
-                <span className="v2-eyebrow">Evidence stream</span>
+                <span className="plane-eyebrow">Evidence stream</span>
                 <h2>Durable run events</h2>
               </div>
               <span className="chip">{events.length} events</span>
             </div>
             {scaffold && (
-              <div className="v2-scaffold-result">
+              <div className="plane-scaffold-result">
                 <div><span>Destination</span><code>{scaffold.destination}</code></div>
                 <div><span>Content digest</span><code>{scaffold.manifest.content_digest}</code></div>
                 <div><span>Manifest artifact</span><code>{scaffold.manifest_artifact_digest}</code></div>
               </div>
             )}
-            <div className="v2-event-feed">
+            <div className="plane-event-feed">
               {events.length === 0 && <p className="muted">Waiting for run evidence…</p>}
               {events.map((event) => (
                 <article key={event.sequence}>
@@ -1136,18 +1135,6 @@ export default function ControlPlane() {
           </section>
         )}
 
-        {project && spec && architecture && (
-          <ChangeCost
-            projectId={project.id}
-            revisions={{
-              fromSpec: spec.revision.id,
-              toSpec: spec.revision.id,
-              fromArchitecture: architecture.revision.id,
-              toArchitecture: architecture.revision.id,
-            }}
-          />
-        )}
-
         {prepared && spec && (
           <Assurance
             requirements={spec.spec.requirements}
@@ -1161,7 +1148,7 @@ export default function ControlPlane() {
           <PreviewPanel
             key="preview"
             run={prepared.run}
-            destination={destination}
+            sourceDir={scaffold?.destination ?? null}
             actor={actor}
           />
           </div>
@@ -1181,7 +1168,7 @@ export default function ControlPlane() {
           />
         )}
 
-        <footer className="v2-footer">
+        <footer className="plane-footer">
           <span>RICH · local state, explicit authority, layered evidence</span>
           <code>{project?.id || 'no project selected'}</code>
         </footer>

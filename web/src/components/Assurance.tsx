@@ -98,10 +98,10 @@ export default function Assurance({
   )
 
   return (
-    <section className="v2-panel" id="stage-assurance">
-      <div className="v2-section-title">
+    <section className="plane-panel" id="stage-assurance">
+      <div className="plane-section-title">
         <div>
-          <span className="v2-eyebrow">Assurance</span>
+          <span className="plane-eyebrow">Assurance</span>
           <h2>What you asked for, and what proves it</h2>
         </div>
         <span className={`chip ${counted.failed ? 'bad' : counted.proven === proofs.length && proofs.length ? 'ok' : 'warn'}`}>
@@ -115,9 +115,9 @@ export default function Assurance({
         is not evidence the code is right.
       </p>
 
-      <div className="v2-assurance">
+      <div className="plane-assurance">
         {proofs.map((proof) => (
-          <article key={proof.requirement.id} className={`v2-proof ${proof.level}`}>
+          <article key={proof.requirement.id} className={`plane-proof ${proof.level}`}>
             <header>
               <div>
                 <b>{proof.requirement.title}</b>
@@ -129,7 +129,7 @@ export default function Assurance({
             </header>
 
             {proof.scenarios.length > 0 && (
-              <ul className="v2-proof-scenarios">
+              <ul className="plane-proof-scenarios">
                 {proof.scenarios.map((scenario) => (
                   <li key={scenario.id}>{scenario.title}</li>
                 ))}
@@ -137,7 +137,7 @@ export default function Assurance({
             )}
 
             {proof.gates.length > 0 ? (
-              <div className="v2-proof-gates">
+              <div className="plane-proof-gates">
                 {proof.gates.map((gate, index) => (
                   <span
                     key={`${gate.kind}-${index}`}
@@ -149,7 +149,7 @@ export default function Assurance({
                 ))}
               </div>
             ) : (
-              <p className="v2-proof-empty">
+              <p className="plane-proof-empty">
                 Nothing has been observed about this requirement yet.
               </p>
             )}

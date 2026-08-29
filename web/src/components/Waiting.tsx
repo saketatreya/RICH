@@ -38,8 +38,8 @@ export default function Waiting({
       : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`
 
   return (
-    <p className="v2-waiting" role="status" aria-live="polite">
-      <span className="v2-waiting-pulse" aria-hidden="true" />
+    <p className="plane-waiting" role="status" aria-live="polite">
+      <span className="plane-waiting-pulse" aria-hidden="true" />
       <span>
         {what} · <b>{shown}</b>
         {typical ? <small> {typical}</small> : null}

@@ -435,14 +435,14 @@ export interface InterviewAnswers {
   concurrency_policy?: string[]
 }
 
-export class V2ApiError extends Error {
+export class ApiError extends Error {
   status: number
   kind: string
   details: unknown
 
   constructor(status: number, kind: string, message: string, details: unknown) {
     super(message)
-    this.name = 'V2ApiError'
+    this.name = 'ApiError'
     this.status = status
     this.kind = kind
     this.details = details
@@ -518,7 +518,7 @@ async function request<T>(
   try {
     response = await fetch(path, { ...init, headers })
   } catch (error) {
-    throw new V2ApiError(
+    throw new ApiError(
       0,
       'ConnectionError',
       'Could not reach the local RICH control-plane API.',
@@ -533,7 +533,7 @@ async function request<T>(
     try {
       payload = JSON.parse(text)
     } catch {
-      throw new V2ApiError(
+      throw new ApiError(
         response.status,
         'InvalidResponse',
         'The API returned a non-JSON response.',
@@ -542,7 +542,7 @@ async function request<T>(
     }
   }
   if (!response.ok) {
-    throw new V2ApiError(
+    throw new ApiError(
       response.status,
       payload.error || 'ApiError',
       payload.message || `Request failed with status ${response.status}.`,

@@ -22,29 +22,29 @@ export default function ApprovalGate({
   onDecision: (approved: boolean) => void
 }) {
   return (
-    <section className="v2-gate">
-      <div className="v2-gate-icon">{approval.status === 'approved' ? '✓' : '◆'}</div>
-      <div className="v2-gate-main">
-        <div className="v2-section-title">
+    <section className="plane-gate">
+      <div className="plane-gate-icon">{approval.status === 'approved' ? '✓' : '◆'}</div>
+      <div className="plane-gate-main">
+        <div className="plane-section-title">
           <div>
-            <span className="v2-eyebrow">Human authority</span>
+            <span className="plane-eyebrow">Human authority</span>
             <h3>{title}</h3>
           </div>
           <span className={`chip ${statusClass(approval.status)}`}>{approval.status}</span>
         </div>
         <p>{description}</p>
-        <div className="v2-idline" title={approval.id}>
+        <div className="plane-idline" title={approval.id}>
           <span>Approval</span>
           <code>{shortId(approval.id)}</code>
         </div>
         {approval.decision && (
-          <div className="v2-decision">
+          <div className="plane-decision">
             Decided by <b>{String(approval.decision.actor || 'unknown')}</b>
             {approval.decision.reason ? ` · ${String(approval.decision.reason)}` : ''}
           </div>
         )}
         {approval.status === 'requested' && (
-          <div className="v2-actions">
+          <div className="plane-actions">
             <button
               className="primary"
               disabled={busy || !actor.trim()}

@@ -2,7 +2,7 @@
 
 The adapter deliberately exposes no tool surface.  It accepts a JSON Schema,
 requests strict structured output, and turns one HTTP exchange into exactly one
-``ModelResponse`` or ``ProviderFailure`` for the v2 gateway.
+``ModelResponse`` or ``ProviderFailure`` for the model gateway.
 
 This adapter is **not** wired into the trusted runtime, which pins exactly one
 Anthropic model (see ``runtime.py``).  Nothing constructs it outside its own
