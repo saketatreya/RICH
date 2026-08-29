@@ -432,6 +432,25 @@ sibling's source would pass through inside an indented context block. Withheld l
 reported to the worker as a count, which is the signal it needs: a consumer broke, so
 re-read the contract rather than guess at the consumer.
 
+An acceptance failure is attributed to whoever owns what it exercised. The
+browser runs at the composition root, whose owned paths hold nothing a browser
+can see, so retrying the root cannot change the outcome — the first live build
+spent three attempts (about $0.35 and seven minutes) regenerating a root shim
+while the page it needed sat in the `web` node's source. The pack names the
+page files a scenario opens (`exercised_pages`), ownership names their owners,
+and the verified handler records them on the evidence and the verification
+artifact (`attributed_node_ids`). The scheduler decides what that is worth
+before any write: an upstream owner that finished and still has attempts is
+**reopened** (`succeeded → ready`, event `task.reopened`) and everything
+downstream of it — the root included — is **superseded** back to `pending`,
+so the owner's next attempt reads the failed steps in its
+`prior_attempt_failures` and the root's gates run again over the new source.
+Owners with no attempts left withhold the retry outright
+(`task.retry_withheld`); an attribution naming anything that is not a finished
+upstream task is ignored and the ordinary retry applies, so a wrong attribution
+can only cost what a plain retry costs. Nothing here touches evidence: the
+reopened attempt is generated and verified exactly like any other.
+
 ### 12. What was verified is what can deploy
 
 Before root verification, RICH records the deployment-source digest set. Verification

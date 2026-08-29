@@ -931,3 +931,135 @@ def test_evidence_events_carry_the_requirements_they_speak_for(tmp_path):
 
     assert event["payload"]["requirement_ids"] == ["req.checklist"]
     assert event["payload"]["acceptance_scenario_ids"] == ["scenario.checklist"]
+
+
+def _acceptance_failure(context, *, attributed):
+    return TaskResult(
+        summary="acceptance failed",
+        evidence=(
+            TaskEvidence(
+                kind="acceptance",
+                status="failed",
+                summary="two steps failed on pages another task owns",
+                requirement_ids=context.compiled_task.requirement_ids,
+                attributed_node_ids=attributed,
+            ),
+        ),
+    )
+
+
+def _events_by_type(store, run_id):
+    grouped: dict[str, list] = {}
+    for event in store.list_events(run_id):
+        grouped.setdefault(event["event_type"], []).append(event)
+    return grouped
+
+
+def test_acceptance_failure_reopens_the_owner_not_the_root(tmp_path):
+    tasks = (_task("web", 0), _task("app", 1, dependencies=("web",)))
+    store, run, plan = _prepared(tmp_path, tasks)
+    calls: list[tuple[str, int]] = []
+
+    def handler(context):
+        calls.append((context.node_id, context.attempt))
+        if context.node_id == "app" and context.attempt == 1:
+            return _acceptance_failure(context, attributed=("web",))
+        return _verified_result(context)
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": handler},
+        default_policy=TaskPolicy(max_attempts=3),
+    ).run()
+
+    assert report.succeeded
+    assert calls == [("web", 1), ("app", 1), ("web", 2), ("app", 2)]
+    assert dict(report.task_attempts) == {"web": 2, "app": 2}
+    events = _events_by_type(store, run["id"])
+    (reopened,) = events["task.reopened"]
+    assert reopened["task_id"] == f"{run['id']}:implement:web"
+    assert reopened["payload"]["failed_node_id"] == "app"
+    assert reopened["payload"]["failed_attempt"] == 1
+    assert reopened["payload"]["next_attempt"] == 2
+    (superseded,) = events["task.superseded"]
+    assert superseded["task_id"] == f"{run['id']}:implement:app"
+    assert superseded["payload"]["reopened_node_ids"] == ["web"]
+    (failed,) = events["task.failed"]
+    assert failed["payload"]["will_retry"] is False
+    assert failed["payload"]["reopened_node_ids"] == ["web"]
+    recorded = [
+        event
+        for event in events["evidence.recorded"]
+        if event["payload"]["kind"] == "acceptance"
+        and event["payload"]["status"] == "failed"
+    ]
+    assert recorded[0]["payload"]["attributed_node_ids"] == ["web"]
+    # The reopen is a retry as far as deadlines are concerned, so a resumed
+    # scheduler restores it the same way.
+    assert [
+        event["payload"].get("reason")
+        for event in events["task.retry_scheduled"]
+    ] == ["reopened"]
+
+
+def test_exhausted_owner_withholds_the_root_retry(tmp_path):
+    tasks = (_task("web", 0), _task("app", 1, dependencies=("web",)))
+    store, run, plan = _prepared(tmp_path, tasks)
+    calls: list[tuple[str, int]] = []
+
+    def handler(context):
+        calls.append((context.node_id, context.attempt))
+        if context.node_id == "app":
+            return _acceptance_failure(context, attributed=("web",))
+        return _verified_result(context)
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": handler},
+        default_policy=TaskPolicy(max_attempts=1),
+    ).run()
+
+    assert report.status == "failed"
+    assert calls == [("web", 1), ("app", 1)]
+    assert _status_map(report) == {"web": "succeeded", "app": "failed"}
+    events = _events_by_type(store, run["id"])
+    (withheld,) = events["task.retry_withheld"]
+    assert withheld["payload"]["exhausted_node_ids"] == ["web"]
+    assert "task.reopened" not in events
+    assert "task.retry_scheduled" not in events
+
+
+def test_attribution_to_a_stranger_falls_back_to_the_plain_retry(tmp_path):
+    tasks = (
+        _task("web", 0),
+        _task("aside", 1),
+        _task("app", 2, dependencies=("web",)),
+    )
+    store, run, plan = _prepared(tmp_path, tasks)
+    calls: list[tuple[str, int]] = []
+
+    def handler(context):
+        calls.append((context.node_id, context.attempt))
+        if context.node_id == "app" and context.attempt == 1:
+            return _acceptance_failure(context, attributed=("aside", "ghost"))
+        return _verified_result(context)
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": handler},
+        default_policy=TaskPolicy(max_attempts=2),
+    ).run()
+
+    assert report.succeeded
+    assert calls == [("web", 1), ("aside", 1), ("app", 1), ("app", 2)]
+    events = _events_by_type(store, run["id"])
+    (ignored,) = events["task.attribution_ignored"]
+    assert ignored["payload"]["node_ids"] == ["aside", "ghost"]
+    assert "task.reopened" not in events
+    assert "task.superseded" not in events

@@ -2047,3 +2047,182 @@ def test_gates_see_the_shared_cache_read_only(tmp_path):
         ("/opt/rich-cache/playwright", False),
     ]
     assert policy.network is False
+
+
+class FailingAcceptanceRunner(PassingCommandRunner):
+    """Every gate passes except the browser run, which names its failing step."""
+
+    def run(self, workspace, command, **controls):
+        result = super().run(workspace, command, **controls)
+        if command.kind != "acceptance":
+            return result
+        assert command.acceptance_context is not None
+        failures = {
+            "schema_version": "rich.acceptance-failures/v1",
+            "context": command.acceptance_context.to_dict(),
+            "failures": [
+                {
+                    "scenario_id": "scenario.behavior",
+                    "step": "2 · Expect to see ‘approved behavior’",
+                    "message": (
+                        "Error: \x1b[2mexpect(\x1b[22m\x1b[31mlocator\x1b[39m"
+                        "\x1b[2m).\x1b[22mtoBeVisible failed"
+                    ),
+                }
+            ],
+        }
+        return ExecutionResult(
+            argv=result.argv,
+            returncode=1,
+            stdout=(
+                "  ✘  1 [chromium] › tests/e2e/scenarios/behavior.spec.ts\n"
+                f"RICH_ACCEPTANCE_FAILURES {json.dumps(failures)}\n"
+            ),
+            stderr="",
+            duration_seconds=0.02,
+        )
+
+
+def _artifacts_with_role(state, role):
+    return [
+        record
+        for record in state["store"].list_run_artifacts(state["run"]["id"])
+        if record["role"] == role
+    ]
+
+
+def test_failed_acceptance_is_attributed_to_the_page_owner(tmp_path):
+    from richbuild.run_engine import RunEngine, RunEngineConfig
+    from richbuild.target_packs.nextjs import exercised_pages
+
+    state = _prepared_state(tmp_path)
+    provider = FakeModelProvider()
+    runner = FailingAcceptanceRunner()
+    engine = RunEngine(
+        state["store"],
+        gateway=_gateway(provider),
+        command_runner=runner,
+        provider=provider.name,
+        model="fake-code-model",
+        config=RunEngineConfig(
+            max_task_attempts=1, exercised_paths=exercised_pages
+        ),
+    )
+
+    report = engine.execute(
+        run_id=state["run"]["id"], workspace=state["workspace"]
+    )
+
+    assert report.status == "failed"
+    store = state["store"]
+    verification = _artifacts_with_role(state, "verification:acceptance")[-1]
+    # The fixture's one node owns apps/web, so the page's owner is the task
+    # itself: recorded all the same, and the scheduler treats it as the
+    # ordinary retry.
+    assert verification["metadata"]["attributed_node_ids"] == ["app"]
+    document = json.loads(
+        store.get_artifact(verification["digest"]).path.read_text()
+    )
+    assert document["failed_steps"] == [
+        {
+            "scenario_id": "scenario.behavior",
+            "step": "2 · Expect to see ‘approved behavior’",
+            "message": "Error: expect(locator).toBeVisible failed",
+        }
+    ]
+    result = _artifacts_with_role(state, "evidence-result:acceptance")[-1]
+    evidence_document = json.loads(
+        store.get_artifact(result["digest"]).path.read_text()
+    )
+    assert evidence_document["attributed_node_ids"] == ["app"]
+    event_types = {
+        event["event_type"] for event in store.list_events(state["run"]["id"])
+    }
+    assert "task.reopened" not in event_types
+
+
+def test_without_a_pack_answer_nothing_is_attributed(tmp_path):
+    state = _prepared_state(tmp_path)
+    provider = FakeModelProvider()
+    runner = FailingAcceptanceRunner()
+
+    report = _engine(state, provider, runner).execute(
+        run_id=state["run"]["id"], workspace=state["workspace"]
+    )
+
+    assert report.status == "failed"
+    verification = _artifacts_with_role(state, "verification:acceptance")[-1]
+    assert "attributed_node_ids" not in verification["metadata"]
+    result = _artifacts_with_role(state, "evidence-result:acceptance")[-1]
+    evidence_document = json.loads(
+        state["store"].get_artifact(result["digest"]).path.read_text()
+    )
+    assert evidence_document["attributed_node_ids"] == []
+
+
+def test_reopened_owner_reads_the_acceptance_failure_it_caused(tmp_path):
+    from richbuild.run_engine import _prior_failure_source
+
+    state = _prepared_state(tmp_path)
+    store = state["store"]
+    run_id = state["run"]["id"]
+    document = {
+        "schema_version": "rich.command-verification/v1",
+        "kind": "acceptance",
+        "status": "failed",
+        "returncode": 1,
+        "stdout": (
+            "  ✘  1 [chromium] › tests/e2e/scenarios/x.spec.ts › Create a project\n"
+            "    waiting for getByLabel('Project name')\n"
+        ),
+        "stderr": "",
+        "failed_steps": [
+            {
+                "scenario_id": "scenario.behavior",
+                "step": "2 · Type ‘x’ into the field labelled ‘Project name’",
+                "message": "Error: locator.fill: Test timeout of 30000ms exceeded.",
+            }
+        ],
+    }
+    artifact = store.put_artifact(
+        json.dumps(document).encode(),
+        media_type="application/vnd.rich.command-verification+json",
+        metadata={
+            "kind": "acceptance",
+            "status": "failed",
+            "node_id": "app",
+            "attempt": 1,
+            "attributed_node_ids": ["web"],
+        },
+    )
+    store.attach_artifact(
+        run_id,
+        artifact.digest,
+        role="verification:acceptance",
+        task_id=f"{run_id}:implement:app",
+    )
+
+    def task(node_id, owned):
+        return CompiledTask(
+            task_id=f"implement:{node_id}",
+            node_id=node_id,
+            order=0,
+            contract_id=f"contract.{node_id}",
+            dependency_ids=(),
+            consumer_ids=("app",),
+            requirement_ids=("requirement.behavior",),
+            owned_paths=(owned,),
+        )
+
+    read = _prior_failure_source(store, run_id)
+    (failure,) = read(task("web", "apps/web"), 2)
+    assert failure.gate == "acceptance"
+    assert failure.attempt == 1
+    assert "failed acceptance on pages this task owns" in failure.summary
+    assert failure.diagnostics[0] == (
+        "scenario.behavior · 2 · Type ‘x’ into the field labelled "
+        "‘Project name’: Error: locator.fill: Test timeout of 30000ms exceeded."
+    )
+    assert any("Project name" in line for line in failure.diagnostics[1:])
+    # The same artifact says nothing to a task it was not attributed to.
+    assert read(task("domain", "packages/domain"), 2) == ()

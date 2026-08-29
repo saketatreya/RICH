@@ -144,3 +144,24 @@ def test_a_retry_says_when_and_which_attempt():
     )
 
     assert "attempt 2" in line and "2s" in line
+
+
+def test_a_reopened_task_says_why_and_a_superseded_one_says_what_it_waits_for():
+    reopened = format_event(
+        _event(
+            4,
+            "task.reopened",
+            {"failed_node_id": "app", "next_attempt": 2},
+            task_id="run.x:implement:web",
+        )
+    )
+    assert "task.reopened" in reopened
+    assert "attempt 2: app failed acceptance on pages this task owns" in reopened
+    superseded = format_event(
+        _event(5, "task.superseded", {"reopened_node_ids": ["web"]})
+    )
+    assert "runs again after web" in superseded
+    withheld = format_event(
+        _event(6, "task.retry_withheld", {"exhausted_node_ids": ["web"]})
+    )
+    assert "no retry: web own what failed and have no attempts left" in withheld

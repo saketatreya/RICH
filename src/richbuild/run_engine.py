@@ -139,6 +139,10 @@ class AcceptanceCoverageContext:
         }
 
 
+# Playwright colours its assertion messages; the words are what a person reads.
+_ANSI_ESCAPES = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
 def _observed_acceptance_failures(result: ExecutionResult) -> list[dict[str, str]]:
     """Which steps a failed acceptance run named, in the words a person approved.
 
@@ -164,7 +168,7 @@ def _observed_acceptance_failures(result: ExecutionResult) -> list[dict[str, str
             if not isinstance(entry, Mapping):
                 continue
             failure = {
-                key: str(entry.get(key, ""))[:500]
+                key: _ANSI_ESCAPES.sub("", str(entry.get(key, "")))[:500]
                 for key in ("scenario_id", "step", "message")
             }
             already = any(
@@ -528,6 +532,10 @@ class RunEngineConfig:
     )
     build_argv: tuple[str, ...] = ("pnpm", "run", "build")
     acceptance_argv: tuple[str, ...] = ("pnpm", "run", "test:e2e")
+    # The pack's answer to "which page files does this scenario open", so a
+    # failed acceptance run can be attributed to the task that owns them.
+    # None means no attribution: the failing task retries, as before.
+    exercised_paths: Callable[[ProjectSpec, Any], tuple[str, ...]] | None = None
     max_verification_log_bytes: int = 256 * 1024
     coding_limits: CodingLimits = DEFAULT_LIMITS
     execution_lease_seconds: float = DEFAULT_EXECUTION_LEASE_SECONDS
@@ -835,16 +843,19 @@ def _prior_failure_source(
             if not role.startswith("verification:"):
                 continue
             metadata = record.get("metadata") or {}
-            if metadata.get("node_id") != task.node_id:
+            own = metadata.get("node_id") == task.node_id
+            attributed = metadata.get("attributed_node_ids") or []
+            if not own and task.node_id not in attributed:
                 continue
             if metadata.get("status") == "passed":
                 continue
             earlier = metadata.get("attempt")
-            if (
-                isinstance(earlier, bool)
-                or not isinstance(earlier, int)
-                or earlier >= attempt
-            ):
+            if isinstance(earlier, bool) or not isinstance(earlier, int):
+                continue
+            # Own failures count only from earlier attempts; an attributed one
+            # is another task's attempt, numbered on that task's clock, and is
+            # relevant whenever it was written -- it is why this task reopened.
+            if own and earlier >= attempt:
                 continue
             try:
                 artifact = store.get_artifact(record["digest"])
@@ -861,15 +872,41 @@ def _prior_failure_source(
             diagnostics, withheld = redact_diagnostics(
                 observed, owned_paths=task.owned_paths
             )
+            kind = str(document.get("kind") or metadata.get("kind") or role)
+            if own:
+                failures.append(
+                    PriorAttemptFailure(
+                        attempt=earlier,
+                        gate=kind,
+                        summary=(
+                            f"{document.get('kind', 'gate')} exited with "
+                            f"{document.get('returncode')}"
+                        ),
+                        diagnostics=diagnostics,
+                        withheld_line_count=withheld,
+                    )
+                )
+                continue
+            steps = [
+                entry
+                for entry in (document.get("failed_steps") or [])
+                if isinstance(entry, Mapping)
+            ]
+            named = tuple(
+                f"{entry.get('scenario_id', '')} · {entry.get('step', '')}: "
+                f"{entry.get('message', '')}".strip()
+                for entry in steps
+            )
             failures.append(
                 PriorAttemptFailure(
-                    attempt=earlier,
-                    gate=str(document.get("kind") or metadata.get("kind") or role),
+                    attempt=max(attempt - 1, 1),
+                    gate=kind,
                     summary=(
-                        f"{document.get('kind', 'gate')} exited with "
-                        f"{document.get('returncode')}"
+                        f"the assembled application ({metadata.get('node_id')}, "
+                        f"attempt {earlier}) failed {kind} on pages this task "
+                        f"owns; {len(steps)} step(s) named"
                     ),
-                    diagnostics=diagnostics,
+                    diagnostics=(*named, *diagnostics),
                     withheld_line_count=withheld,
                 )
             )
@@ -949,11 +986,13 @@ class _VerifiedCodingHandler:
         project: ProjectSpec,
         root_node_id: str,
         config: RunEngineConfig,
+        architecture: ArchitectureSpec | None = None,
     ):
         self.model_worker = model_worker
         self.command_runner = command_runner
         self.workspace = workspace
         self.project = project
+        self.architecture = architecture
         self.root_node_id = root_node_id
         self.config = config
         self._properties = workspace / "tests" / "properties"
@@ -1162,6 +1201,7 @@ class _VerifiedCodingHandler:
                 f"{command.kind} verification was not observed: "
                 f"{type(error).__name__}"
             )
+            attributed: tuple[str, ...] = ()
             result_document: dict[str, Any] = {
                 "schema_version": "rich.command-verification/v1",
                 "run_id": context.run_id,
@@ -1202,6 +1242,13 @@ class _VerifiedCodingHandler:
                     )
                 )
             )
+            failed_steps = (
+                _observed_acceptance_failures(result)
+                if command.kind == EvidenceKind.ACCEPTANCE.value
+                and status == "failed"
+                else []
+            )
+            attributed = ()
             result_document = {
                 "schema_version": "rich.command-verification/v1",
                 "run_id": context.run_id,
@@ -1227,13 +1274,14 @@ class _VerifiedCodingHandler:
                 "observed_acceptance_scenario_ids": list(
                     observed_scenario_ids
                 ),
-                "failed_steps": (
-                    _observed_acceptance_failures(result)
-                    if command.kind == EvidenceKind.ACCEPTANCE.value
-                    and status == "failed"
-                    else []
-                ),
+                "failed_steps": failed_steps,
             }
+            if command.kind == EvidenceKind.ACCEPTANCE.value and status == "failed":
+                attributed = self._acceptance_owners(
+                    failed_steps,
+                    expected=command.expected_acceptance_scenario_ids,
+                    observed=observed_scenario_ids,
+                )
 
         artifact_content = canonical_json_bytes(result_document)
         log_digest = hashlib.sha256(artifact_content).hexdigest()
@@ -1263,6 +1311,7 @@ class _VerifiedCodingHandler:
                     scenario_coverage
                 ),
             },
+            attributed_node_ids=attributed,
         )
         artifact = ProducedArtifact(
             content=artifact_content,
@@ -1274,9 +1323,50 @@ class _VerifiedCodingHandler:
                 "node_id": context.compiled_task.node_id,
                 "attempt": context.attempt,
                 "log_sha256": log_digest,
+                **(
+                    {"attributed_node_ids": list(attributed)}
+                    if attributed
+                    else {}
+                ),
             },
         )
         return evidence, artifact
+
+    def _acceptance_owners(
+        self,
+        failed_steps: Sequence[Mapping[str, str]],
+        *,
+        expected: Sequence[str],
+        observed: Sequence[str],
+    ) -> tuple[str, ...]:
+        """Which nodes own the pages the failing scenarios opened.
+
+        The root task runs the browser but owns nothing a browser can see, so
+        retrying it cannot change the outcome; the pack says which page files
+        each scenario opens and ownership says whose they are.  A scenario the
+        reporter did not name a step for but did not pass either still counts
+        -- it failed before its first step or the report was lost.  Nothing
+        attributable (no pack answer, no owner) leaves the ordinary retry.
+        """
+
+        exercised = self.config.exercised_paths
+        if self.architecture is None or exercised is None:
+            return ()
+        failing = {str(step.get("scenario_id", "")) for step in failed_steps}
+        failing.update(set(expected) - set(observed))
+        pages: set[str] = set()
+        for scenario_id in sorted(failing):
+            scenario = self.project.scenario_index.get(scenario_id)
+            if scenario is None:
+                continue
+            pages.update(exercised(self.project, scenario))
+        return tuple(
+            sorted(
+                node.id
+                for node in self.architecture.nodes
+                if any(is_owned(page, node.owned_paths) for page in pages)
+            )
+        )
 
 
 class RunExecutionOwner:
@@ -1624,6 +1714,7 @@ class RunEngine:
             project=loaded.project,
             root_node_id=loaded.plan.root_node_id,
             config=self.config,
+            architecture=loaded.architecture,
         )
         common_policy = TaskPolicy(
             max_attempts=self.config.max_task_attempts,

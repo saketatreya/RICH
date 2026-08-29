@@ -154,6 +154,11 @@ class TaskEvidence:
     requirement_ids: tuple[str, ...] = ()
     acceptance_scenario_ids: tuple[str, ...] = ()
     details: Mapping[str, Any] = field(default_factory=dict)
+    # Which nodes own what this evidence exercised, when that is not the task
+    # that produced it.  A browser run at the composition root fails on pages
+    # other tasks wrote; the handler names them and the scheduler decides who
+    # tries again.  Empty means the ordinary rule: the failing task retries.
+    attributed_node_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         try:
@@ -193,7 +198,27 @@ class TaskEvidence:
                 allow_empty=True,
             ),
         )
+        object.__setattr__(
+            self,
+            "attributed_node_ids",
+            _validated_strings(
+                self.attributed_node_ids,
+                "evidence attributed_node_ids",
+                allow_empty=True,
+            ),
+        )
         _canonical_json(dict(self.details))
+
+
+@dataclass(frozen=True, slots=True)
+class _Reopen:
+    """What a blocking failure's attribution is worth, decided before any write."""
+
+    node_ids: tuple[str, ...] = ()
+    exhausted: tuple[str, ...] = ()
+    ignored: tuple[str, ...] = ()
+    reason: str = ""
+    plain_retry: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1031,6 +1056,7 @@ class DagScheduler:
                 ),
                 details={"source": "blocking_handler_evidence"},
                 retry_not_before=retry_not_before,
+                attributed=unsatisfied,
             )
             return
 
@@ -1202,7 +1228,9 @@ class DagScheduler:
         summary: str,
         details: Mapping[str, Any],
         retry_not_before: dict[str, float],
+        attributed: TaskEvidence | None = None,
     ) -> None:
+        decision = self._reopen_decision(attempt, attributed)
         self._record_evidence(
             attempt.compiled_task,
             attempt.attempt,
@@ -1225,24 +1253,230 @@ class DagScheduler:
             if current["status"] == "canceled":
                 return
             raise
+        will_retry = decision.plain_retry and (
+            attempt.attempt
+            < self._policy_for(attempt.compiled_task).max_attempts
+        )
+        payload: dict[str, Any] = {
+            "attempt": attempt.attempt,
+            "summary": summary,
+            "will_retry": will_retry,
+        }
+        if decision.node_ids:
+            payload["reopened_node_ids"] = list(decision.node_ids)
         self._append_event(
             self.run_id,
             "task.failed",
-            {
-                "attempt": attempt.attempt,
-                "summary": summary,
-                "will_retry": (
-                    attempt.attempt
-                    < self._policy_for(attempt.compiled_task).max_attempts
-                ),
-            },
+            payload,
             task_id=attempt.durable_task_id,
         )
-        self._schedule_retry_if_available(
-            attempt.compiled_task,
-            attempt.attempt,
-            retry_not_before,
+        self._apply_reopen(attempt, decision, retry_not_before)
+        if decision.plain_retry:
+            self._schedule_retry_if_available(
+                attempt.compiled_task,
+                attempt.attempt,
+                retry_not_before,
+            )
+
+    def _reopen_decision(
+        self, attempt: _RunningAttempt, evidence: TaskEvidence | None
+    ) -> _Reopen:
+        """Who tries again after a blocking failure the failing task cannot fix.
+
+        A gate at the composition root exercises pages other tasks own; the
+        handler says whose (``attributed_node_ids``) and the scheduler decides
+        what that is worth.  An upstream owner that finished and still has
+        attempts is reopened, and everything downstream of it -- the failing
+        task included -- goes back to pending.  Owners with no attempts left
+        withhold the retry outright: regenerating the failing task would spend
+        money on source the gate never looked at.  Anything the handler names
+        that is not a finished upstream task is ignored and the ordinary
+        retry applies, so a wrong attribution can only cost what a plain retry
+        costs.  Decided before any write so the failure event can say it.
+        """
+
+        if evidence is None:
+            return _Reopen()
+        failing = attempt.compiled_task
+        named = tuple(
+            sorted(
+                {
+                    node_id
+                    for node_id in evidence.attributed_node_ids
+                    if node_id != failing.node_id
+                }
+            )
         )
+        if not named:
+            return _Reopen()
+        states = self._states()
+        busy = sorted(
+            node_id
+            for node_id, record in states.items()
+            if node_id != failing.node_id
+            and record["status"] in {"running", "verifying"}
+        )
+        if busy:
+            # Reopening under a running sibling would let it finish over
+            # source about to be replaced.  Single-worker runs never get here.
+            return _Reopen(
+                ignored=named,
+                reason=f"other tasks are still running: {', '.join(busy)}",
+            )
+        upstream = self._upstream_of(failing.node_id)
+        reopen: list[str] = []
+        exhausted: list[str] = []
+        ignored: list[str] = []
+        for node_id in named:
+            record = states.get(node_id)
+            if node_id not in upstream or record is None:
+                ignored.append(node_id)
+                continue
+            if record["status"] != "succeeded":
+                ignored.append(node_id)
+                continue
+            policy = self._policy_for(self.plan.task_index[node_id])
+            if int(record["attempt"]) >= policy.max_attempts:
+                exhausted.append(node_id)
+                continue
+            reopen.append(node_id)
+        if reopen:
+            return _Reopen(
+                node_ids=tuple(reopen),
+                exhausted=tuple(exhausted),
+                ignored=tuple(ignored),
+                plain_retry=False,
+            )
+        if exhausted:
+            return _Reopen(
+                exhausted=tuple(exhausted),
+                ignored=tuple(ignored),
+                reason="the tasks that own what failed have no attempts left",
+                plain_retry=False,
+            )
+        return _Reopen(
+            ignored=tuple(ignored),
+            reason="not a finished task this one depends on",
+        )
+
+    def _apply_reopen(
+        self,
+        attempt: _RunningAttempt,
+        decision: _Reopen,
+        retry_not_before: dict[str, float],
+    ) -> None:
+        failing_id = attempt.durable_task_id
+        if decision.ignored:
+            self._append_event(
+                self.run_id,
+                "task.attribution_ignored",
+                {"node_ids": list(decision.ignored), "reason": decision.reason},
+                task_id=failing_id,
+            )
+        if not decision.node_ids:
+            if decision.exhausted:
+                self._append_event(
+                    self.run_id,
+                    "task.retry_withheld",
+                    {
+                        "exhausted_node_ids": list(decision.exhausted),
+                        "reason": decision.reason,
+                    },
+                    task_id=failing_id,
+                )
+            return
+        # Dependents first, then the owners.  A crash between the two leaves
+        # the dependents pending and the owners still succeeded, which the
+        # ready scan resolves by running the dependents again: one wasted
+        # attempt, never a run that ends with a superseded success standing.
+        self._supersede_dependents(decision.node_ids)
+        for node_id in decision.node_ids:
+            task = self.plan.task_index[node_id]
+            durable_id = self._durable_ids[node_id]
+            policy = self._policy_for(task)
+            record = self._set_task_status(
+                durable_id, "ready", expected_status="succeeded"
+            )
+            completed = int(record["attempt"])
+            retry_not_before[durable_id] = (
+                time.monotonic() + policy.retry_backoff_seconds
+            )
+            not_before_epoch = time.time() + policy.retry_backoff_seconds
+            self._append_event(
+                self.run_id,
+                "task.reopened",
+                {
+                    "failed_task_id": failing_id,
+                    "failed_node_id": attempt.compiled_task.node_id,
+                    "failed_attempt": attempt.attempt,
+                    "completed_attempt": completed,
+                    "next_attempt": completed + 1,
+                    "exhausted_node_ids": list(decision.exhausted),
+                },
+                task_id=durable_id,
+            )
+            self._append_event(
+                self.run_id,
+                "task.retry_scheduled",
+                {
+                    "completed_attempt": completed,
+                    "next_attempt": completed + 1,
+                    "backoff_seconds": policy.retry_backoff_seconds,
+                    "not_before_epoch": not_before_epoch,
+                    "reason": "reopened",
+                },
+                task_id=durable_id,
+            )
+
+    def _supersede_dependents(self, owner_ids: tuple[str, ...]) -> None:
+        downstream: set[str] = set()
+        for owner_id in owner_ids:
+            downstream |= self._downstream_of(owner_id)
+        states = self._states()
+        for task in sorted(self.plan.tasks, key=self._task_sort_key):
+            if task.node_id not in downstream:
+                continue
+            record = states[task.node_id]
+            if record["status"] not in {"succeeded", "failed", "blocked"}:
+                continue
+            self._set_task_status(
+                record["id"], "pending", expected_status=record["status"]
+            )
+            self._append_event(
+                self.run_id,
+                "task.superseded",
+                {
+                    "reopened_node_ids": list(owner_ids),
+                    "previous_status": record["status"],
+                },
+                task_id=record["id"],
+            )
+
+    def _upstream_of(self, node_id: str) -> set[str]:
+        seen: set[str] = set()
+        frontier = list(self.plan.task_index[node_id].dependency_ids)
+        while frontier:
+            current = frontier.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            frontier.extend(self.plan.task_index[current].dependency_ids)
+        return seen
+
+    def _downstream_of(self, node_id: str) -> set[str]:
+        consumers: dict[str, list[str]] = {}
+        for task in self.plan.tasks:
+            for dependency in task.dependency_ids:
+                consumers.setdefault(dependency, []).append(task.node_id)
+        seen: set[str] = set()
+        frontier = list(consumers.get(node_id, ()))
+        while frontier:
+            current = frontier.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            frontier.extend(consumers.get(current, ()))
+        return seen
 
     def _schedule_retry_if_available(
         self,
@@ -1298,6 +1532,7 @@ class DagScheduler:
             "acceptance_scenario_ids": list(
                 evidence.acceptance_scenario_ids
             ),
+            "attributed_node_ids": list(evidence.attributed_node_ids),
             "details": dict(evidence.details),
         }
         result_artifact = self.store.put_artifact(
@@ -1337,6 +1572,7 @@ class DagScheduler:
                 "ordinal": ordinal,
                 "summary": evidence.summary,
                 "details": dict(evidence.details),
+                "attributed_node_ids": list(evidence.attributed_node_ids),
             },
         )
         record_artifact = self.store.put_artifact(
@@ -1380,6 +1616,7 @@ class DagScheduler:
                 "acceptance_scenario_ids": list(
                     evidence.acceptance_scenario_ids
                 ),
+                "attributed_node_ids": list(evidence.attributed_node_ids),
             },
             task_id=durable_id,
         )

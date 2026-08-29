@@ -503,6 +503,45 @@ def describe_step(step: AcceptanceStep) -> str:
     raise TargetPackError(f"unsupported acceptance action {action.value!r}")
 
 
+def exercised_pages(
+    project: ProjectSpec, scenario: AcceptanceScenario
+) -> tuple[str, ...]:
+    """The page files a scenario's oracle opens, as workspace-relative paths.
+
+    A failed acceptance run is attributed to whoever owns these, because the
+    root task that ran the browser owns nothing a browser can see.
+    ``open_requirement`` opens the page of the scenario's first requirement --
+    the same page the compiled oracle visits -- and ``navigate`` maps a local
+    path onto its App Router page file.  An unknown route still names a
+    file; if nobody owns it, nobody is reopened.
+    """
+
+    routes = _route_segments(
+        tuple(requirement.id for requirement in project.requirements)
+    )
+    pages: list[str] = []
+    for step in scenario.oracle:
+        if step.action is AcceptanceAction.OPEN_REQUIREMENT:
+            if not scenario.requirement_ids:
+                continue
+            route = routes.get(scenario.requirement_ids[0])
+            if route is None:
+                continue
+            page = f"apps/web/src/app/capabilities/{route}/page.tsx"
+        elif step.action is AcceptanceAction.NAVIGATE and step.value:
+            path = step.value.split("?", 1)[0].split("#", 1)[0].strip("/")
+            page = (
+                "apps/web/src/app/page.tsx"
+                if not path
+                else f"apps/web/src/app/{path}/page.tsx"
+            )
+        else:
+            continue
+        if page not in pages:
+            pages.append(page)
+    return tuple(pages)
+
+
 def _playwright_oracle(
     scenario: AcceptanceScenario,
     requirement_route: str,

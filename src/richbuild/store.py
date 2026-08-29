@@ -44,14 +44,19 @@ _RUN_TRANSITIONS = {
     "failed": set(),
     "canceled": set(),
 }
+# A finished task is not final while its run is open: a downstream gate can
+# fail on pages it owns, which reopens it (succeeded -> ready), and reopening
+# it supersedes everything that ran over its old source (-> pending).  A
+# cached task is not reopened -- its source was proven in an earlier run and
+# nothing this run generated changed it -- and nothing leaves canceled.
 _TASK_TRANSITIONS = {
     "pending": {"ready", "blocked", "canceled"},
     "ready": {"running", "cached", "blocked", "canceled"},
     "running": {"verifying", "succeeded", "failed", "blocked", "canceled"},
     "verifying": {"succeeded", "failed", "running", "blocked", "canceled"},
-    "failed": {"ready", "canceled"},
-    "blocked": {"ready", "canceled"},
-    "succeeded": set(),
+    "failed": {"ready", "pending", "canceled"},
+    "blocked": {"ready", "pending", "canceled"},
+    "succeeded": {"ready", "pending"},
     "cached": set(),
     "canceled": set(),
 }

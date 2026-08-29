@@ -23,6 +23,10 @@ _DETAILED = frozenset(
         "task.failed",
         "run.execution_error",
         "task.retry_scheduled",
+        "task.reopened",
+        "task.superseded",
+        "task.retry_withheld",
+        "task.attribution_ignored",
         "model.attempt.failed",
     }
 )
@@ -75,6 +79,22 @@ def _detail(event: Mapping[str, Any]) -> str:
             f"attempt {payload.get('next_attempt', '?')} "
             f"in {payload.get('backoff_seconds', '?')}s"
         )
+    if event["event_type"] == "task.reopened":
+        return (
+            f"attempt {payload.get('next_attempt', '?')}: "
+            f"{payload.get('failed_node_id', 'the application')} failed "
+            "acceptance on pages this task owns"
+        )
+    if event["event_type"] == "task.superseded":
+        owners = ", ".join(payload.get("reopened_node_ids") or [])
+        return f"runs again after {owners or 'its dependencies'}"
+    if event["event_type"] == "task.retry_withheld":
+        owners = ", ".join(payload.get("exhausted_node_ids") or [])
+        return f"no retry: {owners} own what failed and have no attempts left"
+    if event["event_type"] == "task.attribution_ignored":
+        owners = ", ".join(payload.get("node_ids") or [])
+        return f"attribution to {owners} ignored: {payload.get('reason', '')}"
+
     for key in ("summary", "reason", "error_type", "status"):
         if payload.get(key):
             return str(payload[key])

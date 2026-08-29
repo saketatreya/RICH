@@ -693,3 +693,72 @@ def test_scenario_steps_are_named_playwright_steps():
     assert 'await test.step("3 · Expect to see the text ‘Buy milk’", async () => {' in compiled
     assert compiled.count("await test.step(") == 3
     assert ".toBeVisible();" in compiled
+
+
+def test_exercised_pages_name_the_page_files_a_scenario_opens():
+    from richbuild.target_packs.nextjs import _route_segments, exercised_pages
+
+    def scenario(scenario_id, oracle):
+        return AcceptanceScenario(
+            id=scenario_id,
+            title=scenario_id,
+            when=("the scenario runs",),
+            then=("the page answers",),
+            requirement_ids=("req.todo",),
+            oracle=oracle,
+        )
+
+    project = ProjectSpec(
+        id="project.pages",
+        name="Pages",
+        goal="Know which page a scenario opens",
+        audiences=("owner",),
+        requirements=(
+            Requirement(id="req.todo", title="Todo", statement="A todo can be added."),
+        ),
+        acceptance_scenarios=(
+            scenario(
+                "scenario.own",
+                (
+                    {"action": "open_requirement"},
+                    {"action": "reload"},
+                    {
+                        "action": "assert_visible",
+                        "locator": {"kind": "text", "value": "Todo"},
+                    },
+                ),
+            ),
+            scenario(
+                "scenario.home",
+                (
+                    {"action": "navigate", "value": "/"},
+                    {"action": "navigate", "value": "/about"},
+                    {"action": "open_requirement"},
+                    {
+                        "action": "assert_visible",
+                        "locator": {"kind": "text", "value": "Todo"},
+                    },
+                ),
+            ),
+            scenario(
+                "scenario.none",
+                (
+                    {"action": "keyboard", "value": "Tab"},
+                    {
+                        "action": "assert_focused",
+                        "locator": {"kind": "label", "value": "Todo"},
+                    },
+                ),
+            ),
+        ),
+    )
+    route = _route_segments(("req.todo",))["req.todo"]
+    own = f"apps/web/src/app/capabilities/{route}/page.tsx"
+    scenarios = project.scenario_index
+    assert exercised_pages(project, scenarios["scenario.own"]) == (own,)
+    assert exercised_pages(project, scenarios["scenario.home"]) == (
+        "apps/web/src/app/page.tsx",
+        "apps/web/src/app/about/page.tsx",
+        own,
+    )
+    assert exercised_pages(project, scenarios["scenario.none"]) == ()

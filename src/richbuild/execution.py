@@ -26,6 +26,7 @@ from .runtime import (
     default_run_runtime,
 )
 from .store import RichStore, StoreError
+from .target_packs.nextjs import exercised_pages
 
 
 RuntimeBuilder = Callable[..., DefaultRunRuntime]
@@ -174,6 +175,7 @@ class DefaultRunExecutor:
                 unit_argv=commands.unit_argv,
                 build_argv=commands.build_argv,
                 acceptance_argv=commands.acceptance_argv,
+                exercised_paths=exercised_pages,
                 execution_lease_seconds=(
                     DEFAULT_EXECUTION_LEASE_SECONDS
                 ),

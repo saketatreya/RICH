@@ -11,6 +11,16 @@ tree a wheel could not install, so the program's releases are numbered 2.0,
 
 ### Added
 
+- **An acceptance failure reopens the task that owns the page.** The browser
+  runs at the composition root, which owns nothing a browser can see; the pack
+  now names the pages a scenario opens, the evidence names their owners, and
+  the scheduler reopens the owner — its next attempt reads the failed steps —
+  and runs everything downstream again. Owners out of attempts withhold the
+  retry instead of spending it on the root. Step messages lose their ANSI
+  colour codes.
+- **The example scenarios open their requirement's page**, where the generated
+  application puts a requirement's form, instead of the home page that only
+  lists capabilities; the interviewer's prompt says the same.
 - **A project you can return to.** `GET /v1/projects/{id}/state` restores the
   latest spec and architecture with their approvals, the runs, the latest run's
   compiled plan and scaffold, the previews and the interview draft in one
