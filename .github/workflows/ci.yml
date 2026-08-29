@@ -39,10 +39,10 @@ jobs:
     # operator would (tools/build_wheel.py), install it into a venv holding
     # nothing else, and from a directory where src/ and web/ cannot be found
     # by accident: import, print the version, and serve the bundled canvas.
+    # $RUNNER_TEMP is read inside the steps: the runner context is not
+    # available to a job-level env, and a workflow that names it there is
+    # rejected before any job exists -- silently, as a run with no jobs.
     runs-on: ubuntu-24.04
-    env:
-      VENV: ${{ runner.temp }}/venv
-      STATE: ${{ runner.temp }}/state
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
