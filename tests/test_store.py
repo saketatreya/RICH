@@ -563,3 +563,37 @@ def test_forgetting_a_node_does_not_touch_another_project(tmp_path):
     assert dropped == 1
     assert store.get_generation_memo("0" + "f" * 63) is None
     assert store.get_generation_memo("1" + "f" * 63) is not None
+
+
+def test_interview_draft_survives_reopen_and_guards_its_revision(tmp_path):
+    from richbuild.store import NotFoundError, RevisionConflict
+
+    store = RichStore(tmp_path)
+    store.create_project("Demo", project_id="project.demo")
+    assert store.get_interview_draft("project.demo") is None
+
+    first = store.save_interview_draft(
+        "project.demo", document={"goal": "a"}, expected_draft_revision=0
+    )
+    assert first["draft_revision"] == 1
+    assert first["document"] == {"goal": "a"}
+    assert first["submitted_revision_id"] is None
+
+    with pytest.raises(RevisionConflict):
+        store.save_interview_draft(
+            "project.demo", document={"goal": "b"}, expected_draft_revision=0
+        )
+    second = store.save_interview_draft(
+        "project.demo", document={"goal": "b"}, expected_draft_revision=1
+    )
+    assert second["draft_revision"] == 2
+
+    reopened = RichStore(tmp_path)
+    assert reopened.get_interview_draft("project.demo")["document"] == {"goal": "b"}
+    reopened.mark_interview_submitted("project.demo", "rev_1")
+    assert reopened.get_interview_draft("project.demo")["submitted_revision_id"] == "rev_1"
+
+    with pytest.raises(NotFoundError):
+        store.save_interview_draft(
+            "project.missing", document={}, expected_draft_revision=0
+        )

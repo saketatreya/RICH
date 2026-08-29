@@ -50,6 +50,11 @@ MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 class ApiResponse:
     status: int
     body: dict[str, Any]
+    # A response is JSON unless it carries raw bytes -- a release ZIP is the
+    # one thing the API hands back that is not a document about the system.
+    raw: bytes | None = None
+    content_type: str = "application/json"
+    headers: tuple[tuple[str, str], ...] = ()
 
 
 class _ExecutionManager:
@@ -283,6 +288,40 @@ class Application:
         ):
             return ApiResponse(
                 200, {"runs": self.store.list_runs(parts[2])}
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v1", "projects"]
+            and parts[3] == "state"
+            and method == "GET"
+        ):
+            return ApiResponse(200, self.control_plane.project_state(parts[2]))
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v1", "projects"]
+            and parts[3] == "interview"
+            and method == "GET"
+        ):
+            return ApiResponse(
+                200, {"draft": self.control_plane.get_interview_draft(parts[2])}
+            )
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v1", "projects"]
+            and parts[3] == "interview"
+            and method == "PUT"
+        ):
+            return ApiResponse(
+                200,
+                {
+                    "draft": self.control_plane.save_interview_draft(
+                        parts[2],
+                        document=_required_mapping(body, "document"),
+                        expected_draft_revision=_required_int(
+                            body, "expected_draft_revision"
+                        ),
+                    )
+                },
             )
         if (
             len(parts) == 4
@@ -535,6 +574,13 @@ class Application:
         if (
             len(parts) == 4
             and parts[:2] == ["v1", "runs"]
+            and parts[3] == "release"
+            and method == "GET"
+        ):
+            return self._release_snapshot(parts[2])
+        if (
+            len(parts) == 4
+            and parts[:2] == ["v1", "runs"]
             and parts[3] == "artifacts"
             and method == "GET"
         ):
@@ -731,6 +777,37 @@ class Application:
         except (UnicodeDecodeError, json.JSONDecodeError):
             body["content_base64"] = base64.b64encode(raw).decode("ascii")
         return ApiResponse(200, body)
+
+    def _release_snapshot(self, run_id: str) -> ApiResponse:
+        """The verified release ZIP, as bytes.
+
+        It already existed as the content-addressed artifact the acceptance
+        evidence is bound to; the only way to read it was base64 inside a JSON
+        document, under a 4 MiB cap. The digest travels in a header so a
+        download can be checked against the run's evidence.
+        """
+
+        attachments = [
+            attachment
+            for attachment in self.store.list_run_artifacts(run_id)
+            if attachment["role"] == "source:release-snapshot"
+        ]
+        if not attachments:
+            raise NotFoundError(
+                f"run {run_id!r} has no verified release snapshot"
+            )
+        stored = self.store.get_artifact(attachments[-1]["digest"])
+        filename = f"rich-release-{stored.digest[:12]}.zip"
+        return ApiResponse(
+            200,
+            {},
+            raw=stored.path.read_bytes(),
+            content_type="application/zip",
+            headers=(
+                ("Content-Disposition", f'attachment; filename="{filename}"'),
+                ("X-RICH-Release-Digest", stored.digest),
+            ),
+        )
 
     def _run_journals(self, run_id: str, digest: str) -> bool:
         """Whether a run's source transactions reference this digest.
@@ -1060,6 +1137,9 @@ def handler_for(
         def do_POST(self) -> None:
             self._handle()
 
+        def do_PUT(self) -> None:
+            self._handle()
+
         def _handle(self) -> None:
             parsed = urlparse(self.path)
             try:
@@ -1092,13 +1172,18 @@ def handler_for(
             return value
 
         def _send(self, response: ApiResponse) -> None:
-            payload = (
-                json.dumps(response.body, sort_keys=True, default=str) + "\n"
-            ).encode("utf-8")
+            if response.raw is not None:
+                payload = response.raw
+            else:
+                payload = (
+                    json.dumps(response.body, sort_keys=True, default=str) + "\n"
+                ).encode("utf-8")
             self.send_response(response.status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", response.content_type)
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
+            for name, value in response.headers:
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(payload)
 

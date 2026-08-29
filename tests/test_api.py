@@ -1213,3 +1213,72 @@ def test_a_settled_run_says_how_to_try_again(tmp_path):
     message = response.body["message"]
     assert "keeps its result" in message
     assert "prepare a new run" in message
+
+
+def test_project_state_and_interview_draft_routes(tmp_path):
+    application = Application(RichStore(tmp_path))
+    application.handle(
+        "POST",
+        "/v1/projects",
+        body={"project_id": "project.demo", "name": "Demo"},
+        headers=_headers("create-demo"),
+    )
+
+    empty = application.handle("GET", "/v1/projects/project.demo/interview")
+    assert empty.status == 200 and empty.body["draft"] is None
+
+    denied = application.handle(
+        "PUT",
+        "/v1/projects/project.demo/interview",
+        body={"document": {"goal": "x"}, "expected_draft_revision": 0},
+    )
+    assert denied.status == 428
+
+    saved = application.handle(
+        "PUT",
+        "/v1/projects/project.demo/interview",
+        body={"document": {"goal": "x"}, "expected_draft_revision": 0},
+        headers=_headers("save-1"),
+    )
+    assert saved.status == 200 and saved.body["draft"]["draft_revision"] == 1
+
+    stale = application.handle(
+        "PUT",
+        "/v1/projects/project.demo/interview",
+        body={"document": {"goal": "y"}, "expected_draft_revision": 0},
+        headers=_headers("save-2"),
+    )
+    assert stale.status == 409 and stale.body["error"] == "RevisionConflict"
+
+    state = application.handle("GET", "/v1/projects/project.demo/state")
+    assert state.status == 200
+    assert state.body["interview"]["document"] == {"goal": "x"}
+    assert state.body["spec"] is None and state.body["runs"] == []
+
+
+def test_release_snapshot_is_served_as_zip_bytes(tmp_path):
+    store = RichStore(tmp_path)
+    project = store.create_project("Demo", project_id="project.demo")
+    run = store.create_run(
+        project["id"], spec_revision_id=None, architecture_revision_id=None, status="ready"
+    )
+    application = Application(store)
+
+    missing = application.handle("GET", f"/v1/runs/{run['id']}/release")
+    assert missing.status == 404
+
+    release = store.put_artifact(
+        b"PK\x05\x06zip-bytes", media_type="application/zip", metadata={}
+    )
+    store.attach_artifact(run["id"], release.digest, role="source:release-snapshot")
+
+    response = application.handle("GET", f"/v1/runs/{run['id']}/release")
+
+    assert response.status == 200
+    assert response.raw == b"PK\x05\x06zip-bytes"
+    assert response.content_type == "application/zip"
+    headers = dict(response.headers)
+    assert headers["Content-Disposition"] == (
+        f'attachment; filename="rich-release-{release.digest[:12]}.zip"'
+    )
+    assert headers["X-RICH-Release-Digest"] == release.digest

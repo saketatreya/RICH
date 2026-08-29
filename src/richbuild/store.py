@@ -24,7 +24,7 @@ from .models import ApprovalGate
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 _UNSET = object()
 
 _RUN_TRANSITIONS = {
@@ -494,6 +494,28 @@ class RichStore:
                     COMMIT;
                     """
                 )
+            if 12 not in applied:
+                # One mutable draft per project, with its own optimistic
+                # counter. Not a revision kind: revisions are append-only and
+                # bump the project's current_revision, so autosaving every
+                # keystroke as one would race the spec submission's
+                # expected_revision and make each edit a "revision".
+                conn.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+                    CREATE TABLE interview_drafts (
+                        project_id TEXT PRIMARY KEY REFERENCES projects(id),
+                        draft_revision INTEGER NOT NULL,
+                        document_json TEXT NOT NULL,
+                        submitted_revision_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (12, CURRENT_TIMESTAMP);
+                    COMMIT;
+                    """
+                )
             current = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations"
             ).fetchone()["version"]
@@ -624,6 +646,95 @@ class RichStore:
         with self._connect() as conn:
             ids = [row["id"] for row in conn.execute(sql, params)]
         return [self.get_revision(revision_id) for revision_id in ids]
+
+    def get_interview_draft(self, project_id: str) -> dict[str, Any] | None:
+        """The project's in-progress interview, or None when nothing was saved."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM interview_drafts WHERE project_id = ?", (project_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["document"] = _decode_json(result.pop("document_json"))
+        return result
+
+    def save_interview_draft(
+        self,
+        project_id: str,
+        *,
+        document: Mapping[str, Any],
+        expected_draft_revision: int,
+    ) -> dict[str, Any]:
+        """Replace the draft, but only the version the caller last saw.
+
+        A reload used to discard every word typed into the interview. The draft
+        is what survives; the counter is what keeps two tabs from silently
+        overwriting each other -- a stale expectation is a conflict, never a
+        merge.
+        """
+
+        if not isinstance(document, Mapping):
+            raise ValueError("interview draft document must be a mapping")
+        if (
+            isinstance(expected_draft_revision, bool)
+            or not isinstance(expected_draft_revision, int)
+            or expected_draft_revision < 0
+        ):
+            raise ValueError("expected_draft_revision must be a non-negative integer")
+        now = _now()
+        with self._transaction(immediate=True) as conn:
+            if conn.execute(
+                "SELECT 1 FROM projects WHERE id = ?", (project_id,)
+            ).fetchone() is None:
+                raise NotFoundError(f"project {project_id!r} does not exist")
+            row = conn.execute(
+                "SELECT draft_revision FROM interview_drafts WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            current = int(row["draft_revision"]) if row is not None else 0
+            if current != expected_draft_revision:
+                raise RevisionConflict(
+                    f"interview draft for {project_id!r} is at revision {current}, "
+                    f"not expected revision {expected_draft_revision}"
+                )
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO interview_drafts(
+                        project_id, draft_revision, document_json,
+                        submitted_revision_id, created_at, updated_at
+                    ) VALUES (?, 1, ?, NULL, ?, ?)
+                    """,
+                    (project_id, _canonical_json(dict(document)), now, now),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE interview_drafts
+                    SET draft_revision = draft_revision + 1,
+                        document_json = ?, updated_at = ?
+                    WHERE project_id = ?
+                    """,
+                    (_canonical_json(dict(document)), now, project_id),
+                )
+        draft = self.get_interview_draft(project_id)
+        assert draft is not None
+        return draft
+
+    def mark_interview_submitted(self, project_id: str, revision_id: str) -> None:
+        """Record which spec revision the current draft became, if a draft exists."""
+
+        with self._transaction(immediate=True) as conn:
+            conn.execute(
+                """
+                UPDATE interview_drafts
+                SET submitted_revision_id = ?, updated_at = ?
+                WHERE project_id = ?
+                """,
+                (revision_id, _now(), project_id),
+            )
 
     def create_run(
         self,

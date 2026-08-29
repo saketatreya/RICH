@@ -174,6 +174,116 @@ class ControlPlane:
     def create_project(self, *, project_id: str, name: str) -> dict[str, Any]:
         return self.store.create_project(name, project_id=project_id)
 
+    def project_state(self, project_id: str) -> dict[str, Any]:
+        """Everything a surface needs to pick a project back up, in one answer.
+
+        Loading an existing project used to restore only the project row and
+        null its spec, architecture and run, so a returning user's only way
+        forward was to re-author the interview. Every piece of this already
+        existed as a durable object; nothing could assemble it. The shapes
+        match what the submission calls return, so a surface restores state
+        exactly as it would have received it.
+        """
+
+        project = self.store.get_project(project_id)
+        approvals = self.store.list_approvals(project_id)
+
+        def latest(kind: str, gate: ApprovalGate) -> tuple[Revision, dict[str, Any] | None] | None:
+            revisions = self.store.list_revisions(project_id, kind=kind)
+            if not revisions:
+                return None
+            revision = revisions[-1]
+            matching = [
+                approval
+                for approval in approvals
+                if approval["gate"] == gate.value
+                and approval["request"].get("revision_id") == revision.id
+            ]
+            return revision, (matching[-1] if matching else None)
+
+        spec_state = None
+        if (found := latest("product_spec", ApprovalGate.PRODUCT_SPEC)) is not None:
+            revision, approval = found
+            spec_state = {
+                "spec": dict(revision.document),
+                "revision": asdict(revision),
+                "approval": approval,
+            }
+        architecture_state = None
+        if (found := latest("architecture", ApprovalGate.ARCHITECTURE)) is not None:
+            revision, approval = found
+            request = approval["request"] if approval else {}
+            architecture_state = {
+                "architecture": dict(revision.document),
+                "decisions": list(request.get("decisions", [])),
+                "risks": list(request.get("risks", [])),
+                "revision": asdict(revision),
+                "approval": approval,
+            }
+        runs = list(reversed(self.store.list_runs(project_id)))
+        latest_run = runs[0] if runs else None
+        return {
+            "project": project,
+            "spec": spec_state,
+            "architecture": architecture_state,
+            "runs": runs,
+            "prepared": self._prepared_view(latest_run) if latest_run else None,
+            "scaffold": self._scaffold_view(latest_run["id"]) if latest_run else None,
+            "previews": [
+                preview for run in runs for preview in self.store.list_previews(run["id"])
+            ],
+            "interview": self.store.get_interview_draft(project_id),
+        }
+
+    def _prepared_view(self, run: Mapping[str, Any]) -> dict[str, Any] | None:
+        plans = [
+            attachment
+            for attachment in self.store.list_run_artifacts(run["id"])
+            if attachment["role"] == "compiled_plan"
+        ]
+        if not plans:
+            return None
+        artifact = self.store.get_artifact(plans[-1]["digest"])
+        return {
+            "run": dict(run),
+            "compiled": json.loads(artifact.path.read_text(encoding="utf-8")),
+            "tasks": self.store.list_tasks(run["id"]),
+            "plan_artifact_digest": artifact.digest,
+        }
+
+    def _scaffold_view(self, run_id: str) -> dict[str, Any] | None:
+        completed = [
+            event
+            for event in self.store.list_events(run_id)
+            if event["event_type"] == "scaffold.completed"
+        ]
+        if not completed:
+            return None
+        payload = completed[-1]["payload"]
+        artifact = self.store.get_artifact(payload["manifest_digest"])
+        return {
+            "destination": payload["destination"],
+            "manifest": json.loads(artifact.path.read_text(encoding="utf-8")),
+            "manifest_artifact_digest": artifact.digest,
+        }
+
+    def get_interview_draft(self, project_id: str) -> dict[str, Any] | None:
+        self.store.get_project(project_id)
+        return self.store.get_interview_draft(project_id)
+
+    def save_interview_draft(
+        self,
+        project_id: str,
+        *,
+        document: Mapping[str, Any],
+        expected_draft_revision: int,
+    ) -> dict[str, Any]:
+        return self.store.save_interview_draft(
+            project_id,
+            document=document,
+            expected_draft_revision=expected_draft_revision,
+        )
+
     def plan_change(
         self,
         *,
@@ -367,6 +477,9 @@ class ControlPlane:
             document=spec.to_dict(),
             expected_revision=expected_revision,
         )
+        # The draft is kept, not cleared: an amendment starts from what was
+        # said last time. It only learns which revision it became.
+        self.store.mark_interview_submitted(project_id, revision.id)
         approval = self.store.request_approval(
             project_id,
             gate=ApprovalGate.PRODUCT_SPEC.value,

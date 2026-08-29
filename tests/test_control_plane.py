@@ -530,3 +530,65 @@ def test_a_revision_from_another_project_is_refused(tmp_path):
             from_architecture_revision_id=architecture.revision.id,
             to_architecture_revision_id=architecture.revision.id,
         )
+
+
+def test_project_state_restores_everything_a_surface_needs(tmp_path):
+    control_plane = ControlPlane(RichStore(tmp_path / "state"))
+    control_plane.create_project(project_id="project.blank", name="Blank")
+
+    blank = control_plane.project_state("project.blank")
+
+    assert blank["project"]["id"] == "project.blank"
+    assert blank["spec"] is None and blank["architecture"] is None
+    assert blank["runs"] == [] and blank["prepared"] is None
+    assert blank["scaffold"] is None and blank["interview"] is None
+
+    project, spec, architecture = _approved_architecture(control_plane)
+    control_plane.save_interview_draft(
+        project["id"], document={"form": {"goal": "draft"}}, expected_draft_revision=0
+    )
+    prepared = control_plane.prepare_run(
+        architecture_approval_id=architecture.approval["id"], budget=_budget()
+    )
+    control_plane.scaffold_run(
+        run_id=prepared.run["id"], destination=tmp_path / "generated"
+    )
+
+    state = control_plane.project_state(project["id"])
+
+    assert state["spec"]["revision"]["id"] == spec.revision.id
+    assert state["spec"]["approval"]["status"] == "approved"
+    assert state["spec"]["spec"]["name"] == spec.spec.name
+    assert state["architecture"]["revision"]["id"] == architecture.revision.id
+    assert state["architecture"]["approval"]["status"] == "approved"
+    assert state["architecture"]["decisions"] == list(architecture.proposal.decisions)
+    assert state["architecture"]["architecture"]["nodes"]
+    assert [run["id"] for run in state["runs"]] == [prepared.run["id"]]
+    assert state["prepared"]["run"]["id"] == prepared.run["id"]
+    assert state["prepared"]["plan_artifact_digest"] == prepared.plan_artifact.digest
+    assert state["prepared"]["compiled"]["tasks"]
+    assert {task["node_id"] for task in state["prepared"]["tasks"]} == {
+        task.node_id for task in prepared.compiled.tasks
+    }
+    assert state["scaffold"]["destination"] == str((tmp_path / "generated").absolute())
+    assert state["scaffold"]["manifest"]["content_digest"]
+    assert state["interview"]["document"] == {"form": {"goal": "draft"}}
+
+
+def test_submitting_the_interview_marks_its_draft_but_keeps_it(tmp_path):
+    control_plane = ControlPlane(RichStore(tmp_path))
+    project = control_plane.create_project(project_id="project.todo", name="Todo")
+    control_plane.save_interview_draft(
+        project["id"], document={"form": _answers()}, expected_draft_revision=0
+    )
+
+    spec = control_plane.submit_interview(
+        project_id=project["id"],
+        project_name=project["name"],
+        answers=_answers(),
+        expected_revision=0,
+    )
+
+    draft = control_plane.get_interview_draft(project["id"])
+    assert draft["submitted_revision_id"] == spec.revision.id
+    assert draft["document"] == {"form": _answers()}
