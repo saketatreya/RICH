@@ -469,9 +469,12 @@ export default function ControlPlane() {
   // runs them as one Build with defaults derived from what it already knows.
   // Each step is durable on its own, so a failure part-way leaves a real state
   // to resume from rather than a half-pressed button.
-  const buildRun = () => {
+  // `before` runs inside the same action so a rebuild-then-build is one act
+  // with one error path; a click handler passes an event, which is not one.
+  const buildRun = (before?: unknown) => {
     if (!project || !architecture) return
     runAction('build', async () => {
+      if (typeof before === 'function') await (before as () => Promise<void>)()
       const plan = budgetPlan(budgetUsd)
       try {
         setBuildStage('preparing')
@@ -1120,6 +1123,12 @@ export default function ControlPlane() {
             run={prepared.run}
             events={events}
             onBuildAgain={buildRun}
+            onRebuildNode={(nodeId) =>
+              buildRun(async () => {
+                if (!project) throw new Error('no project is loaded')
+                await api.rebuildNode(project.id, nodeId)
+              })
+            }
             onInspect={() =>
               document.getElementById('stage-inspector')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
             }
