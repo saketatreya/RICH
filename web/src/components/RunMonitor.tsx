@@ -94,6 +94,18 @@ export default function RunMonitor({
     }
   }, [events, run.id, run.status])
 
+  // An execution that could not start leaves the run's status where it was;
+  // the error event is the only trace, so it is shown on its own.
+  const executionError = [...events]
+    .reverse()
+    .find((event) => event.event_type === 'run.execution_error')
+  const startedAfterError =
+    executionError &&
+    events.some(
+      (event) =>
+        event.sequence > executionError.sequence &&
+        ['run.execution_requested', 'run.execution_finished'].includes(event.event_type),
+    )
   const spent = usage?.used ? Number(usage.used.cost_usd) : 0
   const ceiling = usage ? Number(usage.budget.max_cost_usd) : 0
   const fraction = ceiling > 0 ? Math.min(1, spent / ceiling) : 0
@@ -144,6 +156,28 @@ export default function RunMonitor({
           {usage?.recovery_error ? ` Could not recover: ${usage.recovery_error}` : ''}
         </small>
       </div>
+
+      {executionError && !startedAfterError && !settled && (
+        <div className="plane-next-actions">
+          <div>
+            <b>The build could not start.</b>
+            <p>
+              {String(executionError.payload.error_type ?? 'Error')}
+              {executionError.payload.message ? `: ${String(executionError.payload.message)}` : ''}
+            </p>
+            {String(executionError.payload.error_type ?? '') === 'SandboxUnavailable' && (
+              <p>
+                Bubblewrap could not run on the host serving RICH. Run <code>rich doctor</code>{' '}
+                there; a container or an outer sandbox is usually the cause. The run is untouched
+                and can be started again once the host is fixed.
+              </p>
+            )}
+          </div>
+          <div className="plane-next-buttons">
+            <button className="primary" onClick={onBuildAgain}>Build again →</button>
+          </div>
+        </div>
+      )}
 
       {['failed', 'canceled'].includes(run.status) && (
         <div className="plane-next-actions">

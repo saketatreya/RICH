@@ -36,10 +36,21 @@ const step = async (name, run) => {
 }
 
 const projectForm = () => page.locator('.plane-project-form')
-const runStatus = async () => {
+const latestRun = async () => {
   const response = await fetch(`${base}/v1/projects/${encodeURIComponent(projectId)}/runs`)
   const runs = (await response.json()).runs
-  return runs[runs.length - 1]?.status ?? null
+  return runs[runs.length - 1] ?? null
+}
+const runStatus = async () => (await latestRun())?.status ?? null
+// An execution that could not start leaves the status at "ready" forever; the
+// error event is the trace, and a drive must not wait thirty minutes for it.
+const executionError = async () => {
+  const run = await latestRun()
+  if (!run) return null
+  const response = await fetch(`${base}/v1/runs/${encodeURIComponent(run.id)}/timeline`)
+  const lines = (await response.json()).lines
+  const error = [...lines].reverse().find((line) => line.text.includes('run.execution_error'))
+  return error ? error.text.split('\n').pop().trim() : null
 }
 
 await step('create a project and approve the example specification', async () => {
@@ -86,6 +97,8 @@ await step(`the run settles within ${minutes} minutes`, async () => {
   while (!['succeeded', 'failed', 'canceled'].includes(status ?? '') && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10_000))
     status = await runStatus()
+    const died = await executionError()
+    assert.equal(died, null, `the build could not start: ${died}`)
     process.stdout.write('.')
   }
   console.log(` ${status}`)

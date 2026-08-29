@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import subprocess
 import threading
 import time
 from typing import Any, Callable, Mapping
@@ -105,6 +106,47 @@ class DefaultRunExecutor:
             raise TypeError("runtime_builder must be callable")
         if self.route not in MODEL_ROUTES:
             raise ValueError(f"route must be one of {sorted(MODEL_ROUTES)}")
+
+    def availability(self) -> str | None:
+        """Why this host cannot execute a run right now, or None if it can.
+
+        Asked before a run is accepted, so a build that cannot start is refused
+        with the reason rather than accepted, backgrounded, and left as a run
+        whose status never moves. The probe is the sandbox itself: Bubblewrap
+        on PATH, and a user namespace the kernel and any outer sandbox permit.
+        Nothing here is a fallback; a host that fails the probe cannot build.
+        """
+
+        executor = BubblewrapExecutor()
+        if not executor.available():
+            return (
+                "Bubblewrap is required and was not found on PATH; install "
+                "bubblewrap and run `rich doctor`"
+            )
+        try:
+            probe = subprocess.run(
+                [
+                    str(executor.executable),
+                    "--ro-bind", "/", "/",
+                    "--unshare-user", "--unshare-pid", "--unshare-net",
+                    "--die-with-parent",
+                    "/bin/true",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"Bubblewrap could not be started: {exc}"
+        if probe.returncode != 0:
+            detail = (probe.stderr or probe.stdout).strip().splitlines()
+            return (
+                "this host does not permit the user namespaces Bubblewrap needs"
+                + (f" ({detail[-1][:200]})" if detail else "")
+                + "; a container or an outer sandbox is usually the cause"
+            )
+        return None
 
     def execute(
         self,

@@ -88,6 +88,14 @@ class _ExecutionManager:
                 "run keeps its result; prepare a new run over the same "
                 "approved spec and architecture revisions to try again."
             )
+        # Fail closed before accepting, not after backgrounding: an executor
+        # that knows it cannot run on this host says why, and the caller gets
+        # a 503 with that reason instead of a run whose status never moves.
+        availability = getattr(self.control_plane.run_executor, "availability", None)
+        if callable(availability):
+            reason = availability()
+            if reason:
+                raise RunExecutionUnavailable(f"this host cannot execute a run: {reason}")
         with self._lock:
             if run_id in self._active:
                 return {
@@ -113,7 +121,12 @@ class _ExecutionManager:
                 self.store.append_event(
                     run_id,
                     "run.execution_error",
-                    {"error_type": type(exc).__name__},
+                    {
+                        "error_type": type(exc).__name__,
+                        # Bounded, and the first line only: enough to say what
+                        # stopped the run, never a place for a response body.
+                        "message": str(exc).split("\n")[0][:500],
+                    },
                 )
             else:
                 self.store.append_event(

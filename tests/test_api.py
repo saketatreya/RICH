@@ -1422,3 +1422,86 @@ def test_usage_and_timeline_read_the_durable_run(tmp_path):
     assert any("task.failed" in text and "lint command exited with 1" in text for text in texts)
     assert [line["sequence"] for line in later.body["lines"]] == [2]
     assert application.handle("GET", "/v1/runs/run_missing/usage").status == 404
+
+
+def test_an_execution_the_host_cannot_run_is_refused_before_it_is_accepted(tmp_path):
+    """The drive found a run whose status never moved: the executor died on
+    SandboxUnavailable in a background thread one second after the request
+    was accepted. An executor that can say why it cannot run is asked first."""
+
+    class UnavailableExecutor:
+        def availability(self):
+            return "Bubblewrap is required and was not found on PATH"
+
+        def execute(self, **request):  # pragma: no cover - must not be reached
+            raise AssertionError("an unavailable executor must not be started")
+
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.demo")
+    run = store.create_run(
+        project["id"], spec_revision_id=None, architecture_revision_id=None, status="ready"
+    )
+    workspaces = tmp_path / "workspaces"
+    (workspaces / "demo").mkdir(parents=True)
+    application = Application(store, workspace_root=workspaces, run_executor=UnavailableExecutor())
+
+    response = application.handle(
+        "POST",
+        f"/v1/runs/{run['id']}/executions",
+        body={"workspace": "demo"},
+        headers=_headers("execute-demo"),
+    )
+
+    assert response.status == 503
+    assert response.body["error"] == "RunExecutionUnavailable"
+    assert "Bubblewrap" in response.body["message"]
+    assert [event["event_type"] for event in store.list_events(run["id"])] == []
+
+
+def test_an_execution_that_dies_records_why(tmp_path):
+    class DyingExecutor:
+        def __init__(self):
+            self.done = threading.Event()
+
+        def execute(self, **request):
+            try:
+                raise RuntimeError("the lease could not be claimed\nsecond line")
+            finally:
+                self.done.set()
+
+    store = RichStore(tmp_path / "state")
+    project = store.create_project("Demo", project_id="project.demo")
+    run = store.create_run(
+        project["id"], spec_revision_id=None, architecture_revision_id=None, status="ready"
+    )
+    workspaces = tmp_path / "workspaces"
+    (workspaces / "demo").mkdir(parents=True)
+    executor = DyingExecutor()
+    application = Application(store, workspace_root=workspaces, run_executor=executor)
+
+    response = application.handle(
+        "POST",
+        f"/v1/runs/{run['id']}/executions",
+        body={"workspace": "demo"},
+        headers=_headers("execute-demo"),
+    )
+    assert response.status == 202
+    assert executor.done.wait(5)
+    deadline = time.monotonic() + 5
+    events = []
+    while time.monotonic() < deadline:
+        events = store.list_events(run["id"])
+        if any(event["event_type"] == "run.execution_error" for event in events):
+            break
+        time.sleep(0.05)
+
+    error = next(event for event in events if event["event_type"] == "run.execution_error")
+    assert error["payload"] == {
+        "error_type": "RuntimeError",
+        "message": "the lease could not be claimed",
+    }
+    timeline = application.handle("GET", f"/v1/runs/{run['id']}/timeline")
+    assert any(
+        "RuntimeError: the lease could not be claimed" in line["text"]
+        for line in timeline.body["lines"]
+    )

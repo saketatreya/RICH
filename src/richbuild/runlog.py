@@ -66,6 +66,10 @@ def _detail(event: Mapping[str, Any]) -> str:
         if scenarios:
             parts.append(f"{len(scenarios)} scenario")
         return " · ".join(part for part in parts if part)
+    if event["event_type"] == "run.execution_error":
+        error_type = str(payload.get("error_type", "error"))
+        message = str(payload.get("message", "")).strip()
+        return f"{error_type}: {message}" if message else error_type
     if event["event_type"] == "task.retry_scheduled":
         return (
             f"attempt {payload.get('next_attempt', '?')} "
