@@ -1,15 +1,16 @@
 ---
 id: m0-milestone
-title: "Truth and hygiene"
+title: Truth and hygiene
 kind: milestone
-status: doing
+status: done
 track: core
 milestone: M0
-release: "2.0"
+release: '2.0'
 size: M
-drive: "the floor"
+drive: the floor
 order: 0
 started: 2026-08-29
+finished: '2026-08-29'
 ---
 
 Fix everything known to be wrong before building on it: the evidence-guard hole, the
