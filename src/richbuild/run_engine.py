@@ -962,6 +962,7 @@ def _coding_worker_factory(
     transaction_sink: SourceTransactionSink,
     prior_failures: Callable[..., Any] | None = None,
     memo: Any | None = None,
+    scenario_pages: Callable[..., Any] | None = None,
 ) -> TaskHandler:
     return CodingWorker(
         gateway,
@@ -977,6 +978,7 @@ def _coding_worker_factory(
         transaction_sink=transaction_sink,
         prior_failures=prior_failures,
         memo=memo,
+        scenario_pages=scenario_pages,
     )
 
 
@@ -1735,6 +1737,7 @@ class RunEngine:
             ),
             prior_failures=_prior_failure_source(self.store, run_id),
             memo=_DurableGenerationMemo(self.store),
+            scenario_pages=self.config.exercised_paths,
         )
         if not callable(model_worker):
             raise TypeError("worker_factory must return a callable task handler")

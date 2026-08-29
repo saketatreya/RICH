@@ -1327,3 +1327,64 @@ def test_a_retry_asks_rather_than_replaying_the_answer_that_just_failed(tmp_path
     assert len(provider.requests) == 1, "it asks, with the failure in hand"
     assert "property exited with 1" in provider.requests[0].user_prompt
     assert result.evidence[0].details["generation_reused"] is False
+
+
+def test_a_huge_prior_failure_is_cut_to_its_budget_not_the_retry(tmp_path):
+    """A live run reopened a component whose retry died on PromptLimitError:
+    the failure it was shown was larger than the prompt could carry."""
+    project, architecture, plan, approval = _fixture()
+    failure = PriorAttemptFailure(
+        attempt=1,
+        gate="acceptance",
+        summary="the assembled application failed acceptance on pages this task owns",
+        diagnostics=tuple(
+            [f"scenario.{i} · {i} · Expect to see ‘thing {i}’: Error: not found" for i in range(12)]
+            + [f"apps/web/note.tsx line {i}: " + "x" * 200 for i in range(400)]
+        ),
+    )
+    prompt = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["web"],
+        approval=approval,
+        dependency_summaries={"domain": "Exposes a stable getNote operation."},
+        prior_failures=[failure],
+    )
+    assert prompt.prompt_bytes <= coding.DEFAULT_LIMITS.max_prompt_bytes
+    assert "Expect to see ‘thing 11’" in prompt.user_prompt, "the named steps come first and survive"
+    assert "withheld_diagnostic_lines" in prompt.user_prompt
+
+
+def test_a_scenario_names_the_pages_the_task_owns(tmp_path):
+    project, architecture, plan, approval = _fixture()
+    scenario_id = project.acceptance_scenarios[0].id
+
+    def pages(spec, scenario):
+        assert spec is project
+        return ("apps/web/note.tsx", "packages/domain/src/index.ts") if scenario.id == scenario_id else ()
+
+    with_pages = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["web"],
+        approval=approval,
+        dependency_summaries={"domain": "Exposes a stable getNote operation."},
+        scenario_pages=pages,
+    )
+    context = json.loads(with_pages.user_prompt[with_pages.user_prompt.index("{"):])
+    scenarios = {s["id"]: s for s in context["approved_intent"]["acceptance_scenarios"]}
+    assert scenarios[scenario_id]["pages"] == ["apps/web/note.tsx"], "only the pages this task owns"
+    assert "runs its browser steps against those files" in with_pages.system_prompt
+
+    without = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["web"],
+        approval=approval,
+        dependency_summaries={"domain": "Exposes a stable getNote operation."},
+    )
+    plain = json.loads(without.user_prompt[without.user_prompt.index("{"):])
+    assert all("pages" not in s for s in plain["approved_intent"]["acceptance_scenarios"])
