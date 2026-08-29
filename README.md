@@ -40,7 +40,7 @@ monorepo target pack. It includes:
 - one exact trusted model policy (`anthropic/claude-sonnet-5`) reached by two
   explicitly chosen routes -- an API key or an existing `claude` login -- which
   are never fallbacks for one another;
-- exact Node 22.22.3 and pnpm 10.34.5 identity checks;
+- exact Node 22.23.2 and pnpm 10.34.5 identity checks;
 - Bubblewrap isolation, network-off verification, bounded processes/heaps/output,
   and no unsafe local fallback;
 - independent lint, TypeScript, unit, contract-obligation, production-build, and

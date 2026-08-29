@@ -20,7 +20,7 @@ from typing import Callable, Mapping, Sequence
 import yaml
 
 
-TRUSTED_NODE_VERSION = "22.22.3"
+TRUSTED_NODE_VERSION = "22.23.2"
 TRUSTED_PNPM_VERSION = "10.34.5"
 _NODE_VERSION_DEFINE = re.compile(
     r"^#define NODE_(MAJOR|MINOR|PATCH)_VERSION ([0-9]+)$",

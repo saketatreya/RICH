@@ -116,7 +116,7 @@ contract.
   ownership check. `models/_common.py` keeps its own copy on purpose, with the
   same rules: a layering test says the `models` package is the bottom of the
   stack and imports no sibling module.
-- Toolchain identity is exact (Node 22.22.3, pnpm 10.34.5) and the sole trusted
+- Toolchain identity is exact (Node 22.23.2, pnpm 10.34.5) and the sole trusted
   model policy is `anthropic/claude-sonnet-5` — no silent fallback. Two
   **routes** reach it, chosen explicitly via `route=` on `default_run_runtime`
   and never substituted for one another: `"api"` (`anthropic_provider.py`, needs

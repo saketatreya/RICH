@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
-from .executor import BubblewrapExecutor
+from .executor import BubblewrapExecutor, SandboxUnavailable, trusted_node_pnpm_runtime
 from .run_engine import (
     CancellationToken,
     BubblewrapCommandRunner,
@@ -147,6 +147,14 @@ class DefaultRunExecutor:
                 + (f" ({detail[-1][:200]})" if detail else "")
                 + "; a container or an outer sandbox is usually the cause"
             )
+        # The toolchain is resolved the way a run resolves it -- exact Node and
+        # pnpm identities, never downloaded -- so a version that drifted is a
+        # refusal that names the drift, not a run that dies under a name that
+        # says "sandbox".
+        try:
+            trusted_node_pnpm_runtime()
+        except SandboxUnavailable as exc:
+            return f"the pinned toolchain is not on this host: {exc}; run `rich doctor`"
         return None
 
     def execute(

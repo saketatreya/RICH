@@ -125,3 +125,19 @@ def test_availability_reports_a_reason_or_none_and_never_raises(tmp_path, monkey
     monkeypatch.setattr(executor_module.BubblewrapExecutor, "available", lambda self: False)
     reason = DefaultRunExecutor(store).availability()
     assert reason is not None and "Bubblewrap" in reason and "rich doctor" in reason
+
+
+def test_availability_names_a_toolchain_that_drifted(tmp_path, monkeypatch):
+    """The M3 drive found this too: the host's Node had moved a patch version and
+    the run died after acceptance as SandboxUnavailable. The probe resolves the
+    toolchain the way a run does, so the drift is a refusal that names it."""
+    from richbuild import execution as execution_module
+    from richbuild.executor import SandboxUnavailable
+
+    def drifted():
+        raise SandboxUnavailable("trusted Node version mismatch: expected 22.23.2, found 23.0.0")
+
+    monkeypatch.setattr(execution_module, "trusted_node_pnpm_runtime", drifted)
+    reason = DefaultRunExecutor(RichStore(tmp_path)).availability()
+    assert reason is not None
+    assert "expected 22.23.2, found 23.0.0" in reason and "rich doctor" in reason

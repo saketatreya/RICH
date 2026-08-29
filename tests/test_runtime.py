@@ -430,8 +430,8 @@ def test_trusted_toolchain_factory_validates_exact_local_versions(tmp_path):
     (node_root / "bin" / "node").write_bytes(b"node")
     (node_root / "include" / "node" / "node_version.h").write_text(
         "#define NODE_MAJOR_VERSION 22\n"
-        "#define NODE_MINOR_VERSION 22\n"
-        "#define NODE_PATCH_VERSION 3\n"
+        "#define NODE_MINOR_VERSION 23\n"
+        "#define NODE_PATCH_VERSION 2\n"
     )
     pnpm_root = tmp_path / "pnpm"
     (pnpm_root / "bin").mkdir(parents=True)
@@ -448,7 +448,7 @@ def test_trusted_toolchain_factory_validates_exact_local_versions(tmp_path):
         bubblewrap_executable=str(bwrap),
     )
 
-    assert runtime.node_version == "22.22.3"
+    assert runtime.node_version == "22.23.2"
     assert runtime.pnpm_version == "10.34.5"
     assert runtime.executor.tool_mounts[0].host_path == node_root.resolve()
     assert runtime.executor.tool_aliases[0].guest_path == (

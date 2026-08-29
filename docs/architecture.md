@@ -269,7 +269,7 @@ implemented by racing agents against one directory.
 Linux Bubblewrap is mandatory for the production runtime. Generated commands see:
 
 - a read-only workspace;
-- read-only, identity-checked Node 22.22.3 and pnpm 10.34.5 bundles;
+- read-only, identity-checked Node 22.23.2 and pnpm 10.34.5 bundles;
 - namespace-only aliases for the exact pnpm executable;
 - explicit writable runtime/build/report paths;
 - no network during lint, typecheck, unit, build, or browser verification;
@@ -490,7 +490,7 @@ artifact bytes.
 
 - Linux with unprivileged user namespaces and Bubblewrap;
 - Python 3.10+;
-- exact Node 22.22.3;
+- exact Node 22.23.2;
 - exact pnpm 10.34.5 present in the local Corepack cache;
 - a model route: an `ANTHROPIC_API_KEY` (the `api` route) or an existing `claude`
   login (the `claude-code` route). Neither is a fallback for the other.

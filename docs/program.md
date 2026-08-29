@@ -499,14 +499,14 @@ the Python pack. **Drive:** first paradigm check.
   `default_web_root` (`api.py:1003`) resolves package data first, repo checkout second.
   `rich --version` and `/v1/health.version` from `importlib.metadata`. `LICENSE`
   (owner to choose), classifiers, urls. `CHANGELOG` link fixed.
-- **Docker image**: ubuntu-24.04, bubblewrap, Node 22.22.3, pnpm 10.34.5 in the
+- **Docker image**: ubuntu-24.04, bubblewrap, Node 22.23.2, pnpm 10.34.5 in the
   Corepack cache, the wheel, state on a volume. **Day-one risk:** Bubblewrap needs
   user namespaces, which Docker's default seccomp blocks — prove `bwrap` works inside
   the image on Docker Desktop (macOS) before anything else; ship a seccomp profile if
   needed. Inside the container bind `0.0.0.0` but publish only to the host's loopback
   (`-p 127.0.0.1:8767:8767`) and turn the Host/Origin checks **on**
   (`validate_local_request` flags at `api.py:183` are all False today).
-- **`rich doctor` tells the truth:** versions (Node 22.22.3, pnpm 10.34.5 in the
+- **`rich doctor` tells the truth:** versions (Node 22.23.2, pnpm 10.34.5 in the
   Corepack cache, user namespaces, WASM support, Python, and each installed pack's
   toolchain), each failure with its remedy command; `ok` reflects all of it.
 - **CI:** wheel build + clean install smoke; eslint for `web/`; vitest component tests
