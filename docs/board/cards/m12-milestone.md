@@ -1,13 +1,13 @@
 ---
 id: m12-milestone
-title: "The customer drive"
+title: The customer drive
 kind: milestone
-status: backlog
+status: next
 track: core
 milestone: M12
-release: "2.0"
+release: '2.0'
 size: M
-drive: "all"
+drive: all
 order: 13
 ---
 
