@@ -87,6 +87,11 @@ toolchain to show the product; Node 22.23.2 on `PATH` and pnpm 10.34.5 in the
 Corepack cache are needed only to *build* software (`rich doctor` says exactly
 what is missing and how to get it).
 
+Releases are tags: `git tag v2.0.0 && git push --tags` builds the wheel and
+the image (`ghcr.io/saketatreya/rich:2.0.0`) and publishes a GitHub release
+with the wheel attached, refusing a tag whose version `pyproject.toml` does
+not carry.
+
 ### Or run the image
 
 ```bash
