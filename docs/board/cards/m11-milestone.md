@@ -1,14 +1,15 @@
 ---
 id: m11-milestone
-title: "Ship"
+title: Ship
 kind: milestone
-status: backlog
+status: doing
 track: E
 milestone: M11
-release: "2.0"
+release: '2.0'
 size: L
-drive: "step 1"
+drive: step 1
 order: 12
+started: '2026-08-29'
 ---
 
 A wheel that bundles the canvas, a Docker image proven to run Bubblewrap on Docker
