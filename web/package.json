@@ -11,7 +11,8 @@
     "drive:m1": "node drive/m1-return.mjs",
     "drive:m2": "node drive/m2-interview.mjs",
     "drive:m3": "node drive/m3-build.mjs",
-    "drive:m6": "node drive/m6-release.mjs"
+    "drive:m6": "node drive/m6-release.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@xyflow/react": "^12.3.5",
@@ -25,7 +26,8 @@
     "@vitejs/plugin-react": "4.7.0",
     "playwright": "^1.61.0",
     "typescript": "^5.6.3",
-    "vite": "6.4.3"
+    "vite": "6.4.3",
+    "vitest": "3.2.7"
   },
   "overrides": {
     "postcss": "8.5.23"

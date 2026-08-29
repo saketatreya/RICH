@@ -62,14 +62,14 @@ jobs:
         working-directory: web
       - run: python tools/build_wheel.py --skip-install
       - run: test ! -e src/richbuild/canvas
-      - run: python -m venv "$VENV"
+      - run: python -m venv "$RUNNER_TEMP/venv"
       - run: |
-          "$VENV/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/venv/bin/python" -m pip install dist/*.whl
       - run: |
-          "$VENV/bin/python" -c "import richbuild, richbuild.models, richbuild.target_packs"
-          "$VENV/bin/rich" --version | grep -q "^rich 2\."
-          "$VENV/bin/python" -c "from richbuild.api import canvas_origin; origin, path = canvas_origin(); assert origin == 'bundled', (origin, path)"
-          "$VENV/bin/rich" serve --state-dir "$STATE" --port 8767 --route none &
+          "$RUNNER_TEMP/venv/bin/python" -c "import richbuild, richbuild.models, richbuild.target_packs"
+          "$RUNNER_TEMP/venv/bin/rich" --version | grep -q "^rich 2\."
+          "$RUNNER_TEMP/venv/bin/python" -c "from richbuild.api import canvas_origin; origin, path = canvas_origin(); assert origin == 'bundled', (origin, path)"
+          "$RUNNER_TEMP/venv/bin/rich" serve --state-dir "$RUNNER_TEMP/state" --port 8767 --route none &
           for i in $(seq 1 40); do curl -sf http://127.0.0.1:8767/v1/health >/dev/null && break; sleep 0.5; done
           curl -sf http://127.0.0.1:8767/v1/health | grep -q '"status": *"ok"'
           curl -sf http://127.0.0.1:8767/ | grep -q '<div id="root"'
@@ -119,5 +119,53 @@ jobs:
         working-directory: web
       - run: npm run typecheck
         working-directory: web
+      - run: npm test
+        working-directory: web
       - run: npm run build
         working-directory: web
+
+  drive:
+    # The product, driven by a real browser against `rich serve`, with no
+    # model: the M1 return drive (create, interview, approve, reload, switch)
+    # and the M6 release drive over a seeded succeeded run (download, push to
+    # a repository, push again). The drives under web/drive/ are the
+    # milestones' acceptance tests; this keeps them true on every push.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: python -m pip install -e .
+      - run: npm ci
+        working-directory: web
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: |
+          mkdir -p .rich/drive-m1 .rich/drive-m6
+          rich serve --state-dir "$RUNNER_TEMP/m1-state" --port 8790 --route none > .rich/drive-m1/serve.log 2>&1 &
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8790/v1/health >/dev/null && break; sleep 0.5; done
+          RICH_URL=http://127.0.0.1:8790 node web/drive/m1-return.mjs
+      - run: |
+          python web/drive/seed-release.py .rich/drive-m6
+          rich serve --state-dir .rich/drive-m6/state --port 8793 --route none > .rich/drive-m6/serve.log 2>&1 &
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8793/v1/health >/dev/null && break; sleep 0.5; done
+          RICH_URL=http://127.0.0.1:8793 RICH_SEED=.rich/drive-m6/seed.json RICH_SHOTS=.rich/drive-m6 node web/drive/m6-release.mjs
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drive-screenshots
+          path: |
+            .rich/drive-m1/*.png
+            .rich/drive-m6/*.png
+            .rich/drive-m1/serve.log
+            .rich/drive-m6/serve.log
+          if-no-files-found: ignore
