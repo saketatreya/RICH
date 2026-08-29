@@ -1626,3 +1626,41 @@ def test_health_says_whether_a_repository_token_is_configured(tmp_path, monkeypa
     assert application.handle("GET", "/v1/health").body["repository_push"] == {
         "token_configured": True
     }
+
+
+def test_beyond_loopback_a_request_must_prove_where_it_came_from(tmp_path):
+    strict = Application(RichStore(tmp_path / "strict"), strict_local_checks=True)
+    no_host = strict.handle("GET", "/v1/health", headers={})
+    assert no_host.status == 403
+    assert no_host.body["error"] == "UntrustedHost"
+    with_host = strict.handle("GET", "/v1/health", headers={"host": "127.0.0.1:8767"})
+    assert with_host.status == 200
+    mutation = strict.handle(
+        "POST",
+        "/v1/projects",
+        body={"project_id": "project.strict", "name": "Strict"},
+        headers={**_headers("strict-1"), "host": "localhost:8767"},
+    )
+    assert mutation.status == 403
+    assert mutation.body["error"] == "UntrustedOrigin"
+    allowed = strict.handle(
+        "POST",
+        "/v1/projects",
+        body={"project_id": "project.strict", "name": "Strict"},
+        headers={
+            **_headers("strict-2"),
+            "host": "localhost:8767",
+            "origin": "http://localhost:8767",
+        },
+    )
+    assert allowed.status == 201
+    # On loopback itself the kernel proved the caller; the CLI and curl stay usable.
+    relaxed = Application(RichStore(tmp_path / "relaxed"))
+    assert relaxed.handle("GET", "/v1/health", headers={}).status == 200
+
+
+def test_serve_binds_beyond_loopback_only_when_told_the_port_is_published_to_loopback(tmp_path):
+    from richbuild.api import serve
+
+    with pytest.raises(ValueError, match="published-on-loopback"):
+        serve(tmp_path / "state", host="0.0.0.0", port=0, route="none")

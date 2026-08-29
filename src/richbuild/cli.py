@@ -56,6 +56,15 @@ def _parser() -> argparse.ArgumentParser:
     serve_command.add_argument("--host", default="127.0.0.1")
     serve_command.add_argument("--port", type=int, default=8767)
     serve_command.add_argument(
+        "--published-on-loopback",
+        action="store_true",
+        help=(
+            "allow --host 0.0.0.0 inside a container whose port the runtime "
+            "publishes only to the host's loopback (-p 127.0.0.1:8767:8767); "
+            "the Host and Origin checks are enforced"
+        ),
+    )
+    serve_command.add_argument(
         "--route",
         default=CLAUDE_CODE_ROUTE,
         choices=[*sorted(MODEL_ROUTES), NO_MODEL_ROUTE],
@@ -227,7 +236,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(_doctor())
             return 0
         if args.command == "serve":
-            serve(state_dir, host=args.host, port=args.port, route=args.route)
+            serve(
+                state_dir,
+                host=args.host,
+                port=args.port,
+                route=args.route,
+                published_on_loopback=args.published_on_loopback,
+            )
             return 0
 
         store = RichStore(state_dir)

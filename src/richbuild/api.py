@@ -169,6 +169,7 @@ class Application:
         architect: ArchitectProposer | None = None,
         interviewer: InterviewerProposer | None = None,
         repository_pusher: Callable[..., Any] | None = None,
+        strict_local_checks: bool = False,
         route: str = CLAUDE_CODE_ROUTE,
     ):
         self.store = store
@@ -179,6 +180,10 @@ class Application:
         trusted_run_executor = run_executor or DefaultRunExecutor(
             store, route=route
         )
+        # Beyond loopback -- a container binding 0.0.0.0 -- a request must
+        # prove where it came from: a loopback Host and, for mutations, a
+        # loopback Origin. On loopback itself the kernel already proved it.
+        self.strict_local_checks = strict_local_checks
         self.control_plane = ControlPlane(
             store,
             preview_orchestrator=(
@@ -209,7 +214,12 @@ class Application:
         method = method.upper()
         request_body = dict(body or {})
         normalized_headers = {key.lower(): value for key, value in (headers or {}).items()}
-        request_error = validate_local_request(method, normalized_headers)
+        request_error = validate_local_request(
+            method,
+            normalized_headers,
+            require_host=self.strict_local_checks,
+            require_origin=self.strict_local_checks,
+        )
         if request_error is not None:
             return request_error
         query = query or {}
@@ -1369,6 +1379,7 @@ def serve(
     architect: Any | None = None,
     interviewer: Any | None = None,
     route: str = CLAUDE_CODE_ROUTE,
+    published_on_loopback: bool = False,
 ) -> None:
     """Serve the API and the canvas on one port.
 
@@ -1380,8 +1391,14 @@ def serve(
     -- and every draft says which one answered.
     """
 
-    if host not in {"127.0.0.1", "localhost", "::1"}:
-        raise ValueError("the local API binds to loopback only")
+    loopback = host in {"127.0.0.1", "localhost", "::1"}
+    if not loopback and not published_on_loopback:
+        raise ValueError(
+            "the local API binds to loopback only; inside a container whose port "
+            "is published to the host's loopback (-p 127.0.0.1:8767:8767), pass "
+            "--published-on-loopback to bind 0.0.0.0 with the Host and Origin "
+            "checks enforced"
+        )
     root = Path(web_root) if web_root is not None else default_web_root()
     # "none" is a real mode, not a missing credential: a host with no model
     # route still plans deterministically and asks the fixed questions, and
@@ -1397,6 +1414,7 @@ def serve(
         architect=architect,
         interviewer=interviewer,
         route=API_ROUTE if no_model else route,
+        strict_local_checks=not loopback,
     )
     server = ThreadingHTTPServer((host, port), handler_for(application, root))
     # flush: stdout is block-buffered when piped, and a server that runs
@@ -1416,6 +1434,12 @@ def serve(
         flush=True,
     )
     print(f"  api    http://{host}:{port}/v1/health", flush=True)
+    if not loopback:
+        print(
+            "  bind   beyond loopback: Host and Origin checks enforced; publish "
+            "this port only to the host's loopback",
+            flush=True,
+        )
     origin, _served = canvas_origin()
     print(
         f"  canvas {origin}"
