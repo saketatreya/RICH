@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "drive:m1": "node drive/m1-return.mjs",
-    "drive:m2": "node drive/m2-interview.mjs"
+    "drive:m2": "node drive/m2-interview.mjs",
+    "drive:m3": "node drive/m3-build.mjs"
   },
   "dependencies": {
     "@xyflow/react": "^12.3.5",

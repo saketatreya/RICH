@@ -78,6 +78,28 @@ bounded navigation, locator-based interaction, keyboard actions, reloads, and ob
 URL/visibility/focus/text/value assertions. It cannot embed JavaScript or access an
 external URL. Architecture cannot be proposed until the exact spec revision is approved.
 
+The answers that compile into that revision are authored in a conversation
+(`interviewer.py`), not typed as a form. One bounded model call per turn returns either
+questions or a complete candidate, in a response schema shaped so that an invalid oracle
+step is unrepresentable: one branch per acceptance action carrying exactly that action's
+fields, locator kinds and ARIA roles as enums. The model names things by short keys; the
+stable ids are derived from them (`answers_from_keys`) and a person never sees one. The
+validator is unchanged — `AdaptiveInterview.compile` still decides — and a rejected
+candidate is retried once with the validator's own message, then returned as `partial`
+with the rejections attached rather than raised, so the person finishes it in the editor.
+With no model route (`rich serve --route none`) the deterministic questions answer, tagged
+`form-fallback`. The conversation and the structured answers live on the server as one
+mutable draft per project with its own optimistic revision (`interview_drafts`) — not a
+revision kind, because revisions are append-only and bump the project's counter, so
+autosaving every edit as one would race the submission's `expected_revision`.
+
+Every compiled oracle step is a named Playwright step titled with the sentence the person
+approved — "3 · Expect to see the text ‘Buy milk’" — rendered by `describe_step` in the
+pack and by `describeStep` in the canvas from the same data, held to each other by one
+fixture. On failure the protected reporter emits a second, explanatory line
+(`RICH_ACCEPTANCE_FAILURES`) that the engine reads leniently and only for a failed
+acceptance command; the coverage line it trusts is untouched.
+
 Revisions are append-only. Approval records identify the gate, project, exact revision
 claims, actor, decision, reason, and time. Approving one revision never authorizes a
 later revision.
@@ -487,7 +509,21 @@ rich serve
 
 The Canvas runs on `http://127.0.0.1:8767` by default and serves the JSON API under `/v1`.
 State defaults to `.rich/state`; generated API workspaces default to
-`.rich/workspaces`.
+`.rich/workspaces`. `--route` chooses `claude-code` (an existing login), `api`
+(`ANTHROPIC_API_KEY`) or `none` — a real mode, not a missing credential: the deterministic
+planner and the fixed questions, and the server says so at startup.
+
+The canvas keeps only a pointer to the project and who is deciding; everything the
+project holds comes back from `GET /v1/projects/{id}/state` in the shapes the submission
+calls return, so a reload or a switch lands on the durable truth. Building is one action
+over three durable authority boundaries — prepare binds the budget, scaffold writes the
+frozen tree, execute takes the fenced lease — with one dollar figure deciding the whole
+budget and the derived dimensions shown. `GET /v1/runs/{id}/usage` sums settled model
+usage from the events the way a restart recovers the budget, so the meter is never
+optimistic; `GET /v1/runs/{id}/timeline` serves the lines `rich logs` prints, from the one
+formatter. A settled run is never a dead end: the canvas shows the gate that failed, the
+failed steps in the words that were approved, and the three ways forward. The verified
+release ZIP streams from `GET /v1/runs/{id}/release` with its digest in a header.
 
 ### CLI lifecycle
 
