@@ -99,7 +99,7 @@ export const exampleAnswers = (): Answers => ({
       when: ['They create a project and submit its intent.'],
       then: ['The product specification is available for explicit approval.'],
       oracle: [
-        { action: 'navigate', value: '/' },
+        { action: 'open_requirement' },
         { action: 'fill', locator: { kind: 'label', value: 'Project name' }, value: 'Example project' },
         { action: 'click', locator: { kind: 'role', value: 'button', name: 'Create project' } },
         { action: 'assert_visible', locator: { kind: 'text', value: 'approval', exact: false } },
@@ -113,7 +113,7 @@ export const exampleAnswers = (): Answers => ({
       when: ['They move through the core project workflow.'],
       then: ['Every control can be reached, understood, and activated.'],
       oracle: [
-        { action: 'navigate', value: '/' },
+        { action: 'open_requirement' },
         { action: 'keyboard', value: 'Tab' },
         { action: 'assert_focused', locator: { kind: 'label', value: 'Project name' } },
       ],
