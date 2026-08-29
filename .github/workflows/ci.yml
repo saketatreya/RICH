@@ -35,26 +35,40 @@ jobs:
     # The wheel is what an operator installs, and it is not what the python
     # job tests: an editable install resolves from src/, so a package list
     # that omitted richbuild.models passed every test while the built wheel
-    # could not `import richbuild`. Build the wheel, install it into a venv
-    # holding nothing else, and import from a directory where src/ cannot be
-    # found by accident. `rich --help` stands in for a version flag the CLI
-    # does not have yet.
+    # could not `import richbuild`. Build the canvas and the wheel the way an
+    # operator would (tools/build_wheel.py), install it into a venv holding
+    # nothing else, and from a directory where src/ and web/ cannot be found
+    # by accident: import, print the version, and serve the bundled canvas.
     runs-on: ubuntu-24.04
     env:
-      WHEELS: ${{ runner.temp }}/wheel
       VENV: ${{ runner.temp }}/venv
+      STATE: ${{ runner.temp }}/state
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: python -m pip wheel . --no-deps -w "$WHEELS"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: python tools/build_wheel.py --skip-npm
+      - run: test ! -e src/richbuild/canvas
       - run: python -m venv "$VENV"
       - run: |
-          "$VENV/bin/python" -m pip install "$WHEELS"/*.whl
+          "$VENV/bin/python" -m pip install dist/*.whl
       - run: |
           "$VENV/bin/python" -c "import richbuild, richbuild.models, richbuild.target_packs"
-          "$VENV/bin/rich" --help
+          "$VENV/bin/rich" --version | grep -q "^rich 2\."
+          "$VENV/bin/python" -c "from richbuild.api import canvas_origin; origin, path = canvas_origin(); assert origin == 'bundled', (origin, path)"
+          "$VENV/bin/rich" serve --state-dir "$STATE" --port 8767 --route none &
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8767/v1/health >/dev/null && break; sleep 0.5; done
+          curl -sf http://127.0.0.1:8767/v1/health | grep -q '"status": *"ok"'
+          curl -sf http://127.0.0.1:8767/ | grep -q '<div id="root"'
+          kill %1
         working-directory: ${{ runner.temp }}
 
   web:

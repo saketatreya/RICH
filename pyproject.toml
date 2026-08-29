@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rich-agent-build-system"
-version = "1.0.0"
+version = "2.0.0.dev0"
 description = "An intent-to-verified-software compiler"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,12 @@ rich = "richbuild.cli:main"
 # could not even `import richbuild`. Every package under src/ ships.
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The canvas ships inside the wheel: tools/build_wheel.py builds web/ and
+# copies web/dist into richbuild/canvas before the wheel is assembled, and
+# removes it afterwards so a checkout keeps serving its own fresh build.
+[tool.setuptools.package-data]
+richbuild = ["canvas/**"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

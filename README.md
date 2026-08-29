@@ -73,14 +73,28 @@ execution is deliberately serialized, and distributed systems still require new
 resource, migration, observability, and failure-semantics packs. See
 [the architecture and operating contract](docs/architecture.md).
 
-### Run it
+### Install it
+
+```bash
+python tools/build_wheel.py                 # builds the canvas, then dist/*.whl with it inside
+python -m pip install dist/rich_agent_build_system-*.whl
+rich doctor                                 # every host check, each failure with its remedy
+rich serve                                  # → http://127.0.0.1:8767 — API and canvas, one port
+```
+
+The wheel carries the canvas, so an installed `rich serve` needs no Node
+toolchain to show the product; Node 22.23.2 and pnpm 10.34.5 under
+`/opt/rich-tools` are needed only to *build* software (`rich doctor` says
+exactly what is missing and how to get it).
+
+### Run it from a checkout
 
 ```bash
 python -m pip install -e '.[test]'
-npm --prefix web ci && npm --prefix web run build
+npm --prefix web ci && npm --prefix web run build   # a checkout serves its own build
 
-rich doctor      # coarse host check: bubblewrap, node, pnpm, npm, git on PATH
-                 # (exact Node/pnpm identity is verified when a run starts)
+rich doctor      # host checks with remedies; exact Node/pnpm identity is verified
+                 # again when a run starts
 rich serve       # → http://127.0.0.1:8767
 ```
 

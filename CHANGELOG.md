@@ -18,6 +18,12 @@ tree a wheel could not install, so the program's releases are numbered 2.0,
   and runs everything downstream again. Owners out of attempts withhold the
   retry instead of spending it on the root. Step messages lose their ANSI
   colour codes.
+- **The wheel carries the canvas.** `python tools/build_wheel.py` builds the
+  canvas, packages it as data inside `richbuild/canvas`, and leaves the
+  checkout clean; an installed `rich serve` needs no Node toolchain to show
+  the product, and `rich doctor` and the serve banner say which canvas is
+  served (`repo`, `bundled`, or `missing`). CI installs the wheel into an
+  empty venv and fetches the canvas from it. Version is `2.0.0.dev0`.
 - **Push the verified snapshot to a repository.** `POST
   /v1/runs/{id}/repository-pushes` and `rich push-repository` commit the
   run's stored release snapshot — never the working tree — as one

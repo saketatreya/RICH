@@ -1225,10 +1225,32 @@ def acceptance_vocabulary() -> dict[str, Any]:
     }
 
 
-def default_web_root() -> Path:
-    """Where `npm --prefix web run build` leaves the app."""
+_BUNDLED_CANVAS = Path(__file__).resolve().parent / "canvas"
+_REPO_CANVAS = Path(__file__).resolve().parents[2] / "web" / "dist"
 
-    return Path(__file__).resolve().parents[2] / "web" / "dist"
+
+def canvas_origin(
+    *, bundled: Path = _BUNDLED_CANVAS, repo_dist: Path = _REPO_CANVAS
+) -> tuple[str, Path]:
+    """Which canvas this process would serve, and from where.
+
+    A checkout serves its own build (`npm --prefix web run build`) so a
+    developer never sees a stale copy; an installed wheel has no checkout and
+    serves the canvas `tools/build_wheel.py` packaged as data.  `missing`
+    names the place a checkout would build into, so the remedy is one command.
+    """
+
+    if (repo_dist / "index.html").is_file():
+        return "repo", repo_dist
+    if (bundled / "index.html").is_file():
+        return "bundled", bundled
+    return "missing", repo_dist if repo_dist.parent.parent.is_dir() else bundled
+
+
+def default_web_root() -> Path:
+    """Where the canvas is served from: the checkout's build, else the wheel's."""
+
+    return canvas_origin()[1]
 
 
 def handler_for(
@@ -1394,10 +1416,12 @@ def serve(
         flush=True,
     )
     print(f"  api    http://{host}:{port}/v1/health", flush=True)
+    origin, _served = canvas_origin()
     print(
-        "  canvas ready"
+        f"  canvas {origin}"
         if (root / "index.html").is_file()
-        else "  canvas NOT BUILT — run: npm --prefix web ci && npm --prefix web run build",
+        else "  canvas NOT BUILT — run: npm --prefix web ci && npm --prefix web run build,"
+        " or install the wheel from tools/build_wheel.py",
         flush=True,
     )
     print(f"  state  {Path(state_dir).resolve()}", flush=True)

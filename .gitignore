@@ -14,6 +14,8 @@ dist/
 # Web frontend
 web/node_modules/
 web/dist/
+# The canvas copied into the package while a wheel is built (tools/build_wheel.py)
+src/richbuild/canvas/
 
 # Editor / tooling scratch
 *.swp

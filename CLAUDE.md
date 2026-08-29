@@ -8,6 +8,7 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 python -m pip install -e '.[test]'    # install (editable) with test deps
 npm --prefix web ci                   # frontend deps
 npm --prefix web run build            # frontend → web/dist, served by the Python server
+python tools/build_wheel.py           # canvas + wheel in dist/ (the wheel serves the canvas)
 
 # The offline suite — what CI runs. It never calls a model or a provider.
 # Needs `bwrap` on PATH: the sandbox-argv tests resolve it while building a

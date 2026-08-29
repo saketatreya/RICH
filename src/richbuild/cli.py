@@ -473,7 +473,7 @@ def _doctor() -> dict[str, Any]:
         sandbox_availability,
         trusted_node_pnpm_runtime,
     )
-    from .api import default_web_root
+    from .api import canvas_origin
 
     checks: list[dict[str, Any]] = []
 
@@ -559,12 +559,17 @@ def _doctor() -> dict[str, Any]:
             f"export {variable} to deploy previews to {what}",
             required=False,
         )
-    canvas = default_web_root() / "index.html"
+    origin, canvas = canvas_origin()
     check(
         "canvas",
-        canvas.is_file(),
-        str(canvas) if canvas.is_file() else f"not built at {canvas}",
-        "npm --prefix web ci && npm --prefix web run build",
+        origin != "missing",
+        (
+            f"{origin}: {canvas}"
+            if origin != "missing"
+            else f"not built at {canvas}"
+        ),
+        "npm --prefix web ci && npm --prefix web run build, or install the wheel "
+        "from tools/build_wheel.py, which carries the canvas",
         required=False,
     )
 
