@@ -71,6 +71,33 @@ jobs:
           kill %1
         working-directory: ${{ runner.temp }}
 
+  image:
+    # The image is the other thing an operator installs. Build it, run it the
+    # way the README says (port published to the host's loopback, state on a
+    # volume), and ask it the two questions that matter: does the canvas come
+    # up, and can Bubblewrap unshare a user namespace inside the container --
+    # first under Docker's default seccomp profile, then with it unconfined.
+    # The first answer is recorded; the second must be yes, or the README's
+    # run line is a lie.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker build -t rich:ci .
+      - run: |
+          docker run -d --name rich-default -p 127.0.0.1:8767:8767 -v rich-ci-state:/rich rich:ci
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8767/v1/health >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:8767/v1/health | grep -q '"status": *"ok"'
+          curl -sf http://127.0.0.1:8767/ | grep -q '<div id="root"'
+          echo "--- rich doctor under the default seccomp profile ---"
+          docker exec rich-default rich doctor | tee doctor-default.json | python3 -c "import json,sys; d=json.load(sys.stdin); [print(('ok ' if c['ok'] else 'NO ') + c['name'] + ': ' + c['detail']) for c in d['checks']]"
+          docker rm -f rich-default
+      - run: |
+          docker run -d --name rich-userns -p 127.0.0.1:8767:8767 -v rich-ci-state:/rich --security-opt seccomp=unconfined --security-opt apparmor=unconfined rich:ci
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8767/v1/health >/dev/null && break; sleep 1; done
+          echo "--- rich doctor with seccomp and apparmor unconfined ---"
+          docker exec rich-userns rich doctor | tee doctor-userns.json | python3 -c "import json,sys; d=json.load(sys.stdin); [print(('ok ' if c['ok'] else 'NO ') + c['name'] + ': ' + c['detail']) for c in d['checks']]; sys.exit(0 if all(c['ok'] for c in d['checks'] if c['required']) else 1)"
+          docker rm -f rich-userns
+
   web:
     runs-on: ubuntu-24.04
     steps:

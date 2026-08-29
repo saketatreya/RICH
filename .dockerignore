@@ -1,0 +1,9 @@
+.git
+.rich
+.github
+web/node_modules
+web/dist
+dist
+**/__pycache__
+*.egg-info
+docs/board/health.json

@@ -83,9 +83,29 @@ rich serve                                  # → http://127.0.0.1:8767 — API 
 ```
 
 The wheel carries the canvas, so an installed `rich serve` needs no Node
-toolchain to show the product; Node 22.23.2 and pnpm 10.34.5 under
-`/opt/rich-tools` are needed only to *build* software (`rich doctor` says
-exactly what is missing and how to get it).
+toolchain to show the product; Node 22.23.2 on `PATH` and pnpm 10.34.5 in the
+Corepack cache are needed only to *build* software (`rich doctor` says exactly
+what is missing and how to get it).
+
+### Or run the image
+
+```bash
+docker build -t rich .
+docker run --rm -p 127.0.0.1:8767:8767 -v rich-state:/rich \
+  -e ANTHROPIC_API_KEY \
+  --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  rich
+```
+
+The image holds Bubblewrap, the pinned Node and pnpm, Chromium's system
+libraries and the wheel; state and the dependency cache live on the volume.
+The port is published only to the host's loopback, and inside the container
+the server binds `0.0.0.0` with its Host and Origin checks enforced. Building
+software needs unprivileged user namespaces inside the container, which
+Docker's default seccomp profile blocks: hence the two `--security-opt`
+flags, which CI proves are sufficient (and records whether the default
+profile happens to allow it). `rich doctor` inside the container says either
+way.
 
 ### Run it from a checkout
 

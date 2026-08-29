@@ -18,6 +18,14 @@ tree a wheel could not install, so the program's releases are numbered 2.0,
   and runs everything downstream again. Owners out of attempts withhold the
   retry instead of spending it on the root. Step messages lose their ANSI
   colour codes.
+- **A container image.** `docker build -t rich .` produces an Ubuntu 24.04
+  image with Bubblewrap, the pinned Node and pnpm (in the Corepack cache the
+  executor reads), Chromium's system libraries and the wheel; state lives on
+  a volume, the port is published to the host's loopback, and inside the
+  container `rich serve --host 0.0.0.0 --published-on-loopback` enforces the
+  Host and Origin checks it could leave optional on loopback. CI runs the
+  image and asks `rich doctor` whether Bubblewrap works under Docker's default
+  seccomp profile and with it unconfined.
 - **The wheel carries the canvas.** `python tools/build_wheel.py` builds the
   canvas, packages it as data inside `richbuild/canvas`, and leaves the
   checkout clean; an installed `rich serve` needs no Node toolchain to show
