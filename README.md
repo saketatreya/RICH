@@ -153,6 +153,50 @@ The generated workspace, locked dependency store, and Chromium installation can
 exceed 2 GiB, so the explicit base directory avoids small RAM-backed `/tmp`
 filesystems.
 
+### Your first build
+
+Open `http://127.0.0.1:8767`, name a project, and describe the software in
+prose: what it is for, who uses it, what must be true. The interviewer asks
+what it still needs to know and writes the specification with you — every
+requirement readable, every scenario a list of steps in plain sentences
+("Open the page for this requirement", "Type ‘Buy milk’ into the field
+labelled ‘Todo’", "Expect to see ‘Buy milk’") that you edit with dropdowns,
+never JSON. **Approve** it; the approval binds that exact revision.
+
+The architect proposes the architecture as a graph of components, each with
+its requirements and a contract — operations with typed inputs and outputs,
+and the obligations that will be executed against the implementation. Ask
+for a redraft in prose if it is wrong; **approve** it when it is right.
+
+**Build** with one dollar figure. Prepare, scaffold and execute run as one
+action; the graph's nodes light up as each component is generated and then
+verified by independent gates (lint, types, unit tests, contract
+obligations, the build, and the browser scenarios you approved), the cost
+meter climbs, and the timeline reads in sentences. A failed gate names the
+step that failed in the words you approved and shows what the next attempt
+was told; a browser scenario that fails on a page another component owns
+reopens that component, not the one that ran the browser. Assurance shows
+every requirement and which gates proved it.
+
+### Getting it out
+
+A succeeded run offers the **release ZIP** — the exact bytes the gates
+verified, digest in the header — and **Push to GitHub**, which commits that
+same snapshot (never a working tree) as one deterministic commit on top of
+the branch; push the same run twice and the second is a no-op. With
+`NEON_API_TOKEN` and `VERCEL_TOKEN` set where `rich serve` runs, **Preview**
+deploys the identical snapshot to a Neon branch and a Vercel deployment,
+after its own approval, and tears it down on request.
+
+### Amending it
+
+Change a requirement in the conversation; a new specification revision is
+drafted for approval, and the architect redrafts the architecture carrying
+every untouched contract forward byte for byte. Before you commit money, the
+canvas shows what the change costs: which components must be rebuilt, which
+replay their memoized generation, and that every gate runs again either way.
+**Apply and build** does exactly that.
+
 ### What a run actually does
 
 ```text
