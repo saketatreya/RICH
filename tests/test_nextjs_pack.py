@@ -647,3 +647,49 @@ def test_the_verifier_accepts_the_underscore_convention_for_unused_arguments(
     assert '"@typescript-eslint/no-unused-vars"' in config
     assert 'argsIgnorePattern: "^_"' in config
     assert 'varsIgnorePattern: "^_"' in config
+
+
+def test_every_step_reads_as_the_sentence_the_canvas_shows():
+    """One fixture, two renderers: describe_step here and describeStep in
+    web/src/components/intent/steps.ts must say the same words, because the
+    Playwright step title is what a person reads when the step they approved
+    fails."""
+    import json
+    from pathlib import Path
+
+    from richbuild.models import AcceptanceStep
+    from richbuild.target_packs.nextjs import describe_step
+
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "step_sentences.json").read_text("utf-8")
+    )
+    assert len(fixture) >= 13
+    for entry in fixture:
+        assert describe_step(AcceptanceStep.from_dict(entry["step"])) == entry["sentence"]
+
+
+def test_scenario_steps_are_named_playwright_steps():
+    from richbuild.models import AcceptanceScenario
+    from richbuild.target_packs.nextjs import _playwright_oracle
+
+    scenario = AcceptanceScenario(
+        id="scenario.add",
+        title="Add an item",
+        given=(),
+        when=("They add it.",),
+        then=("It is there.",),
+        requirement_ids=("req.add",),
+        oracle=(
+            {"action": "open_requirement"},
+            {"action": "fill", "locator": {"kind": "label", "value": "New item"}, "value": "Buy milk"},
+            {"action": "assert_visible", "locator": {"kind": "text", "value": "Buy milk"}},
+        ),
+    )
+
+    compiled = _playwright_oracle(scenario, "add")
+
+    assert 'await test.step("1 · Open the page for this requirement", async () => {' in compiled
+    assert 'await test.step("2 · Type ‘Buy milk’ into the field labelled ‘New item’", async () => {' in compiled
+    assert 'await test.step("3 · Expect to see the text ‘Buy milk’", async () => {' in compiled
+    assert compiled.count("await test.step(") == 3
+    assert ".toBeVisible();" in compiled

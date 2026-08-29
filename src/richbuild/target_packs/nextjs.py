@@ -442,6 +442,66 @@ def _playwright_locator(locator: BrowserLocator) -> str:
     raise TargetPackError(f"unsupported browser locator {locator.kind.value!r}")
 
 
+def _quoted(value: str | None) -> str:
+    return f"\u2018{value or ''}\u2019"
+
+
+def _describe_locator(locator: BrowserLocator | None) -> str:
+    if locator is None:
+        return ""
+    if locator.kind is BrowserLocatorKind.ROLE:
+        return (
+            f"the {locator.value} named {_quoted(locator.name)}"
+            if locator.name
+            else f"the {locator.value}"
+        )
+    words = {
+        BrowserLocatorKind.LABEL: "the field labelled",
+        BrowserLocatorKind.TEXT: "the text",
+        BrowserLocatorKind.TEST_ID: "the element with test id",
+        BrowserLocatorKind.PLACEHOLDER: "the field with placeholder",
+    }
+    return f"{words[locator.kind]} {_quoted(locator.value)}"
+
+
+def describe_step(step: AcceptanceStep) -> str:
+    """One oracle step as the sentence a tester would say.
+
+    The canvas renders the same sentence (web/src/components/intent/steps.ts)
+    from the same data, and this titles the Playwright step, so a person who
+    approved "Expect to see 'Buy milk'" reads exactly that in the failure.
+    A fixture holds the two renderers to each other.
+    """
+
+    where = _describe_locator(step.locator)
+    action = step.action
+    if action is AcceptanceAction.OPEN_REQUIREMENT:
+        return "Open the page for this requirement"
+    if action is AcceptanceAction.NAVIGATE:
+        return f"Open {_quoted(step.value)}"
+    if action is AcceptanceAction.CLICK:
+        return f"Click {where}"
+    if action is AcceptanceAction.FILL:
+        return f"Type {_quoted(step.value)} into {where}"
+    if action is AcceptanceAction.PRESS:
+        return f"Press {_quoted(step.value)} in {where}"
+    if action is AcceptanceAction.KEYBOARD:
+        return f"Press {_quoted(step.value)}"
+    if action is AcceptanceAction.RELOAD:
+        return "Reload the page"
+    if action is AcceptanceAction.ASSERT_VISIBLE:
+        return f"Expect to see {where}"
+    if action is AcceptanceAction.ASSERT_FOCUSED:
+        return f"Expect focus on {where}"
+    if action is AcceptanceAction.ASSERT_TEXT:
+        return f"Expect {where} to say {_quoted(step.value)}"
+    if action is AcceptanceAction.ASSERT_VALUE:
+        return f"Expect {where} to hold {_quoted(step.value)}"
+    if action is AcceptanceAction.ASSERT_URL:
+        return f"Expect the path to be {_quoted(step.value)}"
+    raise TargetPackError(f"unsupported acceptance action {action.value!r}")
+
+
 def _playwright_oracle(
     scenario: AcceptanceScenario,
     requirement_route: str,
@@ -449,7 +509,7 @@ def _playwright_oracle(
     """Compile one approved, data-only browser oracle into protected test code."""
 
     statements: list[str] = []
-    for step in scenario.oracle:
+    for index, step in enumerate(scenario.oracle, start=1):
         action = step.action
         locator = (
             _playwright_locator(step.locator)
@@ -489,6 +549,14 @@ def _playwright_oracle(
             raise TargetPackError(
                 f"unsupported acceptance action {action.value!r}"
             )
+        # Each step is a named Playwright step, titled with the sentence the
+        # person approved, so a failure names the step in their words.
+        title = _typescript(f"{index} \u00b7 {describe_step(step)}")
+        statements[-1] = (
+            f"  await test.step({title}, async () => {{\n"
+            f"  {statements[-1]}\n"
+            "  });"
+        )
     return "\n".join(statements)
 
 
@@ -1130,10 +1198,11 @@ class NextJsTargetPack:
                 "});\n"
             ),
             "tests/e2e/rich-acceptance-reporter.ts": (
-                'import type { FullResult, Reporter, TestCase, TestResult } from "@playwright/test/reporter";\n'
+                'import type { FullResult, Reporter, TestCase, TestResult, TestStep } from "@playwright/test/reporter";\n'
                 "\n"
                 'const annotationType = "rich.acceptance-scenario";\n'
                 'const outputPrefix = "RICH_ACCEPTANCE_COVERAGE ";\n'
+                'const failuresPrefix = "RICH_ACCEPTANCE_FAILURES ";\n'
                 "\n"
                 "interface ReporterOptions {\n"
                 "  readonly context: {\n"
@@ -1146,6 +1215,7 @@ class NextJsTargetPack:
                 "\n"
                 "class RichAcceptanceReporter implements Reporter {\n"
                 "  private readonly passedScenarioIds = new Set<string>();\n"
+                "  private readonly failures: Array<{ scenario_id: string; step: string; message: string }> = [];\n"
                 "  private readonly context: ReporterOptions[\"context\"];\n"
                 "\n"
                 "  constructor(options: ReporterOptions) {\n"
@@ -1161,6 +1231,14 @@ class NextJsTargetPack:
                 "    }\n"
                 "  }\n"
                 "\n"
+                "  onStepEnd(test: TestCase, _result: TestResult, step: TestStep): void {\n"
+                '    if (step.category !== "test.step" || !step.error) return;\n'
+                "    const scenario = test.annotations.find((a) => a.type === annotationType)?.description ?? \"\";\n"
+                '    const message = String(step.error.message ?? "").split("\\n")[0].slice(0, 500);\n'
+                "    if (this.failures.some((f) => f.scenario_id === scenario && f.step === step.title)) return;\n"
+                "    this.failures.push({ scenario_id: scenario, step: step.title, message });\n"
+                "  }\n"
+                "\n"
                 "  onEnd(result: FullResult): void {\n"
                 '    const scenarioIds = result.status === "passed"\n'
                 "      ? [...this.passedScenarioIds].sort()\n"
@@ -1171,6 +1249,16 @@ class NextJsTargetPack:
                 "      scenario_ids: scenarioIds,\n"
                 "    };\n"
                 "    process.stdout.write(`${outputPrefix}${JSON.stringify(report)}\\n`);\n"
+                '    if (result.status !== "passed" && this.failures.length > 0) {\n'
+                "      // A second line, only on failure: which step failed, in the words the\n"
+                "      // person approved. The coverage line above is what the engine trusts.\n"
+                "      const failed = {\n"
+                '        schema_version: "rich.acceptance-failures/v1",\n'
+                "        context: this.context,\n"
+                "        failures: this.failures.slice(0, 40),\n"
+                "      };\n"
+                "      process.stdout.write(`${failuresPrefix}${JSON.stringify(failed)}\\n`);\n"
+                "    }\n"
                 "  }\n"
                 "}\n"
                 "\n"

@@ -1063,6 +1063,7 @@ export default function ControlPlane() {
 
         {prepared && spec && (
           <Assurance
+            runId={prepared.run.id}
             requirements={spec.spec.requirements}
             scenarios={spec.spec.acceptance_scenarios}
             events={events}

@@ -93,6 +93,8 @@ class ConcurrentExecutionError(RunEngineError):
 
 
 _ACCEPTANCE_COVERAGE_PREFIX = "RICH_ACCEPTANCE_COVERAGE "
+_ACCEPTANCE_FAILURES_PREFIX = "RICH_ACCEPTANCE_FAILURES "
+_MAX_FAILED_STEPS = 40
 _NONCE_RE = re.compile(r"^[a-f0-9]{64}$")
 DEFAULT_EXECUTION_LEASE_SECONDS = 60.0
 DEFAULT_EXECUTION_HEARTBEAT_SECONDS = 10.0
@@ -133,6 +135,45 @@ class AcceptanceCoverageContext:
             "attempt": self.attempt,
             "nonce": self.nonce,
         }
+
+
+def _observed_acceptance_failures(result: ExecutionResult) -> list[dict[str, str]]:
+    """Which steps a failed acceptance run named, in the words a person approved.
+
+    Lenient where the coverage parser is strict, and for the same reason: the
+    coverage line decides whether a run may publish success and is held to an
+    exact contract; this line only explains a failure, and a malformed one is
+    worth nothing rather than worth an error. Success semantics are untouched --
+    a passing run has no failures to report and none are read.
+    """
+
+    failures: list[dict[str, str]] = []
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(_ACCEPTANCE_FAILURES_PREFIX):
+            continue
+        try:
+            document = json.loads(line[len(_ACCEPTANCE_FAILURES_PREFIX) :])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(document, Mapping):
+            continue
+        for entry in document.get("failures") or []:
+            if not isinstance(entry, Mapping):
+                continue
+            failure = {
+                key: str(entry.get(key, ""))[:500]
+                for key in ("scenario_id", "step", "message")
+            }
+            already = any(
+                seen["scenario_id"] == failure["scenario_id"] and seen["step"] == failure["step"]
+                for seen in failures
+            )
+            if failure["step"] and not already:
+                failures.append(failure)
+            if len(failures) >= _MAX_FAILED_STEPS:
+                return failures
+    return failures
 
 
 def _observed_acceptance_coverage(
@@ -1116,6 +1157,7 @@ class _VerifiedCodingHandler:
                     command.expected_acceptance_scenario_ids
                 ),
                 "observed_acceptance_scenario_ids": [],
+                "failed_steps": [],
             }
         else:
             if result.passed:
@@ -1164,6 +1206,12 @@ class _VerifiedCodingHandler:
                 ),
                 "observed_acceptance_scenario_ids": list(
                     observed_scenario_ids
+                ),
+                "failed_steps": (
+                    _observed_acceptance_failures(result)
+                    if command.kind == EvidenceKind.ACCEPTANCE.value
+                    and status == "failed"
+                    else []
                 ),
             }
 

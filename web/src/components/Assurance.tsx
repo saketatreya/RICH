@@ -1,6 +1,13 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
-import type { AcceptanceScenario, Requirement, RunEvent } from '../lib/api'
+import { type AcceptanceScenario, type Requirement, type RunEvent, api } from '../lib/api'
+
+/** One step a failed acceptance run named, in the words the person approved. */
+interface FailedStep {
+  scenario_id: string
+  step: string
+  message: string
+}
 
 /**
  * What you asked for, and what proves it.
@@ -37,14 +44,52 @@ const LEVEL_LABEL: Record<Level, string> = {
 const NOT_EVIDENCE = new Set(['generation'])
 
 export default function Assurance({
+  runId,
   requirements,
   scenarios,
   events,
 }: {
+  runId: string
   requirements: Requirement[]
   scenarios: AcceptanceScenario[]
   events: RunEvent[]
 }) {
+  // A failed acceptance gate names the step that failed, in the sentence the
+  // person approved. That lives in the gate's result artifact; only failed
+  // acceptance evidence is fetched, and only the latest attempt's is shown.
+  const [failedSteps, setFailedSteps] = useState<Record<string, FailedStep[]>>({})
+  useEffect(() => {
+    const failed = events.filter(
+      (event) =>
+        event.event_type === 'evidence.recorded' &&
+        event.payload.kind === 'acceptance' &&
+        event.payload.status !== 'passed' &&
+        typeof event.payload.result_digest === 'string',
+    )
+    const latest = failed[failed.length - 1]
+    if (!latest) {
+      setFailedSteps({})
+      return
+    }
+    let cancelled = false
+    api
+      .artifact<{ failed_steps?: FailedStep[] }>(runId, String(latest.payload.result_digest))
+      .then((artifact) => {
+        if (cancelled) return
+        const byScenario: Record<string, FailedStep[]> = {}
+        for (const step of artifact.content?.failed_steps ?? []) {
+          ;(byScenario[step.scenario_id] ??= []).push(step)
+        }
+        setFailedSteps(byScenario)
+      })
+      .catch(() => {
+        // The evidence chips still say the gate failed; the step is a courtesy.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [events, runId])
+
   const proofs = useMemo<Proof[]>(() => {
     const observed = events
       .filter((event) => event.event_type === 'evidence.recorded')
@@ -131,7 +176,15 @@ export default function Assurance({
             {proof.scenarios.length > 0 && (
               <ul className="plane-proof-scenarios">
                 {proof.scenarios.map((scenario) => (
-                  <li key={scenario.id}>{scenario.title}</li>
+                  <li key={scenario.id}>
+                    {scenario.title}
+                    {(failedSteps[scenario.id] ?? []).map((failure, index) => (
+                      <div className="plane-failed-step" key={index}>
+                        <b>Failed at step</b> {failure.step}
+                        {failure.message && <small>{failure.message}</small>}
+                      </div>
+                    ))}
+                  </li>
                 ))}
               </ul>
             )}

@@ -1982,3 +1982,38 @@ def test_a_model_worker_cannot_self_certify_any_gate_even_as_non_blocking(kind):
 
     with pytest.raises(RunEngineError, match="self-certify"):
         handler(SimpleNamespace(is_cancelled=False))
+
+
+def test_a_failed_acceptance_names_its_failed_steps_leniently():
+    """The failures line explains; only the coverage line decides. So a good
+    line is read, a bad one is ignored, and a passing run has none."""
+    from richbuild.executor import ExecutionResult
+    from richbuild.run_engine import _observed_acceptance_failures
+
+    good = json.dumps(
+        {
+            "schema_version": "rich.acceptance-failures/v1",
+            "context": {},
+            "failures": [
+                {"scenario_id": "scenario.add", "step": "3 · Expect to see the text ‘Buy milk’", "message": "Timed out waiting for the text"},
+                {"scenario_id": "scenario.add", "step": "3 · Expect to see the text ‘Buy milk’", "message": "duplicate"},
+                "not an object",
+                {"step": ""},
+            ],
+        }
+    )
+    stdout = f"noise\nRICH_ACCEPTANCE_FAILURES {good}\nRICH_ACCEPTANCE_FAILURES not json\n"
+    result = ExecutionResult(argv=("pnpm",), returncode=1, stdout=stdout, stderr="", duration_seconds=1.0)
+
+    failures = _observed_acceptance_failures(result)
+
+    assert failures == [
+        {
+            "scenario_id": "scenario.add",
+            "step": "3 · Expect to see the text ‘Buy milk’",
+            "message": "Timed out waiting for the text",
+        }
+    ]
+    assert _observed_acceptance_failures(
+        ExecutionResult(argv=("pnpm",), returncode=0, stdout="clean\n", stderr="", duration_seconds=1.0)
+    ) == []

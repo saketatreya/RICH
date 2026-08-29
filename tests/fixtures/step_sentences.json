@@ -1,0 +1,15 @@
+[
+  {"step": {"action": "open_requirement"}, "sentence": "Open the page for this requirement"},
+  {"step": {"action": "navigate", "value": "/"}, "sentence": "Open ‘/’"},
+  {"step": {"action": "click", "locator": {"kind": "role", "value": "button", "name": "Add item"}}, "sentence": "Click the button named ‘Add item’"},
+  {"step": {"action": "click", "locator": {"kind": "role", "value": "link"}}, "sentence": "Click the link"},
+  {"step": {"action": "fill", "locator": {"kind": "label", "value": "New item"}, "value": "Buy milk"}, "sentence": "Type ‘Buy milk’ into the field labelled ‘New item’"},
+  {"step": {"action": "press", "locator": {"kind": "placeholder", "value": "Search"}, "value": "Enter"}, "sentence": "Press ‘Enter’ in the field with placeholder ‘Search’"},
+  {"step": {"action": "keyboard", "value": "Tab"}, "sentence": "Press ‘Tab’"},
+  {"step": {"action": "reload"}, "sentence": "Reload the page"},
+  {"step": {"action": "assert_visible", "locator": {"kind": "text", "value": "Buy milk"}}, "sentence": "Expect to see the text ‘Buy milk’"},
+  {"step": {"action": "assert_focused", "locator": {"kind": "label", "value": "New item"}}, "sentence": "Expect focus on the field labelled ‘New item’"},
+  {"step": {"action": "assert_text", "locator": {"kind": "test_id", "value": "count"}, "value": "3"}, "sentence": "Expect the element with test id ‘count’ to say ‘3’"},
+  {"step": {"action": "assert_value", "locator": {"kind": "label", "value": "Title"}, "value": "Dune"}, "sentence": "Expect the field labelled ‘Title’ to hold ‘Dune’"},
+  {"step": {"action": "assert_url", "value": "/done"}, "sentence": "Expect the path to be ‘/done’"}
+]
