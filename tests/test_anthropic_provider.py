@@ -570,3 +570,52 @@ def test_the_input_bound_measures_the_canonical_envelope_bytes():
 
     provider.generate(_request(max_input_tokens=exact))
     assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "status,declined",
+    [
+        (400, False),
+        (401, False),
+        (403, False),
+        (404, False),
+        # Worth asking again immediately, but the route is not declining work:
+        # a timeout, a conflict and an early request are all about this call.
+        (408, False),
+        (409, False),
+        (425, False),
+        # These are the route saying come back later.
+        (429, True),
+        (500, True),
+        (503, True),
+        (529, True),
+    ],
+)
+def test_only_a_rate_limit_or_an_overloaded_upstream_declines_the_route(
+    status, declined
+):
+    """`route_unavailable` is narrower than `retryable` on purpose. It is what
+    lets the scheduler give a task its attempt back, so it must mean the route
+    declined the work and nothing about the request was wrong."""
+
+    transport = RecordingTransport(AnthropicHTTPResponse(status, b"{}", {}))
+
+    with pytest.raises(ProviderFailure) as caught:
+        AnthropicMessagesProvider("key", transport=transport).generate(_request())
+
+    assert caught.value.route_unavailable is declined
+    assert caught.value.status_code == status
+
+
+def test_a_body_cannot_make_a_terminal_status_decline_the_route():
+    body = json.dumps(
+        {"type": "error", "error": {"type": "rate_limit_error", "message": "x"}}
+    ).encode()
+    transport = RecordingTransport(AnthropicHTTPResponse(400, body, {}))
+
+    with pytest.raises(ProviderFailure) as caught:
+        AnthropicMessagesProvider("key", transport=transport).generate(_request())
+
+    # The body is attacker-reachable through any intermediary. Letting it
+    # claim a rate limit would hand a caller the attempt-refund path.
+    assert caught.value.route_unavailable is False

@@ -370,3 +370,95 @@ def test_a_failed_attempt_records_why(monkeypatch):
     assert len(_redacted_failure(RuntimeError("x" * 5000))) <= 300
     assert _redacted_failure(RuntimeError("")) == "RuntimeError"
     assert _redacted_failure(RuntimeError("a\n  b")) == "a b"
+
+
+def test_a_declined_route_reaches_the_event_and_carries_which_route_declined():
+    """The gateway is the only layer that knows which route answered, and the
+    failure event is where the surface reads what a refusal cost. Both keys
+    travel; neither is inferred from anything the model wrote."""
+
+    provider = ScriptedProvider(
+        [
+            ProviderFailure(
+                "Claude Code reported a failed session (HTTP 429)",
+                retryable=True,
+                usage=None,
+                route_unavailable=True,
+                status_code=429,
+            )
+        ]
+    )
+    events = []
+    gateway = ModelGateway(
+        [provider],
+        _ledger(),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    with pytest.raises(ProviderFailure) as caught:
+        gateway.generate(_request())
+
+    assert caught.value.route_unavailable is True
+    assert caught.value.route == "fake", "the gateway names the route that answered"
+    payload = next(p for event, p in events if event == "model.attempt.failed")
+    assert payload["route_unavailable"] is True
+    assert payload["retryable"] is True
+
+
+def test_an_ordinary_failure_does_not_claim_the_route_declined():
+    provider = ScriptedProvider(
+        [ProviderFailure("invalid structured output", retryable=True)]
+    )
+    events = []
+    gateway = ModelGateway(
+        [provider],
+        _ledger(),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    with pytest.raises(ProviderFailure):
+        gateway.generate(_request())
+
+    payload = next(p for event, p in events if event == "model.attempt.failed")
+    assert payload["route_unavailable"] is False
+    assert payload["retryable"] is True
+
+
+def test_an_overspent_reservation_cannot_also_claim_the_route_declined():
+    """Both flags are cleared together when reported usage exceeds what was
+    reserved. Otherwise a provider could overspend and still hand the caller
+    the path that gives the attempt back -- paying twice for the same budget."""
+
+    provider = ScriptedProvider(
+        [
+            ProviderFailure(
+                "Claude Code reported a failed session (HTTP 429)",
+                retryable=True,
+                usage=Usage(
+                    model_attempts=1,
+                    input_tokens=10**9,
+                    output_tokens=10**9,
+                    cost_usd=Decimal("999"),
+                    execution_seconds=1,
+                ),
+                route_unavailable=True,
+                status_code=429,
+            )
+        ]
+    )
+    events = []
+    gateway = ModelGateway(
+        [provider],
+        _ledger(),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    with pytest.raises(ProviderFailure) as caught:
+        gateway.generate(_request())
+
+    assert "exceeded the reserved maximum" in str(caught.value)
+    assert caught.value.route_unavailable is False
+    payload = next(p for event, p in events if event == "model.attempt.failed")
+    assert payload["reported_usage_exceeded_reservation"] is True
+    assert payload["route_unavailable"] is False
+    assert payload["retryable"] is False

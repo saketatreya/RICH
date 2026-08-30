@@ -540,3 +540,63 @@ def test_the_real_cli_answers_with_a_structured_document(tmp_path):
     # complete even when no invoice arrives per call.
     assert response.usage.cost_usd > 0
     assert response.usage.output_tokens > 0
+
+
+def test_a_declined_session_is_named_as_the_route_declining_not_a_bad_request(
+    credential,
+):
+    """A spent five-hour subscription window arrives as a 429. The fourth M4
+    live drive spent all four of a task's attempts on four of them in six
+    seconds. The attempt budget buys generation quality; a route saying "come
+    back later" is not a bad attempt, and the adapter is the only layer that
+    can say so from a transport status rather than from a body."""
+
+    for status in (429, 500, 529):
+        envelope = _envelope(
+            is_error=True,
+            subtype="error_during_execution",
+            api_error_status=status,
+            total_cost_usd=0,
+            modelUsage={},
+            result="",
+        )
+        with pytest.raises(ProviderFailure) as caught:
+            _provider(credential, RecordingRunner(envelope)).generate(_request())
+        assert caught.value.route_unavailable is True, status
+        assert caught.value.retryable is True, status
+        assert caught.value.status_code == status
+
+
+def test_a_refusal_the_customer_must_fix_is_not_a_declined_route(credential):
+    """The distinction has to hold in both directions. Sending any of these to
+    "wait for your limit to reset" would send a customer to wait for something
+    that is never going to change on its own."""
+
+    # A tool-free worker that reached for a tool is a firewall breach.
+    denials = _envelope(permission_denials=[{"tool_name": "Bash"}])
+    with pytest.raises(ProviderFailure) as denied:
+        _provider(credential, RecordingRunner(denials)).generate(_request())
+    assert denied.value.route_unavailable is False
+    assert denied.value.retryable is False
+
+    # A truncated answer is the model's, not the route's.
+    cut = _envelope(stop_reason="max_tokens")
+    with pytest.raises(ProviderFailure) as incomplete:
+        _provider(credential, RecordingRunner(cut)).generate(_request())
+    assert incomplete.value.route_unavailable is False
+    assert incomplete.value.retryable is False
+
+    # A failed session with a client-error status is a bad request.
+    bad = _envelope(
+        is_error=True,
+        subtype="error_during_execution",
+        api_error_status=400,
+        total_cost_usd=0,
+        modelUsage={},
+        result="",
+    )
+    with pytest.raises(ProviderFailure) as refused:
+        _provider(credential, RecordingRunner(bad)).generate(_request())
+    assert refused.value.route_unavailable is False
+    assert refused.value.retryable is False
+    assert refused.value.status_code == 400

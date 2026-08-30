@@ -404,12 +404,16 @@ class ClaudeCodeCliProvider:
             )
         status = envelope.get("api_error_status")
         if envelope.get("is_error") or envelope.get("subtype") != "success":
-            retryable = isinstance(status, int) and (status == 429 or status >= 500)
+            declined = isinstance(status, int) and (status == 429 or status >= 500)
             raise ProviderFailure(
                 f"Claude Code reported a failed session{_status_suffix(status)}",
-                retryable=retryable,
+                retryable=declined,
                 usage=usage,
                 request_was_sent=True,
+                # A spent subscription window arrives here as a 429. The
+                # session was not wrong; it was declined.
+                route_unavailable=declined,
+                status_code=status if isinstance(status, int) else None,
             )
         stop_reason = envelope.get("stop_reason")
         if stop_reason not in (None, "end_turn"):

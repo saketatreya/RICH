@@ -470,6 +470,11 @@ class AnthropicMessagesProvider:
             f"Anthropic request failed (HTTP {status}){suffix}",
             retryable=retryable,
             request_was_sent=True,
+            # Narrower than retryable on purpose: 408, 409 and 425 are worth
+            # asking again immediately, but only a rate limit or an overloaded
+            # upstream means the route itself is declining work.
+            route_unavailable=status == 429 or status >= 500,
+            status_code=status,
         )
 
     @staticmethod

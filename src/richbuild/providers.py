@@ -120,7 +120,17 @@ class ModelResponse:
 
 
 class ProviderFailure(RuntimeError):
-    """Provider call failed; usage may be supplied when the provider reported it."""
+    """Provider call failed; usage may be supplied when the provider reported it.
+
+    ``retryable`` says asking again might work. ``route_unavailable`` says
+    something stronger and narrower: the route declined the work, and nothing
+    about the request was wrong -- a rate limit, a spent subscription window,
+    an overloaded upstream. Only a trusted adapter observing a transport status
+    sets it, never a body and never model-authored prose, and it defaults to
+    False so that a refusal a customer must actually fix -- a prompt over the
+    limit, a cost ceiling below the reservation -- is never sent to "wait for
+    your limit to reset".
+    """
 
     def __init__(
         self,
@@ -129,11 +139,18 @@ class ProviderFailure(RuntimeError):
         retryable: bool,
         usage: Usage | None = None,
         request_was_sent: bool = True,
+        route_unavailable: bool = False,
+        status_code: int | None = None,
     ):
         super().__init__(message)
         self.retryable = retryable
         self.usage = usage
         self.request_was_sent = request_was_sent
+        self.route_unavailable = route_unavailable
+        self.status_code = status_code
+        # Filled in by the gateway, which is the only layer that knows which
+        # route answered.
+        self.route: str | None = None
 
 
 class ModelUsageRecoveryError(ValueError):
@@ -233,6 +250,7 @@ class ModelGateway:
                 response = provider.generate(request)
             except ProviderFailure as exc:
                 last_error = exc
+                exc.route = request.provider
                 reservation_exceeded = False
                 if not exc.request_was_sent:
                     self._ledger.release(reservation_id)
@@ -265,6 +283,9 @@ class ModelGateway:
                     "settled_usage": settled.to_mapping(),
                     "retryable": (
                         False if reservation_exceeded else exc.retryable
+                    ),
+                    "route_unavailable": (
+                        False if reservation_exceeded else exc.route_unavailable
                     ),
                     "usage_known": usage_known,
                     "request_was_sent": exc.request_was_sent,
