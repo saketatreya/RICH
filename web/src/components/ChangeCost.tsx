@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { api, type ChangePlan, type ChangeRevisions } from '../lib/api'
 
@@ -10,9 +10,16 @@ import { api, type ChangePlan, type ChangeRevisions } from '../lib/api'
  * that touches and which are untouched — and the answer is derived from the
  * contracts, not guessed.
  *
- * Planning is a read. Applying withdraws permission to replay the stale
- * components' last answers, and nothing else: it cannot touch evidence,
- * because evidence is never replayed in the first place.
+ * Planning is a read: it compares two approved revisions and calls no model,
+ * so the cost appears as soon as there are two designs to compare rather than
+ * waiting to be asked for. The M4 drive found the alternative -- a customer
+ * who had approved a redraft was offered Build beside a panel that named a
+ * cost it had not computed, and would have committed the money without ever
+ * being shown what it bought.
+ *
+ * Applying withdraws permission to replay the stale components' last answers,
+ * and nothing else: it cannot touch evidence, because evidence is never
+ * replayed in the first place.
  */
 
 interface Props {
@@ -67,6 +74,29 @@ export default function ChangeCost({ projectId, revisions, onApplyAndBuild, busy
     }
   }
 
+  // One automatic computation per approved pair. `planned` remembers which
+  // pair was asked about, so approving a further redraft recomputes and a
+  // re-render does not.
+  const planned = useRef<string | null>(null)
+  const pair = revisions
+    ? [
+        revisions.fromSpec,
+        revisions.toSpec,
+        revisions.fromArchitecture,
+        revisions.toArchitecture,
+      ].join('|')
+    : null
+
+  useEffect(() => {
+    if (!revisions || !pair || planned.current === pair) return
+    planned.current = pair
+    setPlan(null)
+    void run('plan', () => api.planChange(projectId, revisions))
+    // `run` is stable for the life of the component and `projectId` cannot
+    // change without the pair changing with it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pair])
+
   const change = plan?.change
   const applied = plan?.forgotten !== undefined
 
@@ -106,7 +136,7 @@ export default function ChangeCost({ projectId, revisions, onApplyAndBuild, busy
             disabled={!!busy}
             onClick={() => run('plan', () => api.planChange(projectId, revisions))}
           >
-            {busy === 'plan' ? 'Computing…' : 'Compute the cost'}
+            {busy === 'plan' ? 'Computing…' : 'Compute again'}
           </button>
           {change && change.stale.length > 0 && !applied && (
             <button
