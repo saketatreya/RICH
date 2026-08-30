@@ -63,7 +63,7 @@ from .executor import (
     cache_mounts_for,
 )
 from .models import ArchitectureSpec, EvidenceKind, NodeKind, ProjectSpec
-from .providers import ModelGateway
+from .providers import ModelGateway, ProviderFailure
 from .preview import (
     MigrationDigest,
     PreviewError,
@@ -75,6 +75,7 @@ from .scheduler import (
     CancellationToken,
     DagScheduler,
     ProducedArtifact,
+    RouteUnavailable,
     SchedulerReport,
     TaskContext,
     TaskEvidence,
@@ -650,6 +651,14 @@ class RunEngineConfig:
     max_provider_attempts: int = 1
     task_timeout_seconds: float = 600.0
     retry_backoff_seconds: float = 0.0
+    # A route that declines the work hands the attempt back rather than
+    # spending it. Two waits per task, thirty seconds apart: enough to ride
+    # out a momentary rate limit, nowhere near enough to sit through a spent
+    # five-hour subscription window pretending to make progress. Beyond that
+    # the run fails, legibly, with every verified component still memoized so
+    # building again is cheap.
+    max_route_waits: int = 2
+    route_backoff_seconds: float = 30.0
     lint_argv: tuple[str, ...] = ("pnpm", "run", "lint")
     static_argv: tuple[str, ...] = ("pnpm", "run", "typecheck")
     unit_argv: tuple[str, ...] = ("pnpm", "run", "test")
@@ -701,9 +710,16 @@ class RunEngineConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if (
+            isinstance(self.max_route_waits, bool)
+            or not isinstance(self.max_route_waits, int)
+            or self.max_route_waits < 0
+        ):
+            raise ValueError("max_route_waits must be a non-negative integer")
         for name in (
             "task_timeout_seconds",
             "retry_backoff_seconds",
+            "route_backoff_seconds",
             "execution_lease_seconds",
             "execution_heartbeat_seconds",
         ):
@@ -714,7 +730,8 @@ class RunEngineConfig:
                 or not math.isfinite(value)
                 or value < 0
                 or (
-                    name != "retry_backoff_seconds"
+                    name
+                    not in ("retry_backoff_seconds", "route_backoff_seconds")
                     and value == 0
                 )
             ):
@@ -1318,7 +1335,19 @@ class _VerifiedCodingHandler:
     def __call__(self, context: TaskContext) -> TaskResult:
         if context.is_cancelled:
             raise RunEngineError("task was canceled before generation")
-        generated = self.model_worker(context)
+        try:
+            generated = self.model_worker(context)
+        except ProviderFailure as exc:
+            if exc.route_unavailable:
+                # Translated here, at the seam that already imports both
+                # layers, so the scheduler never imports a provider module and
+                # the classification cannot be forged by anything downstream.
+                raise RouteUnavailable(
+                    str(exc)[:300],
+                    route=exc.route or "unknown",
+                    status_code=exc.status_code,
+                ) from exc
+            raise
         if context.is_cancelled:
             raise RunEngineError("task was canceled before verification")
         if generated is None:
@@ -2273,6 +2302,8 @@ class RunEngine:
             max_attempts=self.config.max_task_attempts,
             timeout_seconds=self.config.task_timeout_seconds,
             retry_backoff_seconds=self.config.retry_backoff_seconds,
+            max_route_waits=self.config.max_route_waits,
+            route_backoff_seconds=self.config.route_backoff_seconds,
             required_evidence_kinds=(
                 EvidenceKind.STATIC.value,
                 EvidenceKind.UNIT.value,
@@ -2283,6 +2314,8 @@ class RunEngine:
             max_attempts=self.config.max_task_attempts,
             timeout_seconds=self.config.task_timeout_seconds,
             retry_backoff_seconds=self.config.retry_backoff_seconds,
+            max_route_waits=self.config.max_route_waits,
+            route_backoff_seconds=self.config.route_backoff_seconds,
             required_evidence_kinds=(
                 EvidenceKind.LINT.value,
                 EvidenceKind.STATIC.value,

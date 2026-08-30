@@ -19,6 +19,7 @@ from richbuild.models import (
     Requirement,
 )
 from richbuild.scheduler import (
+    RouteUnavailable,
     CancellationToken,
     DagScheduler,
     ProducedArtifact,
@@ -1039,6 +1040,145 @@ def test_a_restored_retry_deadline_cannot_outlive_the_backoff_that_set_it(
     scheduler._restore_retry_deadlines(restored)
 
     assert restored[durable_id] - time.monotonic() <= 0.25 + 0.05
+
+
+def test_a_declined_route_hands_the_attempt_back_instead_of_spending_it(tmp_path):
+    """The fourth M4 live drive died in 42 seconds without reaching a model:
+    the subscription window had closed, and four HTTP 429s spent all four of a
+    task's attempts in six seconds. Attempts buy generation quality. A route
+    that will not answer has told us nothing about the software."""
+
+    tasks = (_task("solo", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+    seen: list[int] = []
+
+    def handler(context):
+        seen.append(context.attempt)
+        if context.attempt <= 2:
+            raise RouteUnavailable(
+                "Claude Code reported a failed session (HTTP 429)",
+                route="anthropic-claude-code",
+                status_code=429,
+            )
+        return _verified_result(context, summary="answered at last")
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": handler},
+        default_policy=TaskPolicy(
+            max_attempts=2, max_route_waits=2, route_backoff_seconds=0.05
+        ),
+    ).run()
+
+    # Two refusals and one real answer, on a budget of two attempts. Without
+    # the refund the second refusal would have exhausted the task.
+    assert seen == [1, 2, 3]
+    assert report.succeeded
+    events = [e for e in store.list_events(run["id"])]
+    withdrawn = [e for e in events if e["event_type"] == "task.attempt_withdrawn"]
+    assert len(withdrawn) == 2
+    assert withdrawn[0]["payload"]["status_code"] == 429
+    assert withdrawn[0]["payload"]["route"] == "anthropic-claude-code"
+    assert withdrawn[0]["payload"]["reason_class"] == "route_unavailable"
+    assert "was not spent" in withdrawn[0]["payload"]["summary"]
+    assert [e["payload"]["withdrawn_total"] for e in withdrawn] == [1, 2]
+    # Nothing was observed about the software, so nothing is recorded as if it
+    # had been.
+    assert not [e for e in events if e["event_type"] == "task.failed"]
+    assert not [e for e in events if e["event_type"] == "evidence.recorded"
+                and e["payload"].get("status") == "error"]
+
+
+def test_route_waits_are_bounded_and_the_bound_survives_a_restart(tmp_path):
+    """The wait must not become a way to sit through a five-hour window
+    pretending to make progress, and a resume must not refill it: the count is
+    recomputed from durable events at the start of every execution."""
+
+    tasks = (_task("solo", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+    calls: list[int] = []
+
+    def always_declined(context):
+        calls.append(context.attempt)
+        raise RouteUnavailable(
+            "Claude Code reported a failed session (HTTP 429)",
+            route="anthropic-claude-code",
+            status_code=429,
+        )
+
+    policy = TaskPolicy(
+        max_attempts=3, max_route_waits=2, route_backoff_seconds=0.01
+    )
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": always_declined},
+        default_policy=policy,
+    ).run()
+
+    # Two refunds, then the third refusal is spent as a real attempt and the
+    # task fails with the route's own words rather than an exception class.
+    assert not report.succeeded
+    withdrawn = [
+        e for e in store.list_events(run["id"])
+        if e["event_type"] == "task.attempt_withdrawn"
+    ]
+    assert len(withdrawn) == 2
+    failed = [
+        e for e in store.list_events(run["id"])
+        if e["event_type"] == "task.failed"
+    ]
+    assert failed, "the run must end, not spin"
+    assert "HTTP 429" in failed[-1]["payload"]["summary"]
+    assert "handler raised" not in failed[-1]["payload"]["summary"]
+
+    # A fresh scheduler over the same durable run recounts the withdrawals it
+    # already granted rather than starting from zero.
+    resumed = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": always_declined},
+        default_policy=policy,
+    )
+    assert resumed._count_withdrawals() == {
+        f"{run['id']}:{plan.tasks[0].task_id}": 2
+    }
+
+
+def test_only_the_named_exception_can_claim_the_attempt_back(tmp_path):
+    """An arbitrary exception that happens to carry the right attributes must
+    not buy the exemption -- the check is isinstance, never getattr."""
+
+    tasks = (_task("solo", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+
+    class LooksLikeOne(RuntimeError):
+        route = "anthropic-claude-code"
+        status_code = 429
+        route_unavailable = True
+
+    def handler(context):
+        raise LooksLikeOne("Claude Code reported a failed session (HTTP 429)")
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": handler},
+        default_policy=TaskPolicy(
+            max_attempts=1, max_route_waits=2, route_backoff_seconds=0.01
+        ),
+    ).run()
+
+    assert not report.succeeded
+    assert not [
+        e for e in store.list_events(run["id"])
+        if e["event_type"] == "task.attempt_withdrawn"
+    ]
 
 
 def test_a_task_waiting_out_its_backoff_is_waited_for_not_stranded(tmp_path):

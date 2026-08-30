@@ -65,6 +65,27 @@ class SchedulerError(RuntimeError):
     """The durable run and compiled plan cannot be scheduled safely."""
 
 
+class RouteUnavailable(RuntimeError):
+    """The model route declined the work; nothing about the request was wrong.
+
+    Raised only by the seam that already sees both layers, from a
+    ``ProviderFailure`` a trusted adapter classified. The scheduler tests
+    ``isinstance`` and never ``getattr``, so an arbitrary exception cannot
+    claim the attempt back by growing an attribute.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        route: str,
+        status_code: int | None = None,
+    ):
+        super().__init__(message)
+        self.route = route
+        self.status_code = status_code
+
+
 @dataclass(frozen=True, slots=True)
 class TaskPolicy:
     """Attempt and deadline policy for one task or the scheduler default."""
@@ -72,6 +93,11 @@ class TaskPolicy:
     max_attempts: int = 1
     timeout_seconds: float | None = None
     retry_backoff_seconds: float = 0.0
+    # How many times a task may have an attempt handed back because the route
+    # declined the work. Zero by default: the bare scheduler behaves exactly as
+    # it always has, and the run engine opts in.
+    max_route_waits: int = 0
+    route_backoff_seconds: float = 30.0
     required_evidence_kinds: tuple[str, ...] = ()
     required_artifact_roles: tuple[str, ...] = ("source",)
     required_acceptance_scenario_ids: tuple[str, ...] = ()
@@ -97,6 +123,19 @@ class TaskPolicy:
             or self.retry_backoff_seconds < 0
         ):
             raise ValueError("retry_backoff_seconds must be non-negative")
+        if (
+            isinstance(self.max_route_waits, bool)
+            or not isinstance(self.max_route_waits, int)
+            or self.max_route_waits < 0
+        ):
+            raise ValueError("max_route_waits must be a non-negative integer")
+        if (
+            isinstance(self.route_backoff_seconds, bool)
+            or not isinstance(self.route_backoff_seconds, (int, float))
+            or not math.isfinite(self.route_backoff_seconds)
+            or self.route_backoff_seconds < 0
+        ):
+            raise ValueError("route_backoff_seconds must be non-negative")
         object.__setattr__(
             self,
             "required_evidence_kinds",
@@ -353,6 +392,9 @@ class _WorkerResult:
     result: TaskResult | None = None
     error_type: str | None = None
     error_message: str | None = None
+    route_unavailable: bool = False
+    route: str | None = None
+    status_code: int | None = None
 
 
 
@@ -452,6 +494,10 @@ class DagScheduler:
         self.idle_poll_seconds = idle_poll_seconds
         self.cancellation_grace_seconds = cancellation_grace_seconds
         self._results: queue.Queue[_WorkerResult] = queue.Queue()
+        # Attempts handed back because the route declined the work, per durable
+        # task id. Recounted from events at the start of every execution, so a
+        # crash or a resume can only ever over-count -- which fails closed.
+        self._withdrawn: dict[str, int] = {}
         self._compiled_by_node = {task.node_id: task for task in plan.tasks}
         self._durable_ids = {
             task.node_id: f"{run_id}:{task.task_id}" for task in plan.tasks
@@ -550,6 +596,10 @@ class DagScheduler:
         worker_keys: set[tuple[str, int]] = set()
         abandoned_workers: dict[tuple[str, int], float] = {}
         retry_not_before: dict[str, float] = {}
+        # Recounted from durable events, unconditionally and before recovery,
+        # which schedules retries that read it. A resume that reset this would
+        # let a run buy fresh waits forever by restarting.
+        self._withdrawn = self._count_withdrawals()
         if resumed:
             self._recover_interrupted(retry_not_before)
             self._restore_retry_deadlines(retry_not_before)
@@ -789,6 +839,107 @@ class DagScheduler:
                     )
                     changed = True
 
+    def _count_withdrawals(self) -> dict[str, int]:
+        """How many attempts each task has already had handed back.
+
+        Read from the durable event log rather than carried in memory, so the
+        bound survives a crash, a resume and a fresh process. Over-counting is
+        the safe direction and the write order guarantees it.
+        """
+
+        counts: dict[str, int] = {}
+        after_sequence = 0
+        while True:
+            events = self.store.list_events(
+                self.run_id, after_sequence=after_sequence, limit=1000
+            )
+            if not events:
+                break
+            for event in events:
+                if (
+                    event["event_type"] == "task.attempt_withdrawn"
+                    and event["task_id"] is not None
+                ):
+                    counts[event["task_id"]] = counts.get(event["task_id"], 0) + 1
+            after_sequence = int(events[-1]["sequence"])
+            if len(events) < 1000:
+                break
+        return counts
+
+    def _spent_attempts(self, durable_task_id: str, attempt: int) -> int:
+        """Attempts this task actually spent on generation.
+
+        ``tasks.attempt`` is identity -- source transactions, evidence
+        selection and the release proof all key on it -- so it keeps
+        increasing. Exhaustion is counted against this instead: the same
+        number, minus the ones the route declined to answer.
+        """
+
+        return attempt - self._withdrawn.get(durable_task_id, 0)
+
+    def _withdraw_attempt(
+        self,
+        attempt: _RunningAttempt,
+        *,
+        detail: str,
+        route: str,
+        status_code: int | None,
+        retry_not_before: dict[str, float],
+    ) -> None:
+        """Hand an attempt back because the route declined the work.
+
+        No evidence is written: nothing about the software was observed. The
+        task returns to ``ready`` through ``blocked`` because the store has no
+        ``running -> ready`` transition, and because reaching ``ready`` without
+        passing through ``failed`` is the whole point -- a failure record here
+        would be a blocking execution error that the release proof and the
+        retry feedback then have to reason about.
+        """
+
+        durable_id = attempt.durable_task_id
+        policy = self._policy_for(attempt.compiled_task)
+        used = self._withdrawn.get(durable_id, 0)
+        backoff = policy.route_backoff_seconds
+        status = f" (HTTP {status_code})" if status_code else ""
+        summary = (
+            f"the model route declined the work{status}; attempt "
+            f"{attempt.attempt} was not spent, and the next ask is in "
+            f"{backoff:.0f}s"
+        )
+        # Appended before anything else. A crash in any later gap then
+        # over-counts this withdrawal -- the task runs out of waits sooner --
+        # rather than forgiving it and buying a free one.
+        self._append_event(
+            self.run_id,
+            "task.attempt_withdrawn",
+            {
+                "attempt": attempt.attempt,
+                "node_id": attempt.compiled_task.node_id,
+                "route": route,
+                "status_code": status_code,
+                "reason_class": "route_unavailable",
+                "reason": detail,
+                "summary": summary,
+                "withdrawn_total": used + 1,
+                "backoff_seconds": backoff,
+                "not_before_epoch": time.time() + backoff,
+            },
+            task_id=durable_id,
+        )
+        self._withdrawn[durable_id] = used + 1
+        try:
+            self._set_task_status(
+                durable_id, "blocked", expected_status="running"
+            )
+        except RevisionConflict:
+            # A cancellation can win a race with a worker result, as in
+            # _fail_attempt.
+            if self.store.get_task(durable_id)["status"] == "canceled":
+                return
+            raise
+        self._set_task_status(durable_id, "ready", expected_status="blocked")
+        retry_not_before[durable_id] = time.monotonic() + backoff
+
     def _restore_retry_deadlines(
         self, retry_not_before: dict[str, float]
     ) -> None:
@@ -961,11 +1112,17 @@ class DagScheduler:
                 result=result,
             )
         except BaseException as exc:  # worker must always report terminal output
+            # `isinstance`, never `getattr`: an arbitrary exception must not be
+            # able to claim the attempt back by carrying the right attribute.
+            declined = isinstance(exc, RouteUnavailable)
             envelope = _WorkerResult(
                 task_id=context.task_id,
                 attempt=context.attempt,
                 error_type=type(exc).__name__,
                 error_message=str(exc)[:2000],
+                route_unavailable=declined,
+                route=exc.route if declined else None,
+                status_code=exc.status_code if declined else None,
             )
         self._results.put(envelope)
 
@@ -1015,10 +1172,36 @@ class DagScheduler:
         running.pop(envelope.task_id, None)
 
         if envelope.error_type is not None:
+            policy = self._policy_for(attempt.compiled_task)
+            if envelope.route_unavailable and (
+                self._withdrawn.get(attempt.durable_task_id, 0)
+                < policy.max_route_waits
+            ):
+                self._withdraw_attempt(
+                    attempt,
+                    detail=(
+                        envelope.error_message or "the model route is unavailable"
+                    )[:300],
+                    route=envelope.route or "unknown",
+                    status_code=envelope.status_code,
+                    retry_not_before=retry_not_before,
+                )
+                return
+            # `handler raised ProviderFailure` names the class and discards the
+            # sentence, which the next line then puts in the details nobody
+            # reads. A live run failed three times saying exactly that while
+            # the messages were "provider-reported usage exceeded the reserved
+            # maximum" and "Claude Code invocation timed out".
+            message = (envelope.error_message or "").strip()
+            summary = (
+                f"{message[:280]}…"
+                if len(message) > 280
+                else message or f"handler raised {envelope.error_type}"
+            )
             self._fail_attempt(
                 attempt,
                 status="error",
-                summary=f"handler raised {envelope.error_type}",
+                summary=summary,
                 details={
                     "error_type": envelope.error_type,
                     "message": envelope.error_message or "",
@@ -1305,7 +1488,7 @@ class DagScheduler:
                 return
             raise
         will_retry = decision.plain_retry and (
-            attempt.attempt
+            self._spent_attempts(attempt.durable_task_id, attempt.attempt)
             < self._policy_for(attempt.compiled_task).max_attempts
         )
         payload: dict[str, Any] = {
@@ -1387,7 +1570,12 @@ class DagScheduler:
                 ignored.append(node_id)
                 continue
             policy = self._policy_for(self.plan.task_index[node_id])
-            if int(record["attempt"]) >= policy.max_attempts:
+            # The owner's own clock, not the failing task's: this asks whether
+            # the node being reopened has generation attempts left.
+            if (
+                self._spent_attempts(record["id"], int(record["attempt"]))
+                >= policy.max_attempts
+            ):
                 exhausted.append(node_id)
                 continue
             reopen.append(node_id)
@@ -1536,9 +1724,9 @@ class DagScheduler:
         retry_not_before: dict[str, float],
     ) -> None:
         policy = self._policy_for(task)
-        if attempt >= policy.max_attempts:
-            return
         durable_id = self._durable_ids[task.node_id]
+        if self._spent_attempts(durable_id, attempt) >= policy.max_attempts:
+            return
         self._set_task_status(
             durable_id, "ready", expected_status="failed"
         )

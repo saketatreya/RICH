@@ -26,6 +26,7 @@ _DETAILED = frozenset(
         "task.reopened",
         "task.superseded",
         "task.retry_withheld",
+        "task.attempt_withdrawn",
         "task.attribution_ignored",
         "model.attempt.failed",
     }
@@ -91,6 +92,14 @@ def _detail(event: Mapping[str, Any]) -> str:
     if event["event_type"] == "task.retry_withheld":
         owners = ", ".join(payload.get("exhausted_node_ids") or [])
         return f"no retry: {owners} own what failed and have no attempts left"
+    if event["event_type"] == "task.attempt_withdrawn":
+        status = payload.get("status_code")
+        return (
+            "the model route declined"
+            + (f" (HTTP {status})" if status else "")
+            + f"; attempt {payload.get('attempt', '?')} was not spent, "
+            f"asking again in {payload.get('backoff_seconds', '?')}s"
+        )
     if event["event_type"] == "task.attribution_ignored":
         owners = ", ".join(payload.get("node_ids") or [])
         return f"attribution to {owners} ignored: {payload.get('reason', '')}"

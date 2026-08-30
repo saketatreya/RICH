@@ -165,3 +165,29 @@ def test_a_reopened_task_says_why_and_a_superseded_one_says_what_it_waits_for():
         _event(6, "task.retry_withheld", {"exhausted_node_ids": ["web"]})
     )
     assert "no retry: web own what failed and have no attempts left" in withheld
+
+
+def test_a_withdrawn_attempt_reads_as_the_route_declining():
+    """The customer must be able to tell "Claude said come back later" from
+    "the generated code was wrong" -- the fourth M4 live drive read only
+    `handler raised ProviderFailure` and lost a run whose domain component had
+    already passed every gate."""
+
+    line = format_event(
+        _event(
+            7,
+            "task.attempt_withdrawn",
+            {
+                "attempt": 2,
+                "node_id": "web",
+                "route": "anthropic-claude-code",
+                "status_code": 429,
+                "reason_class": "route_unavailable",
+                "backoff_seconds": 30.0,
+            },
+            task_id="run.x:implement:web",
+        )
+    )
+    assert "the model route declined (HTTP 429)" in line
+    assert "attempt 2 was not spent" in line
+    assert "asking again in 30.0s" in line

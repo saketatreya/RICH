@@ -2992,3 +2992,51 @@ def test_gates_see_the_database_only_where_the_software_runs(tmp_path):
             RecordingExecutor(executable="/usr/bin/python3"),
             database_directory="../outside",
         )
+
+
+def test_a_declined_route_is_translated_at_the_seam_that_sees_both_layers():
+    """The scheduler must never import a provider module, and the
+    classification must not be forgeable downstream. The one place that
+    already sees both is the verified coding handler."""
+
+    from richbuild.providers import ProviderFailure
+    from richbuild.run_engine import RunEngineConfig, _VerifiedCodingHandler
+    from richbuild.scheduler import RouteUnavailable
+
+    def declined(_context):
+        failure = ProviderFailure(
+            "Claude Code reported a failed session (HTTP 429)",
+            retryable=True,
+            route_unavailable=True,
+            status_code=429,
+        )
+        failure.route = "anthropic-claude-code"
+        raise failure
+
+    def ordinary(_context):
+        raise ProviderFailure(
+            "Claude Code invocation timed out", retryable=False
+        )
+
+    class _Context:
+        is_cancelled = False
+
+    def handler(worker):
+        return _VerifiedCodingHandler(
+            worker,
+            command_runner=None,
+            workspace=Path("/nonexistent"),
+            project=None,
+            root_node_id="app",
+            config=RunEngineConfig(),
+        )
+
+    with pytest.raises(RouteUnavailable) as declined_error:
+        handler(declined)(_Context())
+    assert declined_error.value.route == "anthropic-claude-code"
+    assert declined_error.value.status_code == 429
+    assert "HTTP 429" in str(declined_error.value)
+
+    # Everything else passes through unchanged: a timeout is a real attempt.
+    with pytest.raises(ProviderFailure):
+        handler(ordinary)(_Context())

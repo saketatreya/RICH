@@ -134,6 +134,20 @@ contract.
   hashes the exact request (both prompts, provider, model, response schema); a
   hit replays the bundle through the same parser, transaction and gates.
   `rich rebuild-node` forgets one node's memos.
+- **A refused route returns the attempt.** Task attempts buy generation
+  quality — a bad bundle, a failed gate, a rejected file set. When a trusted
+  adapter observes a transport status meaning *come back later* (429, or 5xx)
+  it raises `route_unavailable`, and the scheduler **withdraws** the attempt
+  rather than failing it: no evidence is written, and a durable
+  `task.attempt_withdrawn` event subtracts it from the exhaustion count. The
+  `tasks.attempt` column still increments — it is identity, not budget. A task
+  gets `max_route_waits` withdrawals (2, thirty seconds apart), recounted from
+  events on every execution so no restart refills them; past that the refusal
+  is spent as a real attempt and the run fails legibly, with every verified
+  component still memoized. `route_unavailable` is never inferred from a
+  response body or from model-authored prose, never changes route, model or
+  payer, and never reduces what an attempt is charged: the reservation settles
+  exactly as always, because a crash must not create free retries.
 - **One fenced owner mutates a run.** SQLite leases with fencing tokens checked
   in the same transaction as every authoritative write; source writes go through
   CAS-backed write-ahead transactions. Coding is single-worker by design.
