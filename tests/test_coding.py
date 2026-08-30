@@ -1397,6 +1397,57 @@ def test_a_huge_prior_failure_is_cut_to_its_budget_not_the_retry(tmp_path):
     assert "withheld_diagnostic_lines" in prompt.user_prompt
 
 
+def test_the_first_attempt_is_told_which_pages_the_browser_will_open(tmp_path):
+    """The prompt the worker actually SENDS on attempt 1, not the one
+    `build_task_prompt` can produce when asked directly. `scenario_pages` was
+    passed only to the retry branch, so every first attempt went out with
+    `pages_to_write: []` and no deliverables guidance, while the system prompt
+    still said "a scenario that names pages runs its browser steps against
+    those files" -- referring to nothing. The worker learned which page a
+    browser step runs against only after failing a gate and spending an
+    attempt. M7's second live proof shows the shape: `web` attempt 1 wrote its
+    operations module and left both pages as the scaffold rendered them. Only
+    a worker-level test can see this; the direct one cannot."""
+
+    project, architecture, plan, approval = _fixture()
+    scenario_id = project.acceptance_scenarios[0].id
+
+    def pages(spec, scenario):
+        return ("apps/web/note.tsx",) if scenario.id == scenario_id else ()
+
+    provider = RecordingProvider(_valid_bundle())
+    workspace = tmp_path / "first"
+    workspace.mkdir(parents=True, exist_ok=True)
+    CodingWorker(
+        _gateway(provider),
+        workspace=workspace,
+        project=project,
+        architecture=architecture,
+        approval=approval,
+        provider="fake",
+        model="test-model",
+        dependency_summaries={"domain": "Domain generation completed."},
+        scenario_pages=pages,
+    ).run_task(
+        run_id="run.pages",
+        durable_task_id="run.pages:implement:web",
+        attempt=1,
+        task=plan.task_index["web"],
+    )
+
+    sent = provider.requests[-1]
+    assert sent.user_prompt.startswith(
+        "Deliverables, in order. 1. Rewrite these placeholder pages"
+    )
+    assert "apps/web/note.tsx" in sent.user_prompt
+    context = json.loads(sent.user_prompt[sent.user_prompt.index("{"):])
+    assert context["pages_to_write"] == ["apps/web/note.tsx"]
+    scenarios = {
+        s["id"]: s for s in context["approved_intent"]["acceptance_scenarios"]
+    }
+    assert scenarios[scenario_id]["pages"] == ["apps/web/note.tsx"]
+
+
 def test_a_scenario_names_the_pages_the_task_owns(tmp_path):
     project, architecture, plan, approval = _fixture()
     scenario_id = project.acceptance_scenarios[0].id

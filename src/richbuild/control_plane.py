@@ -1508,7 +1508,7 @@ class ControlPlane:
                 )
             except (OSError, UnicodeError, json.JSONDecodeError):
                 continue
-            if not isinstance(record, dict):
+            if not isinstance(record, dict) or record.get("status") != "passed":
                 continue
             database = (record.get("metadata") or {}).get("details", {}).get("database")
             if isinstance(database, dict):

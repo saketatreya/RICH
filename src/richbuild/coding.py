@@ -2145,6 +2145,16 @@ class CodingWorker:
         # help a task that succeeded first try, which is the one that needed it
         # least. The answer that finally works is the answer for this task,
         # however many attempts it took to find it.
+        #
+        # Which pages the approved scenarios open is part of the question, not
+        # of the coaching: it is a function of the spec, the task's owned paths
+        # and the pack, and it is identical on every attempt. It was passed
+        # only to the retry branch below, so the prompt actually sent on every
+        # FIRST attempt carried `pages_to_write: []` and no deliverables
+        # guidance -- a worker learned which page a browser step runs against
+        # only after failing a gate. M7's second live proof shows it exactly:
+        # `web` attempt 1 wrote its operations module and left both pages as
+        # the scaffold rendered them.
         canonical = build_task_prompt(
             workspace=self.workspace,
             project=self.project,
@@ -2152,6 +2162,7 @@ class CodingWorker:
             task=task,
             approval=self.approval,
             dependency_summaries=dependency_summaries,
+            scenario_pages=self.scenario_pages,
             limits=self.limits,
         )
         response_schema = file_bundle_schema(self.limits)

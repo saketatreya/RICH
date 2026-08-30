@@ -1164,19 +1164,28 @@ def test_route_waits_are_bounded_and_the_bound_survives_a_restart(tmp_path):
         default_policy=policy,
     ).run()
 
-    # Two refunds, then the third refusal is spent as a real attempt and the
-    # task fails with the route's own words rather than an exception class.
     assert not report.succeeded
     withdrawn = [
         e for e in store.list_events(run["id"])
         if e["event_type"] == "task.attempt_withdrawn"
     ]
     assert len(withdrawn) == 2
+
+    # The accounting itself, not just the events. Two refusals are refunded and
+    # the task still gets its full three generation attempts, so the handler is
+    # called five times and `tasks.attempt` -- which is identity, and must keep
+    # counting -- reaches five while only three were spent.
+    assert calls == [1, 2, 3, 4, 5]
+    durable_id = f"{run['id']}:{plan.tasks[0].task_id}"
+    assert int(store.get_task(durable_id)["attempt"]) == 5
+    assert dict(report.task_attempts) == {"solo": 5}
     failed = [
         e for e in store.list_events(run["id"])
         if e["event_type"] == "task.failed"
     ]
-    assert failed, "the run must end, not spin"
+    # Three real failures: the refunded ones wrote none.
+    assert len(failed) == 3
+    assert failed[-1]["payload"]["will_retry"] is False
     assert "HTTP 429" in failed[-1]["payload"]["summary"]
     assert "handler raised" not in failed[-1]["payload"]["summary"]
 

@@ -2306,10 +2306,18 @@ def test_a_reopened_owner_reads_the_probe_verdict_not_a_log_full_of_passes(
     assert "persisted nothing" in failure.summary
     assert "ran every scenario in the browser" in failure.summary
     assert "failed acceptance on pages this task owns" not in failure.summary
-    assert "persisted nothing" in failure.diagnostics[0]
-    assert any("todos" in line for line in failure.diagnostics)
-    # The passing browser log is not what it needs to read.
-    assert not any("A todo persists" in line for line in failure.diagnostics)
+    # The exact diagnostics, not a substring search that a redactor dropping
+    # the browser log would satisfy by accident: the probe's reason followed by
+    # the probe's own output, and nothing else.
+    assert failure.diagnostics == (
+        "the data component persisted nothing: every table is empty after the "
+        "browser ran every scenario",
+        'RICH_DATABASE_PROBE {"tables":{"projects":0,"todos":0}}',
+    )
+    # Nothing was withheld, because nothing from the acceptance log was offered
+    # in the first place -- a count here would tell the worker to re-read a
+    # contract it did not break.
+    assert failure.withheld_line_count == 0
 
 
 def test_attribution_spares_the_owner_of_a_page_that_passed(tmp_path):
