@@ -1004,6 +1004,78 @@ def test_acceptance_failure_reopens_the_owner_not_the_root(tmp_path):
     ] == ["reopened"]
 
 
+def test_a_restored_retry_deadline_cannot_outlive_the_backoff_that_set_it(
+    tmp_path,
+):
+    """The deadline is persisted as a wall-clock epoch so it survives a
+    restart, and wall clocks move. A backward correction -- or a host that
+    slept -- would put the deadline arbitrarily far away, and a loop that now
+    honours deadlines would wait there. The backoff the policy asked for is
+    the ceiling."""
+
+    tasks = (_task("slow", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+    durable_id = f"{run['id']}:{plan.tasks[0].task_id}"
+    store.append_event(
+        run["id"],
+        "task.retry_scheduled",
+        {
+            "completed_attempt": 1,
+            "next_attempt": 2,
+            "backoff_seconds": 0.25,
+            # As if the clock jumped back a year between writing and reading.
+            "not_before_epoch": time.time() + 365 * 24 * 3600,
+        },
+        task_id=durable_id,
+    )
+    scheduler = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": lambda context: _verified_result(context, summary="ok")},
+        default_policy=TaskPolicy(max_attempts=2, retry_backoff_seconds=0.25),
+    )
+    restored: dict[str, float] = {}
+    scheduler._restore_retry_deadlines(restored)
+
+    assert restored[durable_id] - time.monotonic() <= 0.25 + 0.05
+
+
+def test_a_task_waiting_out_its_backoff_is_waited_for_not_stranded(tmp_path):
+    """The retry timer and the strand guard disagreed. `_ready_tasks` filters
+    out a task whose `retry_not_before` has not arrived; the loop then sees
+    nothing ready and nothing running, calls that a corrupted DAG, and fails
+    the run -- milliseconds after scheduling the retry it is refusing to wait
+    for. Dormant only because every configured backoff is 0.0, which is
+    exactly what a route that says 'come back later' has to change."""
+
+    tasks = (_task("slow", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+    calls: list[int] = []
+
+    def handler(context):
+        calls.append(context.attempt)
+        if context.attempt == 1:
+            raise RuntimeError("come back later")
+        return _verified_result(context, summary="second attempt")
+
+    report = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": handler},
+        default_policy=TaskPolicy(max_attempts=2, retry_backoff_seconds=0.25),
+    ).run()
+
+    assert calls == [1, 2], "the second attempt must actually happen"
+    assert report.succeeded
+    events = [e["event_type"] for e in store.list_events(run["id"])]
+    assert "task.retry_scheduled" in events
+    assert "task.blocked" not in events, (
+        "a task waiting on a clock is not a stranded one"
+    )
+
+
 def test_exhausted_owner_withholds_the_root_retry(tmp_path):
     tasks = (_task("web", 0), _task("app", 1, dependencies=("web",)))
     store, run, plan = _prepared(tmp_path, tasks)

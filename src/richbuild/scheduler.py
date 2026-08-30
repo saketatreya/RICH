@@ -409,6 +409,7 @@ class DagScheduler:
         default_policy: TaskPolicy | None = None,
         task_policies: Mapping[str, TaskPolicy] | None = None,
         poll_interval_seconds: float = 0.02,
+        idle_poll_seconds: float = 0.5,
         cancellation_grace_seconds: float = 1.0,
         owner_token: str | None = None,
     ):
@@ -420,6 +421,8 @@ class DagScheduler:
             raise ValueError("max_workers must be a positive integer")
         if not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
+        if not math.isfinite(idle_poll_seconds) or idle_poll_seconds <= 0:
+            raise ValueError("idle_poll_seconds must be positive")
         if (
             not math.isfinite(cancellation_grace_seconds)
             or cancellation_grace_seconds <= 0
@@ -441,6 +444,12 @@ class DagScheduler:
         self.default_policy = default_policy or TaskPolicy()
         self.task_policies = dict(task_policies or {})
         self.poll_interval_seconds = poll_interval_seconds
+        # How long the loop may block when the only remaining work is a task
+        # waiting out a retry backoff. Bounded separately from the result poll
+        # so a thirty-second wait costs one wake a second rather than fifteen
+        # hundred SQLite scans -- and bounded at all so cancellation, which is
+        # read at the top of the loop, is never more than this far away.
+        self.idle_poll_seconds = idle_poll_seconds
         self.cancellation_grace_seconds = cancellation_grace_seconds
         self._results: queue.Queue[_WorkerResult] = queue.Queue()
         self._compiled_by_node = {task.node_id: task for task in plan.tasks}
@@ -580,8 +589,9 @@ class DagScheduler:
                 return self._finish("failed")
 
             capacity = self.max_workers - len(worker_keys)
+            waking: float | None = None
             if capacity > 0:
-                ready = self._ready_tasks(states, retry_not_before, now)
+                ready, waking = self._ready_tasks(states, retry_not_before, now)
                 for compiled_task in ready[:capacity]:
                     attempt = self._launch(compiled_task, token)
                     running[attempt.durable_task_id] = attempt
@@ -589,16 +599,27 @@ class DagScheduler:
                         (attempt.durable_task_id, attempt.attempt)
                     )
 
+            idle = self.poll_interval_seconds
             if not running and not worker_keys:
-                # A validated DAG can only land here if durable state was
-                # externally corrupted while the scheduler was active.
-                self._block_stranded_tasks()
-                return self._finish("failed")
+                if waking is None:
+                    # Nothing running, nothing ready, and nothing waiting on a
+                    # clock. A validated DAG can only land here if durable
+                    # state was externally corrupted while the scheduler was
+                    # active.
+                    self._block_stranded_tasks()
+                    return self._finish("failed")
+                # A task is waiting out its retry backoff. Wait with it -- the
+                # wait belongs here, between attempts, where no attempt
+                # deadline is running against it and no worker can be judged
+                # uncooperative. Bounded by `idle_poll_seconds` so the
+                # cancellation read at the top of the loop stays prompt.
+                idle = max(
+                    0.0,
+                    min(waking - time.monotonic(), self.idle_poll_seconds),
+                )
 
             try:
-                envelope = self._results.get(
-                    timeout=self.poll_interval_seconds
-                )
+                envelope = self._results.get(timeout=idle)
             except queue.Empty:
                 continue
             self._consume_result(
@@ -771,7 +792,7 @@ class DagScheduler:
     def _restore_retry_deadlines(
         self, retry_not_before: dict[str, float]
     ) -> None:
-        latest: dict[str, float] = {}
+        latest: dict[str, tuple[float, float]] = {}
         after_sequence = 0
         while True:
             events = self.store.list_events(
@@ -785,29 +806,52 @@ class DagScheduler:
                     and event["task_id"] is not None
                 ):
                     raw_deadline = event["payload"].get("not_before_epoch")
+                    raw_backoff = event["payload"].get("backoff_seconds")
                     if isinstance(raw_deadline, (int, float)) and math.isfinite(
                         raw_deadline
                     ):
-                        latest[event["task_id"]] = float(raw_deadline)
+                        backoff = (
+                            float(raw_backoff)
+                            if isinstance(raw_backoff, (int, float))
+                            and math.isfinite(raw_backoff)
+                            and raw_backoff >= 0
+                            else 0.0
+                        )
+                        latest[event["task_id"]] = (float(raw_deadline), backoff)
             after_sequence = int(events[-1]["sequence"])
             if len(events) < 1000:
                 break
         wall_now = time.time()
         monotonic_now = time.monotonic()
-        for task_id, wall_deadline in latest.items():
+        for task_id, (wall_deadline, backoff) in latest.items():
             if self.store.get_task(task_id)["status"] != "ready":
                 continue
-            retry_not_before[task_id] = monotonic_now + max(
-                0.0, wall_deadline - wall_now
-            )
+            # The deadline was written as a wall-clock epoch so it survives a
+            # restart, and wall clocks move. A backward correction, or a host
+            # that slept, would otherwise put the deadline arbitrarily far
+            # away and the loop -- which now honours it -- would wait there.
+            # The backoff the policy actually asked for is the ceiling.
+            remaining = min(max(0.0, wall_deadline - wall_now), backoff)
+            retry_not_before[task_id] = monotonic_now + remaining
 
     def _ready_tasks(
         self,
         states: Mapping[str, Mapping[str, Any]],
         retry_not_before: Mapping[str, float],
         now: float,
-    ) -> list[CompiledTask]:
+    ) -> tuple[list[CompiledTask], float | None]:
+        """What can start now, and when the earliest waiting task may start.
+
+        One function owns both answers on purpose. The caller has to tell a
+        task that cannot run yet from a task that can never run, and deciding
+        that twice -- once here and once in the loop -- is how the two drifted
+        apart: the loop used to call a task waiting on its retry clock a
+        corrupted DAG and fail the run milliseconds after scheduling that very
+        retry.
+        """
+
         ready: list[CompiledTask] = []
+        waking: float | None = None
         for task in sorted(self.plan.tasks, key=self._task_sort_key):
             record = states[task.node_id]
             if record["status"] == "pending":
@@ -827,14 +871,21 @@ class DagScheduler:
                     )
             if record["status"] != "ready":
                 continue
-            if now < retry_not_before.get(record["id"], 0.0):
-                continue
-            if all(
+            runnable = all(
                 states[node_id]["status"] in _DEPENDENCY_SUCCESS
                 for node_id in task.dependency_ids
-            ):
+            )
+            deadline = retry_not_before.get(record["id"], 0.0)
+            if now < deadline:
+                # Held back only by the clock. If its dependencies are all
+                # satisfied it is real work the loop must wait for; if they
+                # are not, some other task's outcome will wake the loop first.
+                if runnable:
+                    waking = deadline if waking is None else min(waking, deadline)
+                continue
+            if runnable:
                 ready.append(task)
-        return ready
+        return ready, waking
 
     @staticmethod
     def _task_sort_key(task: CompiledTask) -> tuple[int, str, str]:
