@@ -36,7 +36,12 @@ from richbuild.models import (
     ProjectSpec,
     Requirement,
 )
-from richbuild.providers import ModelGateway, ModelResponse
+from richbuild.providers import (
+    GenerationRole,
+    ModelGateway,
+    ModelRequest,
+    ModelResponse,
+)
 
 
 def _fixture():
@@ -214,17 +219,49 @@ def test_schema_is_strict_and_only_authorizes_create_or_replace():
 
 
 def test_default_prompt_and_cost_reservations_are_internally_coherent():
+    """The byte budget must fit the token reservation by the SAME comparison
+    the provider makes. `ModelRequest` refuses a request whose prompt bytes
+    exceed its input token reservation; this check once allowed four times
+    that, and the assertion below encoded the looseness rather than catching
+    it. A live drive on 2026-08-30 built a prompt the byte budget admitted and
+    burned two attempts in one second on the provider's refusal."""
+
     limits = coding.DEFAULT_LIMITS
 
-    # four bytes of prompt is about a token: the byte ceiling must fit the
-    # token budget the provider reserves for the attempt
-    assert limits.max_prompt_bytes <= limits.max_input_tokens * 4
+    assert limits.max_prompt_bytes <= limits.max_input_tokens
     assert limits.max_prompt_bytes == 48_000
-    assert limits.max_input_tokens == 32_000
+    assert limits.max_input_tokens == 48_000
     assert limits.max_output_tokens == 8_000
-    assert limits.max_cost_usd == Decimal("0.208")
+
+    # Priced, not chosen: the HTTP route refuses a request whose worst-case
+    # reservation costs more than its ceiling, so a ceiling below this rejects
+    # every call. $4.00/M is the costliest input classification, $10.00/M output.
+    priced = (
+        Decimal(limits.max_input_tokens) * Decimal("4.00")
+        + Decimal(limits.max_output_tokens) * Decimal("10.00")
+    ) / Decimal(1_000_000)
+    assert limits.max_cost_usd == priced == Decimal("0.272")
+
+    # A prompt filling the byte budget exactly must be a request the provider
+    # will accept -- that is the whole point of the two numbers agreeing.
+    ModelRequest(
+        run_id="run.x",
+        task_id="run.x:implement:web",
+        correlation_id="c",
+        role=GenerationRole.IMPLEMENTER,
+        provider="anthropic",
+        model="claude-sonnet-5",
+        system_prompt="s" * 1_000,
+        user_prompt="u" * (limits.max_prompt_bytes - 1_000),
+        response_schema={"type": "object"},
+        max_input_tokens=limits.max_input_tokens,
+        max_output_tokens=limits.max_output_tokens,
+        max_cost_usd=limits.max_cost_usd,
+        timeout_seconds=limits.timeout_seconds,
+    )
+
     with pytest.raises(ValueError, match="cannot exceed max_input_tokens"):
-        CodingLimits(max_prompt_bytes=16_001, max_input_tokens=4_000)
+        CodingLimits(max_prompt_bytes=4_001, max_input_tokens=4_000)
 
 
 def test_prompt_contains_only_approved_task_context_dependencies_and_current_files(

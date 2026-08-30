@@ -83,11 +83,18 @@ class CodingLimits:
     # attempts in one second. 48 KB is about 12k tokens, well inside the
     # per-attempt input budget.
     max_prompt_bytes: int = 48_000
-    max_input_tokens: int = 32_000
+    # Sized to the prompt budget above, not the other way round: a reopened
+    # retry carrying its gate output measured 29,332 bytes and a persisting
+    # web task 25,186, and the byte budget must fit inside the token
+    # reservation or the request is refused before it is sent.
+    max_input_tokens: int = 48_000
     max_output_tokens: int = 8_000
-    # Exact worst-case reservation for the default 32k/8k token request at the
-    # pinned runtime's costliest input classification and its output rate.
-    max_cost_usd: Decimal = Decimal("0.208")
+    # Exact worst-case reservation for the default 48k/8k token request at the
+    # pinned runtime's costliest input classification ($4.00/M, a one-hour
+    # cache write) and its output rate ($10.00/M). Derived, never guessed: the
+    # HTTP route refuses a request whose priced reservation exceeds its cost
+    # ceiling, so a ceiling below this number rejects every call.
+    max_cost_usd: Decimal = Decimal("0.272")
     timeout_seconds: float = 120
 
     def __post_init__(self) -> None:
@@ -125,10 +132,16 @@ class CodingLimits:
                 "max_dependency_summary_total_bytes cannot be smaller than "
                 "max_dependency_summary_bytes"
             )
-        # Bytes against tokens: four bytes of prompt is roughly a token, so a
-        # prompt the byte limit admits must fit the token budget the provider
-        # reserves for it.
-        if self.max_prompt_bytes > self.max_input_tokens * 4:
+        # `ModelRequest` refuses a request whose prompt BYTES exceed its input
+        # TOKEN reservation -- a conservative bound, since a tokenizer can
+        # merge bytes but never produce more tokens than bytes. This check has
+        # to be the same comparison or a prompt the byte budget admits is built
+        # and then refused, spending an attempt on a request that was never
+        # sent. It read `* 4` while the message said what it means, and the
+        # message was the one telling the truth: on 2026-08-30 a live drive
+        # burned two attempts in the same second on
+        # "prompt UTF-8 byte upper bound exceeds input token reservation".
+        if self.max_prompt_bytes > self.max_input_tokens:
             raise ValueError(
                 "max_prompt_bytes cannot exceed max_input_tokens"
             )

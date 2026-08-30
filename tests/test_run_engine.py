@@ -1188,6 +1188,9 @@ def test_default_executor_recovers_budget_only_after_claiming_lease(
             model="fake-code-model",
             bootstrapper=None,
             commands=commands,
+            # The executor reads the route's own bounds, as a real runtime
+            # supplies them.
+            coding_limits=coding_module.DEFAULT_LIMITS,
         )
 
     executor = DefaultRunExecutor(

@@ -1023,7 +1023,13 @@ def test_a_resume_still_waits_out_a_withdrawal_it_already_granted(tmp_path):
             "route": "anthropic-claude-code",
             "status_code": 429,
             "backoff_seconds": 30.0,
-            "not_before_epoch": time.time() + 30.0,
+            # An hour out, deliberately: the restored wait is the smaller of
+            # the remaining wall-clock time and the recorded backoff, so
+            # asserting on a deadline only 30s away would be asserting on how
+            # much wall-clock time passed during the test -- and a forward
+            # clock step, which is exactly what the clamp exists for, would
+            # then read as a failure rather than as the intended behaviour.
+            "not_before_epoch": time.time() + 3_600.0,
         },
         task_id=durable_id,
     )
@@ -1038,7 +1044,10 @@ def test_a_resume_still_waits_out_a_withdrawal_it_already_granted(tmp_path):
     scheduler._restore_retry_deadlines(restored)
 
     assert durable_id in restored, "the withdrawal's wait survives the restart"
-    assert restored[durable_id] - time.monotonic() > 25.0
+    waiting = restored[durable_id] - time.monotonic()
+    # Read at all, and clamped to its own backoff rather than to the hour of
+    # wall-clock time the deadline nominally allows.
+    assert 25.0 < waiting <= 30.0
 
 
 def test_a_restored_retry_deadline_cannot_outlive_the_backoff_that_set_it(

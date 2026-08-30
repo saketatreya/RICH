@@ -170,6 +170,13 @@ class DefaultRunExecutor:
             )
             commands = runtime.commands
             config = RunEngineConfig(
+                # The route's own bounds, not the defaults. `runtime` picks
+                # them per route because the CLI route cannot cap its output
+                # before the fact and needs the headroom the measurements
+                # asked for; until now only the live tests passed them, so
+                # every build a customer actually ran used the HTTP route's
+                # numbers whichever route it was on.
+                coding_limits=runtime.coding_limits,
                 lint_argv=commands.lint_argv,
                 static_argv=commands.static_argv,
                 unit_argv=commands.unit_argv,
