@@ -605,3 +605,15 @@ def test_the_cli_route_gives_the_prompt_the_headroom_the_proof_measured():
     assert CLAUDE_CODE_LIMITS.max_prompt_bytes == DEFAULT_LIMITS.max_prompt_bytes
     assert CLAUDE_CODE_LIMITS.max_prompt_bytes > 29_332
     assert CLAUDE_CODE_LIMITS.max_prompt_bytes <= CLAUDE_CODE_LIMITS.max_input_tokens
+
+    # The output reservation is not a bound on this route -- nothing here can
+    # cap output before the fact -- so it has to sit above what the model
+    # actually produces, not where the model happens to land. The ninth M4
+    # live drive measured 24,042 output tokens against a 24,000 reservation and
+    # then 26,437: two attempts that had done the work, discarded for an
+    # overage of 0.2%, and a run dead with the task exhausted. What bounds an
+    # attempt here is the dollar ceiling, which those same attempts settled at
+    # $0.29 against $1.00.
+    assert CLAUDE_CODE_LIMITS.max_output_tokens == 64_000
+    assert CLAUDE_CODE_LIMITS.max_output_tokens > 26_437 * 2
+    assert CLAUDE_CODE_LIMITS.max_cost_usd == Decimal("1.00")

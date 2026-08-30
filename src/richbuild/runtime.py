@@ -88,7 +88,17 @@ CLAUDE_CODE_LIMITS = replace(
     # is the larger of the two measurements with room left, so this route
     # inherits it rather than pinning a second, smaller number beside it.
     max_input_tokens=48_000,
-    max_output_tokens=24_000,
+    # This route cannot cap output before the fact -- that is the whole reason
+    # these limits exist -- so a reservation the model can land just outside is
+    # not a safety property, it is a source of false failures. Measured: the
+    # `web` component of a four-component application produced 24,042 output
+    # tokens against a 24,000 reservation, then 26,437 on the next attempt.
+    # Two attempts that had done the work were thrown away for an overage of
+    # 0.2%, and the run died with the task exhausted. What actually bounds an
+    # attempt here is the dollar ceiling below, which the same attempts settled
+    # at $0.29 against $1.00; the token figure is accounting, and on a route
+    # that cannot cap it, it belongs at the model's own ceiling.
+    max_output_tokens=64_000,
     # Not rate-derived: on this route the harness reports what an attempt
     # actually cost, so this is a per-attempt ceiling rather than an estimate.
     max_cost_usd=Decimal("1.00"),
