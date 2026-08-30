@@ -952,8 +952,14 @@ class DagScheduler:
             if not events:
                 break
             for event in events:
+                # Both events schedule a future start and both carry the same
+                # two payload keys. A withdrawal's wait is the one that most
+                # needs restoring: it exists because the route asked us not to
+                # come back yet, and a resume that forgets it walks straight
+                # back into the refusal.
                 if (
-                    event["event_type"] == "task.retry_scheduled"
+                    event["event_type"]
+                    in ("task.retry_scheduled", "task.attempt_withdrawn")
                     and event["task_id"] is not None
                 ):
                     raw_deadline = event["payload"].get("not_before_epoch")

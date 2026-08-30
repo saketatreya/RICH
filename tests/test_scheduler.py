@@ -1005,6 +1005,42 @@ def test_acceptance_failure_reopens_the_owner_not_the_root(tmp_path):
     ] == ["reopened"]
 
 
+def test_a_resume_still_waits_out_a_withdrawal_it_already_granted(tmp_path):
+    """A withdrawal schedules a future start exactly as a retry does, and its
+    wait is the one that most needs restoring: it exists because the route
+    asked us not to come back yet. A resume that forgot it would walk straight
+    back into the refusal and spend the remaining waits in seconds."""
+
+    tasks = (_task("solo", 0),)
+    store, run, plan = _prepared(tmp_path, tasks)
+    durable_id = f"{run['id']}:{plan.tasks[0].task_id}"
+    store.append_event(
+        run["id"],
+        "task.attempt_withdrawn",
+        {
+            "attempt": 1,
+            "node_id": "solo",
+            "route": "anthropic-claude-code",
+            "status_code": 429,
+            "backoff_seconds": 30.0,
+            "not_before_epoch": time.time() + 30.0,
+        },
+        task_id=durable_id,
+    )
+    scheduler = DagScheduler(
+        store,
+        run_id=run["id"],
+        plan=plan,
+        handlers={"*": lambda context: _verified_result(context, summary="ok")},
+        default_policy=TaskPolicy(max_attempts=2, max_route_waits=2),
+    )
+    restored: dict[str, float] = {}
+    scheduler._restore_retry_deadlines(restored)
+
+    assert durable_id in restored, "the withdrawal's wait survives the restart"
+    assert restored[durable_id] - time.monotonic() > 25.0
+
+
 def test_a_restored_retry_deadline_cannot_outlive_the_backoff_that_set_it(
     tmp_path,
 ):
