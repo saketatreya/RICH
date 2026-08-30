@@ -75,8 +75,9 @@ RICH_LIVE_CACHE_ROOT=.rich/live-cache python -m pytest --run-live \
 Interview → approved immutable spec revision → approved architecture → compiled
 dependency-ordered tasks → frozen Next.js target-pack scaffold → bounded
 model-authored source → independent sandboxed gates (lint / types / unit /
-contract obligations / build / Playwright) → content-addressed release ZIP →
-digest-bound Neon/Vercel preview. SQLite plus a SHA-256 content-addressed
+contract obligations / build / Playwright, each over a freshly migrated PGlite
+database when the software persists) → content-addressed release ZIP →
+digest-bound Neon/Vercel preview on Postgres. SQLite plus a SHA-256 content-addressed
 artifact store (`store.py`) is the source of truth, not the filesystem.
 
 The canvas (`web/`, React + Vite + React Flow) is the product surface: run the
@@ -110,6 +111,19 @@ contract.
   `operations` from `packages/domain/src/operations.ts`. No suite scaffolded
   means no gate — a property run over an empty directory would pass without
   checking anything.
+- **A record that outlives a request is proven, not reported.** Persistence is
+  PGlite inside the network-off gates and Postgres on Neon at preview, one
+  dialect and one migration algorithm with two trusted implementations. Every
+  gate that *runs* the software gets a fresh database first: the host removes
+  the directory and computes the migration set from the files on disk, the
+  sandboxed protected migrator applies them and reports what it journaled, and
+  the two must agree exactly — the sandbox ran model-authored SQL, so its
+  report is a command result, never a claim taken on trust. After the browser
+  has run every scenario the trusted probe reads the same directory: a journal
+  that differs from the prepare step's, or a data component whose every table
+  is empty, fails the gate. `database.ts` and `migrate.ts` are protected
+  generation inputs; the migration digest set travels from the run's evidence
+  into preview and production, which refuse a journal that does not match.
 - **A change costs what it changes.** `change.py` computes the stale set
   from two approved revisions. An implementation change cannot reach a
   consumer (the firewall); a contract change invalidates consumers
