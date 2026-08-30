@@ -352,8 +352,24 @@ def test_a_real_model_persists_a_todo_and_the_gates_prove_the_row_outlived_the_r
             f"[{event.get('task_id', '').rsplit(':', 1)[-1]}]"
             for event in evidence
         ],
+        # The named fields, not the payload's repr. A repr truncated at 300
+        # characters cuts off inside the correlation id -- every run of this
+        # test recorded which attempt failed and none of them recorded why,
+        # or by how much a reservation was exceeded, which is the number this
+        # test exists to produce.
         "model_failures": [
-            str(payload.get("error") or payload.get("message") or payload)[:300]
+            {
+                "task": str(payload.get("task_id", "")).rsplit(":", 1)[-1],
+                "attempt": payload.get("attempt"),
+                "reason": str(payload.get("reason", ""))[:200],
+                "retryable": payload.get("retryable"),
+                "route_unavailable": payload.get("route_unavailable"),
+                "over_reservation": payload.get(
+                    "reported_usage_exceeded_reservation"
+                ),
+                "reserved": payload.get("maximum_usage"),
+                "settled": payload.get("settled_usage"),
+            }
             for payload in model_failures
         ],
         "probe_lines": probe_lines,
