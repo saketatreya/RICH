@@ -9,7 +9,9 @@ release: '2.0'
 size: XL
 drive: step 6 · reload
 order: 5
-started: '2026-08-29'
+started: '2026-08-30'
+sha: aa39678
+finished: '2026-08-30'
 ---
 
 PGlite in the network-off gates, Postgres on Neon at preview, one migration algorithm, a
