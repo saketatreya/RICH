@@ -53,8 +53,16 @@ def test_the_checked_in_board_is_consistent():
 def test_the_page_is_rendered_from_the_cards_and_never_edited_by_hand():
     page = (ROOT / "docs" / "board.html").read_text(encoding="utf-8")
     assert "Rendered by tools/board.py" in page
-    for card in board.load_cards():
-        assert card.id in page, f"card {card.id} is missing from the rendered page"
+    # The page lives beside the cards directory, not inside it, so
+    # `git add docs/board` stages every card and none of the render. Three
+    # commits shipped that way on 2026-08-30 and CI caught each one; the
+    # remedy belongs in the message rather than in the next person's memory.
+    missing = [card.id for card in board.load_cards() if card.id not in page]
+    assert not missing, (
+        f"docs/board.html is stale: {len(missing)} card(s) missing, first "
+        f"{missing[0]!r}. Run `python tools/board.py render` and stage "
+        f"docs/board.html -- `git add docs/board` does not include it."
+    )
 
 
 def test_render_shows_every_card(tmp_path: pathlib.Path):
