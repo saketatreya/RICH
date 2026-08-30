@@ -530,6 +530,35 @@ upstream task is ignored and the ordinary retry applies, so a wrong attribution
 can only cost what a plain retry costs. Nothing here touches evidence: the
 reopened attempt is generated and verified exactly like any other.
 
+The probe has the same problem in a sharper form. When the browser passes every
+scenario and the database is empty, the acceptance command's own log truthfully
+says every test passed, and there is no failing step to name an owner — so the
+root would be regenerated while the component that held the state in memory was
+never asked again. A probe verdict therefore attributes to the owners of every
+page the scenarios exercised, by the same path a failing step uses, and the
+reopened owner is shown the probe's reason and table counts rather than a log
+full of ticks. M7's first live proof is where both were found: a component kept
+its records in a `globalThis` array, `next start` is one long-lived process, so
+the array survived `page.reload()` and every browser step passed.
+
+An attempt spent on a route that would not answer is not an attempt. Attempts
+buy generation quality, and a rate limit or an overloaded upstream has said
+nothing about the software. A trusted adapter observing such a transport status
+(429, or 5xx — never a response body, which is attacker-reachable through any
+intermediary) raises `route_unavailable`; the seam that sees both layers
+translates it to `RouteUnavailable`; and the scheduler **withdraws** the
+attempt: no evidence is written, a durable `task.attempt_withdrawn` event
+records it, and exhaustion is counted against attempts actually spent. The
+`tasks.attempt` column keeps incrementing because it is identity — source
+transactions, evidence selection and the release proof all key on it — not
+budget. Two withdrawals per task, thirty seconds apart, recounted from durable
+events at the start of every execution so neither a crash nor a resume refills
+them, and the event is appended before any state change so a crash over-counts
+rather than forgives. Past the bound the refusal is spent as an ordinary
+attempt and the run fails, with every verified component still memoized. The
+fourth M4 live drive is why: a closed subscription window spent four attempts
+in six seconds and discarded a component that had already passed every gate.
+
 ### 12. What was verified is what can deploy
 
 Before root verification, RICH records the deployment-source digest set. Verification
