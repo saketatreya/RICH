@@ -425,7 +425,12 @@ export default function ControlPlane() {
       setPrepared(null)
       setScaffold(null)
       setExecution(null)
-      setNotice('Architecture recorded as a new revision. It needs its own approval.')
+      // The same sentence the deterministic path uses: both reach the same
+      // state, and a customer told 'recorded as a new revision' by one
+      // route and 'ready for your approval' by the other has to work out
+      // that they mean the same thing -- in the vocabulary M12 decided she
+      // should never have to learn.
+      setNotice('The architecture is ready for your approval. Read the contracts, then decide.')
     })
   }
 
