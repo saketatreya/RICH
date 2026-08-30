@@ -1173,8 +1173,11 @@ def test_default_executor_recovers_budget_only_after_claiming_lease(
             lint_argv=("unused-lint",),
             static_argv=("unused-static",),
             unit_argv=("unused-unit",),
+            property_argv=("unused-property",),
             build_argv=("unused-build",),
             acceptance_argv=("unused-acceptance",),
+            database_argv=("unused-database",),
+            probe_argv=("unused-probe",),
         )
         return SimpleNamespace(
             gateway=gateway,
@@ -2336,3 +2339,539 @@ def test_attribution_spares_the_owner_of_a_page_that_passed(tmp_path):
     assert _lenient_observed_scenario_ids(
         ExecutionResult(argv=("x",), returncode=1, stdout="RICH_ACCEPTANCE_COVERAGE {not json\n", stderr="", duration_seconds=0.1)
     ) == ()
+
+
+# --------------------------------------------------------------------------
+# Persistence: a data component means every gate that runs the software gets a
+# fresh, migrated database first, and the browser's run is followed by the
+# probe. Model output was never evidence; now neither is a reload.
+# --------------------------------------------------------------------------
+
+
+class OwnedPathProvider(FakeModelProvider):
+    """Writes one file into whichever path the task it is asked for owns."""
+
+    def generate(self, request):
+        self.requests.append(request)
+        prompt = request.user_prompt
+        context = json.loads(prompt[prompt.rindex("\n{") + 1 :])
+        owned = context["write_authority"]["owned_paths"][0]
+        payload = {
+            "summary": "Implemented the allocated component",
+            "files": [
+                {
+                    "operation": "create",
+                    "path": f"{owned}/generated.ts",
+                    "content": "export const generated = true;\n",
+                }
+            ],
+        }
+        return ModelResponse(
+            text=json.dumps(payload),
+            parsed=payload,
+            provider=self.name,
+            model=request.model,
+            usage=Usage(
+                model_attempts=1,
+                input_tokens=200,
+                output_tokens=100,
+                cost_usd=Decimal("0.01"),
+                execution_seconds=0.05,
+            ),
+            provider_request_id=f"fake-{len(self.requests)}",
+        )
+
+
+class DatabaseAwareRunner(PassingCommandRunner):
+    """Passes every gate and answers the two trusted database steps the way
+    the pack's migrator and probe would -- with knobs for each way a sandbox
+    could disagree with the host."""
+
+    def __init__(
+        self,
+        *,
+        tables=None,
+        prepare_returncode=0,
+        reported_sha=None,
+        probe_journal=None,
+    ):
+        super().__init__()
+        self.tables = {"todos": 1} if tables is None else tables
+        self.prepare_returncode = prepare_returncode
+        self.reported_sha = reported_sha
+        self.probe_journal = probe_journal
+
+    def _migrations(self, workspace):
+        import hashlib
+
+        entries = []
+        for path in sorted((workspace / "packages/db/migrations").glob("*.sql")):
+            sha = self.reported_sha or hashlib.sha256(path.read_bytes()).hexdigest()
+            entries.append({"file": path.name, "sha256": sha, "applied": True})
+        return entries
+
+    def run(self, workspace, command, *, cancellation=None, deadline=None):
+        from richbuild.run_engine import DATABASE_PREPARE, DatabaseStep
+
+        if not isinstance(command, DatabaseStep):
+            return super().run(
+                workspace, command, cancellation=cancellation, deadline=deadline
+            )
+        self.commands.append(command)
+        directory = workspace / ".rich/runtime/db"
+        if command.kind == DATABASE_PREPARE:
+            assert not directory.exists(), (
+                "the engine removes the previous database before preparing"
+            )
+            directory.mkdir(parents=True)
+            report = {
+                "schema_version": "rich.database-migrations/v1",
+                "engine": {
+                    "name": "pglite",
+                    "server_version": "PostgreSQL 18.3 (PGlite 0.5.8)",
+                },
+                "migrations": self._migrations(workspace),
+            }
+            return ExecutionResult(
+                argv=command.argv,
+                returncode=self.prepare_returncode,
+                stdout=f"RICH_DATABASE_MIGRATIONS {json.dumps(report)}\n",
+                stderr="",
+                duration_seconds=0.01,
+            )
+        assert directory.exists(), "the probe reads what the prepare step created"
+        journal = (
+            self.probe_journal
+            if self.probe_journal is not None
+            else [
+                {"file": entry["file"], "sha256": entry["sha256"]}
+                for entry in self._migrations(workspace)
+            ]
+        )
+        report = {
+            "schema_version": "rich.database-probe/v1",
+            "engine": {
+                "name": "pglite",
+                "version": "0.5.8",
+                "server_version": "PostgreSQL 18.3 (PGlite 0.5.8)",
+            },
+            "migrations": journal,
+            "tables": self.tables,
+        }
+        return ExecutionResult(
+            argv=command.argv,
+            returncode=0,
+            stdout=f"RICH_DATABASE_PROBE {json.dumps(report)}\n",
+            stderr="",
+            duration_seconds=0.01,
+        )
+
+
+def _persisting_state(tmp_path):
+    """A run whose architecture has a data component: the planner's own."""
+
+    from richbuild.planner import plan_nextjs_architecture
+
+    store = RichStore(tmp_path / "state")
+    project_record = store.create_project("Todo", project_id="project.todo")
+    project = ProjectSpec(
+        id=project_record["id"],
+        name="Todo",
+        goal="Keep a todo list that is stored in the database.",
+        audiences=("members",),
+        requirements=(
+            Requirement(
+                id="requirement.todo",
+                title="Todo list",
+                statement="A member adds a todo and it is stored.",
+            ),
+        ),
+        acceptance_scenarios=(
+            AcceptanceScenario(
+                id="scenario.todo",
+                title="A todo persists",
+                given=("The list is empty.",),
+                when=("A member adds 'Buy milk'.",),
+                then=("'Buy milk' is listed.",),
+                requirement_ids=("requirement.todo",),
+                oracle=(
+                    {"action": "open_requirement"},
+                    {
+                        "action": "assert_visible",
+                        "locator": {"kind": "text", "value": "Buy milk"},
+                    },
+                ),
+            ),
+        ),
+    )
+    architecture = plan_nextjs_architecture(project).architecture
+    assert any(node.kind is NodeKind.DATA for node in architecture.nodes)
+    spec_revision = store.save_revision(
+        project.id,
+        kind="product_spec",
+        schema_version=project.schema_version,
+        document=project.to_dict(),
+        expected_revision=0,
+    )
+    architecture_revision = store.save_revision(
+        project.id,
+        kind="architecture",
+        schema_version=architecture.schema_version,
+        document=architecture.to_dict(),
+        expected_revision=1,
+    )
+    approval = store.decide_approval(
+        store.request_approval(
+            project.id,
+            gate="architecture",
+            request={
+                "revision_id": architecture_revision.id,
+                "spec_revision_id": spec_revision.id,
+                "target_pack": architecture.target_pack,
+                "node_ids": sorted(architecture.node_index),
+            },
+        )["id"],
+        approved=True,
+        decision={"actor": "test-approver"},
+    )
+    run = store.create_run(
+        project.id,
+        spec_revision_id=spec_revision.id,
+        architecture_revision_id=architecture_revision.id,
+        run_id="run.todo",
+        status="ready",
+        budget={
+            "max_model_attempts": 8,
+            "max_input_tokens": 100_000,
+            "max_output_tokens": 100_000,
+            "max_cost_usd": "20",
+            "max_execution_seconds": 2_000,
+        },
+    )
+    plan = compile_architecture(architecture, project)
+    for task in plan.tasks:
+        store.create_task(
+            run["id"],
+            node_id=task.node_id,
+            kind="implement",
+            task_id=f"{run['id']}:{task.task_id}",
+            status="ready",
+            dependency_task_ids=tuple(
+                f"{run['id']}:implement:{dependency_id}"
+                for dependency_id in task.dependency_ids
+            ),
+        )
+    workspace = tmp_path / "workspace"
+    NextJsTargetPack(
+        NextJsTargetPackConfig(
+            project_name="todo", project_spec=project, architecture=architecture
+        )
+    ).scaffold(workspace)
+    manifest = store.put_artifact(
+        (workspace / ".rich/target-pack.json").read_bytes(),
+        media_type="application/vnd.rich.target-pack-manifest+json",
+    )
+    store.attach_artifact(run["id"], manifest.digest, role="scaffold_manifest")
+    store.append_event(
+        run["id"],
+        "run.prepared",
+        {"architecture_approval_id": approval["id"], "task_count": len(plan.tasks)},
+    )
+    store.append_event(
+        run["id"],
+        "scaffold.completed",
+        {
+            "destination": str(workspace.absolute()),
+            "manifest_digest": manifest.digest,
+        },
+    )
+    return {
+        "store": store,
+        "project": project,
+        "architecture": architecture,
+        "approval": approval,
+        "run": run,
+        "plan": plan,
+        "workspace": workspace,
+    }
+
+
+def _evidence_record(state, kind):
+    record = _artifacts_with_role(state, f"evidence:{kind}")[-1]
+    return json.loads(state["store"].get_artifact(record["digest"]).path.read_text())
+
+
+def _verification_document(state, kind):
+    record = _artifacts_with_role(state, f"verification:{kind}")[-1]
+    return json.loads(state["store"].get_artifact(record["digest"]).path.read_text())
+
+
+def test_a_data_component_is_prepared_before_each_gate_that_runs_it_and_probed_after_acceptance(
+    tmp_path,
+):
+    import hashlib
+
+    from richbuild.run_engine import (
+        DATABASE_PREPARE,
+        DATABASE_PROBE,
+        DatabaseStep,
+        RunEngine,
+        RunEngineConfig,
+    )
+
+    state = _persisting_state(tmp_path)
+    provider = OwnedPathProvider()
+    runner = DatabaseAwareRunner(tables={"projects": 0, "todos": 1})
+    engine = RunEngine(
+        state["store"],
+        gateway=_gateway(provider),
+        command_runner=runner,
+        provider=provider.name,
+        model="fake-code-model",
+        config=RunEngineConfig(max_task_attempts=1),
+    )
+
+    report = engine.execute(run_id=state["run"]["id"], workspace=state["workspace"])
+
+    assert report.succeeded, report
+    kinds = [
+        (command.kind, isinstance(command, DatabaseStep)) for command in runner.commands
+    ]
+    for index, (kind, is_step) in enumerate(kinds):
+        if kind in {"unit", "property", "acceptance"}:
+            assert kinds[index - 1] == (DATABASE_PREPARE, True), (
+                f"{kind} at {index} was not preceded by a fresh database: {kinds}"
+            )
+        if kind in {"lint", "static", "build"}:
+            assert kinds[index - 1] != (DATABASE_PREPARE, True), (
+                f"{kind} runs no software and gets no database: {kinds}"
+            )
+        if kind == "acceptance":
+            assert kinds[index + 1] == (DATABASE_PROBE, True), kinds
+    assert sum(1 for kind, is_step in kinds if kind == DATABASE_PROBE) == 1, (
+        "one probe, after the one browser run"
+    )
+    prepare_argv = [c.argv for c in runner.commands if c.kind == DATABASE_PREPARE][0]
+    assert prepare_argv == RunEngineConfig().database_argv
+    assert [c.argv for c in runner.commands if c.kind == DATABASE_PROBE] == [
+        RunEngineConfig().probe_argv
+    ]
+
+    digest = hashlib.sha256(
+        (state["workspace"] / "packages/db/migrations/0000_initial.sql").read_bytes()
+    ).hexdigest()
+    expected_set = [{"file": "0000_initial.sql", "sha256": digest}]
+    acceptance = _evidence_record(state, "acceptance")
+    database = acceptance["metadata"]["details"]["database"]
+    assert database["migrations"] == expected_set, (
+        "the migration digest set travels with the acceptance evidence"
+    )
+    assert database["tables"] == {"projects": 0, "todos": 1}
+    assert database["rows"] == 1
+    assert database["engine"]["name"] == "pglite"
+    assert database["directory"] == ".rich/runtime/db"
+    assert "1 row(s) across 2 table(s)" in acceptance["metadata"]["summary"]
+    unit = _evidence_record(state, "unit")
+    assert unit["metadata"]["details"]["database"]["migrations"] == expected_set
+    assert "tables" not in unit["metadata"]["details"]["database"]
+    document = _verification_document(state, "acceptance")
+    assert document["database_preparation"]["status"] == "passed"
+    assert document["database_preparation"]["report"]["migrations"] == expected_set
+    assert document["database_probe"]["status"] == "passed"
+    assert document["database_probe"]["report"]["tables"] == {"projects": 0, "todos": 1}
+
+
+def test_a_data_component_that_persisted_nothing_fails_acceptance_closed(tmp_path):
+    from richbuild.run_engine import RunEngine, RunEngineConfig
+
+    state = _persisting_state(tmp_path)
+    provider = OwnedPathProvider()
+    runner = DatabaseAwareRunner(tables={"projects": 0, "todos": 0})
+    engine = RunEngine(
+        state["store"],
+        gateway=_gateway(provider),
+        command_runner=runner,
+        provider=provider.name,
+        model="fake-code-model",
+        config=RunEngineConfig(max_task_attempts=1),
+    )
+
+    report = engine.execute(run_id=state["run"]["id"], workspace=state["workspace"])
+
+    # The browser passed every scenario and the reporter said so. That is not
+    # enough: a reload proves a record outlived the request, not that it
+    # reached the database, and the tables say it did not.
+    assert not report.succeeded
+    acceptance = _evidence_record(state, "acceptance")
+    assert acceptance["status"] == "failed"
+    assert "persisted nothing" in acceptance["metadata"]["summary"]
+    assert acceptance["acceptance_scenario_ids"] == []
+    document = _verification_document(state, "acceptance")
+    assert document["status"] == "failed"
+    assert document["observed_acceptance_scenario_ids"] == []
+    assert document["database_probe"]["status"] == "failed"
+    events = {e["event_type"] for e in state["store"].list_events(state["run"]["id"])}
+    assert "run.succeeded" not in events
+
+
+def test_a_migration_report_that_disagrees_with_the_files_on_disk_fails_the_gate(
+    tmp_path,
+):
+    from richbuild.run_engine import RunEngine, RunEngineConfig
+
+    state = _persisting_state(tmp_path)
+    provider = OwnedPathProvider()
+    runner = DatabaseAwareRunner(reported_sha="0" * 64)
+    engine = RunEngine(
+        state["store"],
+        gateway=_gateway(provider),
+        command_runner=runner,
+        provider=provider.name,
+        model="fake-code-model",
+        config=RunEngineConfig(max_task_attempts=1),
+    )
+
+    report = engine.execute(run_id=state["run"]["id"], workspace=state["workspace"])
+
+    # The sandbox ran model-authored SQL and reported what it journaled. That
+    # report is a command result, not a claim the host takes on trust: the
+    # host computed the set from the files, and the two must agree exactly.
+    assert not report.succeeded
+    unit = _evidence_record(state, "unit")
+    assert unit["status"] == "failed"
+    assert "not the set on disk" in unit["metadata"]["summary"]
+    assert "database" not in unit["metadata"]["details"]
+    steps = [c.kind for c in runner.commands if not hasattr(c, "expected_acceptance_scenario_ids")]
+    assert steps and set(steps) == {"database-prepare"}, steps
+    assert not {"unit", "property"} & {c.kind for c in runner.commands}, (
+        "a gate whose database could not be prepared is not run"
+    )
+
+
+def test_the_probe_must_find_the_journal_the_prepare_step_recorded(tmp_path):
+    from richbuild.run_engine import RunEngine, RunEngineConfig
+
+    state = _persisting_state(tmp_path)
+    provider = OwnedPathProvider()
+    runner = DatabaseAwareRunner(
+        probe_journal=[{"file": "0000_initial.sql", "sha256": "f" * 64}]
+    )
+    engine = RunEngine(
+        state["store"],
+        gateway=_gateway(provider),
+        command_runner=runner,
+        provider=provider.name,
+        model="fake-code-model",
+        config=RunEngineConfig(max_task_attempts=1),
+    )
+
+    report = engine.execute(run_id=state["run"]["id"], workspace=state["workspace"])
+
+    assert not report.succeeded
+    acceptance = _evidence_record(state, "acceptance")
+    assert acceptance["status"] == "failed"
+    assert "different migration journal" in acceptance["metadata"]["summary"]
+
+
+def test_a_failed_preparation_withholds_the_gate_it_serves(tmp_path):
+    from richbuild.run_engine import RunEngine, RunEngineConfig
+
+    state = _persisting_state(tmp_path)
+    provider = OwnedPathProvider()
+    runner = DatabaseAwareRunner(prepare_returncode=1)
+    engine = RunEngine(
+        state["store"],
+        gateway=_gateway(provider),
+        command_runner=runner,
+        provider=provider.name,
+        model="fake-code-model",
+        config=RunEngineConfig(max_task_attempts=1),
+    )
+
+    report = engine.execute(run_id=state["run"]["id"], workspace=state["workspace"])
+
+    assert not report.succeeded
+    unit = _evidence_record(state, "unit")
+    assert unit["status"] == "failed"
+    assert unit["metadata"]["summary"] == (
+        "unit database preparation failed: the database-prepare step exited with 1"
+    )
+    document = _verification_document(state, "unit")
+    assert document["database_preparation"]["status"] == "failed"
+    assert document["database_preparation"]["returncode"] == 1
+    assert "unit" not in [c.kind for c in runner.commands]
+
+
+def test_an_application_without_a_data_component_runs_no_database_step(tmp_path):
+    from richbuild.run_engine import DatabaseStep
+
+    state = _prepared_state(tmp_path)
+    provider = FakeModelProvider()
+    runner = PassingCommandRunner()
+    engine = _engine(state, provider, runner)
+
+    report = engine.execute(run_id=state["run"]["id"], workspace=state["workspace"])
+
+    assert report.succeeded
+    assert not any(isinstance(c, DatabaseStep) for c in runner.commands)
+    acceptance = _evidence_record(state, "acceptance")
+    assert "database" not in acceptance["metadata"]["details"]
+
+
+def test_gates_see_the_database_only_where_the_software_runs(tmp_path):
+    """Build is deliberately blind: the deployed build has no database at
+    build time either, so a page that reads one while being prerendered must
+    fail here, not in production. Lint and typecheck run no code."""
+
+    from richbuild.executor import BubblewrapExecutor, SandboxPolicy
+    from richbuild.run_engine import (
+        DATABASE_PREPARE,
+        DATABASE_PROBE,
+        BubblewrapCommandRunner,
+        DatabaseStep,
+        VerificationCommand,
+    )
+
+    seen = {}
+
+    class RecordingExecutor(BubblewrapExecutor):
+        def run(self, root, argv, policy=None, *, cancellation=None, deadline=None):
+            assert isinstance(policy, SandboxPolicy)
+            seen["policy"] = policy
+            return ExecutionResult(
+                argv=tuple(argv), returncode=0, stdout="", stderr="", duration_seconds=0.01
+            )
+
+    runner = BubblewrapCommandRunner(RecordingExecutor(executable="/usr/bin/python3"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    for kind in ("lint", "static", "build"):
+        assert "RICH_DATABASE_DIR" not in runner.environment_for(kind)
+        assert ".rich/runtime/db" not in runner.writable_paths_for(kind)
+        runner.run(workspace, VerificationCommand(kind=kind, argv=("pnpm", "run", kind)))
+        assert "RICH_DATABASE_DIR" not in seen["policy"].environment
+        assert ".rich/runtime/db" not in seen["policy"].writable_paths
+    for kind in ("unit", "property", "acceptance"):
+        environment = runner.environment_for(kind)
+        assert environment["RICH_DATABASE_DIR"] == "/workspace/.rich/runtime/db"
+        assert runner.writable_paths_for(kind)[-1] == ".rich/runtime/db"
+    for kind in (DATABASE_PREPARE, DATABASE_PROBE):
+        runner.run(workspace, DatabaseStep(kind, ("node", "step.mjs")))
+        policy = seen["policy"]
+        assert policy.environment["RICH_DATABASE_DIR"] == "/workspace/.rich/runtime/db"
+        assert ".rich/runtime/db" in policy.writable_paths
+        assert policy.network is False
+        # Node's ceiling, not the browser's: the steps are plain Node.
+        assert policy.max_memory_bytes == runner.max_memory_bytes
+    # 24 GiB: two 8 GiB V8 cages (a `--import` loader runs on a worker
+    # thread) plus PGlite's WebAssembly heap measured 15.65 GiB, and a plain
+    # next build 16.0 GiB, under the previous 16 GiB ceiling.
+    assert runner.max_memory_bytes == 24 * 1024**3
+    with pytest.raises(ValueError):
+        DatabaseStep("database-anything", ("node",))
+    with pytest.raises(ValueError):
+        BubblewrapCommandRunner(
+            RecordingExecutor(executable="/usr/bin/python3"),
+            database_directory="../outside",
+        )

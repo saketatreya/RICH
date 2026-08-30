@@ -150,6 +150,20 @@ None of this weakens what is checked. Anti-vacuity, endomorphism, predicate typi
 example inhabitation all still hold on the assembled architecture, and every surviving
 obligation must still compile to a runnable check.
 
+**The value language has four kinds for state that outlives a request**, beside the
+seven structural ones: `identifier` (an opaque slug of at most 64 letters, digits, `-`
+and `_`, optionally naming the `entity` it refers to), `timestamp` (an RFC 3339 UTC
+instant ending in `Z`), `date` (an ISO calendar date), and `decimal` — an exact number
+carried as a *string* with a declared `precision` and `scale`, checked with Python's
+`Decimal` after normalisation, rendered as a branded string in TypeScript, and compared
+by the property gate after normalisation, so that "1.5" and "1.50" are one value and an
+implementation is right to answer either. That is how "money is a decimal string, never a
+float" reaches generated software. Each has one fixed grammar, so none adds a bound to
+derive; a decimal's precision and scale are asked for (a declaration about the quantity,
+not a guess at a bound), default to `(18, 2)` when omitted, and are widened by
+`fitted_to` to admit the examples the same answer supplies. Nothing else, until a
+scenario needs it.
+
 ### 4. The scaffold freezes the verifier
 
 The target pack emits:
@@ -169,6 +183,28 @@ unrecorded, altered, oversized, or symbolic-link files.
 Model output is restricted to approved owned source paths. Package manifests, lockfiles,
 tests, type declarations, compiler configuration, framework configuration, CI, and RICH
 metadata are protected generation inputs.
+
+**Persistence is scaffolded, not improvised.** When the architecture has a data
+component the pack renders `packages/db`, and two files inside it are protected even
+though the data node owns the directory: `src/database.ts`, the only place an engine is
+chosen (`DATABASE_URL` → Postgres over the wire; else `RICH_DATABASE_DIR` → PGlite,
+Postgres compiled to WebAssembly, in-process and socket-free; else throw — there is no
+default, so a page that reads the database while `next build` prerenders it fails, as it
+should), and `src/migrate.ts`, the gate-side half of the one migration algorithm
+(`packages/db/migrations/NNNN_name.sql` in name order, split on `--> statement-breakpoint`,
+one transaction, a journal of `(filename, sha256)`; an applied file whose content changed
+is refused). Each driver is imported only once selected, so a preview server never
+evaluates the WebAssembly engine. Drizzle's `meta/_journal.json` is not rendered: the SQL
+files and their digests are the only migration state, so there is no second bookkeeping
+for a worker to keep consistent. The factory is handed to the data task the way the pinned
+operations interface is — as context, never as one of its current files — because a
+worker told to persist without being shown the one door to the database would invent a
+second one. Requirements a data component serves are marked `persists` in the compiled
+intent and their pages are rendered `dynamic = "force-dynamic"`. Beside the manifest
+verifier sits `.rich/verify-database.mjs`, the read-only persistence probe §8 describes.
+The persistence pack is target-pack version 1.4.0; every remembered generation was
+invalidated once by that bump, deliberately, because what a worker is shown and held to
+changed.
 
 ### 5. Authority and budget are explicit
 
@@ -274,7 +310,15 @@ Linux Bubblewrap is mandatory for the production runtime. Generated commands see
 - explicit writable runtime/build/report paths;
 - no network during lint, typecheck, unit, build, or browser verification;
 - bounded wall/CPU time, processes, file size, logs, V8 heaps, and virtual address
-  space.
+  space;
+- a database, exactly where the software runs. `BubblewrapCommandRunner` decides the
+  environment and the writable set *per command kind* (`environment_for`,
+  `writable_paths_for`): the unit, property and acceptance gates, and the two trusted
+  database steps around them, get `.rich/runtime/db` writable and `RICH_DATABASE_DIR`
+  set; lint and typecheck run no code and get neither; **build gets neither on
+  purpose** — the deployed build has no database at build time either, so a page that
+  reads one while `next build` prerenders it fails here, not in production. A variable
+  that reaches one gate and not another is a decision that table records.
 
 Dependency and Chromium installation is a distinct network-enabled bootstrap. It uses
 the frozen lockfile, strict peers, store-integrity verification, ignored lifecycle
@@ -292,12 +336,18 @@ All sandbox processes run in dedicated process groups. Caller cancellation, leas
 and timeout share the same bounded termination-and-reaping path.
 
 `RLIMIT_AS` measures reserved virtual address space, not resident memory. ARM64 Node
-workers reserve 8 GiB pointer-compression cages before shared libraries and build
-tracing, while Chromium reserves a much larger PartitionAlloc cage. RICH therefore
-combines:
+workers reserve an 8 GiB pointer-compression cage *per V8 isolate* before shared
+libraries and build tracing — and a process running module-customization hooks
+(`--import tsx`, which the trusted migrator uses) runs them on a worker thread, a
+second isolate with a second cage — while Chromium reserves a much larger
+PartitionAlloc cage. RICH therefore combines:
 
 - 1.5 GiB Node V8 heap limits;
-- a finite 16 GiB Node address-space ceiling with cage/runtime headroom;
+- a finite 24 GiB Node address-space ceiling. Measured on the persistence spike: the
+  migrator's node peaked at 15.65 GiB (two cages beside PGlite's WebAssembly heap) and
+  a plain `next build` at 16.0 GiB against the previous 16 GiB ceiling, surviving on the
+  allocator's retry, which is not headroom; the resident peak of the same processes was
+  under 1 GiB. The ceiling still stops a runaway mapping;
 - one Next.js build CPU and no webpack build worker;
 - output-file tracing rooted at the web application, excluding the mutable
   workspace package cache while approved workspace packages are transpiled;
@@ -330,6 +380,23 @@ Missing, stale, forged, skipped, duplicated, unknown, or partial coverage fails 
 The run cannot publish success merely because a handler returns success. The scheduler
 checks required evidence kinds, blocking status, artifact roles, and exact acceptance
 coverage before committing task and run status.
+
+**Persisted state is observed, not inferred.** When the approved architecture has a data
+component, every gate that runs the software — unit, property, acceptance — is preceded
+by a trusted *prepare* step: the engine removes `.rich/runtime/db` on the host, computes
+the migration set from `packages/db/migrations` itself, and runs the protected migrator
+in the sandbox (`pnpm -C packages/db exec tsx src/migrate.ts`). The migrator's
+`RICH_DATABASE_MIGRATIONS` line is a command result, not a claim: its `(file, sha256)`
+set must equal the host's exactly, or the gate is not run and fails as "database
+preparation failed". The set the gate ran against — `{engine, migrations}` — is recorded
+on that gate's evidence, and preview and promotion assert the journal they write equals
+it (§12). After the browser has run every scenario, the read-only *probe*
+(`.rich/verify-database.mjs`) reports the journal and a row count per table in the same
+sandbox; its `RICH_DATABASE_PROBE` line is merged into the acceptance evidence, its
+journal must equal the prepare step's, and **a data component whose tables are all empty
+fails acceptance closed** — `reload` proves a record outlived the request; only the probe
+proves it reached the database. Neither step is an evidence kind of its own, so there is
+nothing a worker could claim in its place.
 
 ### 9. A change costs what it changes
 
@@ -409,6 +476,18 @@ avoid — the same reason `ContractV2` refuses a contract whose only claims are 
 and the same reason the obligation compiler refuses a `PROOF`-tier claim it can only
 sample.
 
+**Operations are async-tolerant uniformly.** The pinned interface renders every
+operation as `name(input): O | Promise<O>` and the compiled suite awaits every call — a
+totality claim reads `expect(await thrown(() => op(value))).toBeNull()`, which reports
+the same whether the operation answered or rejected. PGlite is asynchronous and the
+domain awaits the data layer, so a kind-scoped async would not have stayed scoped; and
+`await` of a plain value is that value, so a component with no database pays nothing for
+the uniformity. When the type an assertion compares carries a `decimal`, the suite binds
+its `shape` and compares `normalize(shape, actual)` to `normalize(shape, expected)`;
+every other suite compares structurally, unchanged. The suite, the generator and the
+interface are protected inputs, so this change to what a worker is held to is exactly
+what the pack version bump announces.
+
 ### 11. Evidence flows forward into the retry
 
 A gate failure is recorded as a `rich.command-verification/v1` artifact holding the exact
@@ -470,7 +549,20 @@ lazy secret handles, have durable state, and support expiry/teardown. Approved u
 bytes are frozen before migration preparation. Migrations run from a disposable
 extraction, but no generated Node process receives the database credential: trusted
 Python code reads only bounded, convention-named UTF-8 SQL files and applies them through
-`psycopg` with lock/statement timeouts and a digest journal. See the official
+`psycopg` with lock/statement timeouts and a digest journal.
+
+**The migration that passed the gate is the migration that is applied.** The preview
+request reads the migration set the run's acceptance evidence recorded (§8) and refuses,
+before anyone is asked to approve, a source whose `packages/db/migrations` is not exactly
+that set. The durable request carries the set and the gate's `SELECT version()`. At
+deploy the trusted runner refuses again before connecting if the extracted snapshot's
+files differ, applies the same text the same way the gate-side migrator did (§4), and
+then reads the journal back: it must equal the recorded set — a parent branch that already
+held other migrations, or a file whose digest drifted, fails the preview closed — and the
+preview's `SELECT version()` is recorded beside the gate's, majors side by side, in
+`preview.database.migrated`. The two engines differ (PGlite in WebAssembly at the gate,
+Postgres on Neon at preview); the dialect and the text do not, and the digests are how
+that is held. See the official
 [Neon branch workflow](https://neon.com/docs/get-started-with-neon/workflow-primer) and
 [Vercel API integration guidance](https://vercel.com/docs/integrations/create-integration/vercel-api-integrations).
 
@@ -651,6 +743,16 @@ python -m pytest --run-live \
 The public-runtime live test creates a fresh approved spec/architecture/scaffold, installs
 the frozen dependency graph and Chromium inside Bubblewrap, and runs the six independent
 gates. It does not use a model credential.
+
+Two more live tests carry persistence. `tests/test_persistence_spike_live.py` runs the
+pack's own protected factory, migrator and probe under the gate policy with only a
+worker's authorship laid over the scaffold — no model. `tests/test_persistence_live.py`
+is M7's proof: a real model over the `claude-code` route builds a todo list with a data
+component, and the run must succeed with exact coverage, a probe that counted the row the
+browser created, the migration digest set on the acceptance evidence, and the data
+component's property suite run against the in-sandbox database. Both honour
+`RICH_LIVE_CACHE_ROOT`, a host directory that shares the pnpm store and the browsers
+between live runs the way `<state>/../cache` does for the product.
 
 The Canvas frontend is checked independently:
 

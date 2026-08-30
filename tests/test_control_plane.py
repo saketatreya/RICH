@@ -173,7 +173,56 @@ def _scaffolded_preview_run(tmp_path, orchestrator):
     control_plane.store.attach_artifact(
         prepared.run["id"], snapshot.digest, role="source:release-snapshot"
     )
+    _attach_acceptance_evidence(control_plane.store, prepared.run["id"], destination)
     return control_plane, prepared, destination
+
+
+def _attach_acceptance_evidence(store, run_id, destination, *, migrations=None):
+    """What a succeeded run with a data component always has: passed
+    acceptance evidence recording the migration set the gates ran against."""
+
+    from richbuild.canonical import canonical_json_bytes
+    from richbuild.models import Evidence
+    from richbuild.preview import migration_digests
+
+    recorded = (
+        [entry.as_dict() for entry in migration_digests(destination)]
+        if migrations is None
+        else migrations
+    )
+    result = store.put_artifact(
+        canonical_json_bytes({"schema_version": "rich.command-verification/v1"}),
+        media_type="application/vnd.rich.evidence-result+json",
+    )
+    record = Evidence(
+        id="evidence.acceptance.fixture",
+        run_id=run_id,
+        kind="acceptance",
+        status="passed",
+        requirement_ids=("req.todo", "req.a11y"),
+        acceptance_scenario_ids=("scenario.todo", "scenario.a11y"),
+        artifact_ids=(result.digest,),
+        metadata={
+            "summary": "acceptance command passed; the database holds 1 row(s)",
+            "details": {
+                "database": {
+                    "directory": ".rich/runtime/db",
+                    "engine": {
+                        "name": "pglite",
+                        "server_version": "PostgreSQL 18.3 (PGlite 0.5.8) on wasm32",
+                    },
+                    "migrations": recorded,
+                    "tables": {"todos": 1},
+                    "rows": 1,
+                }
+            },
+        },
+    )
+    artifact = store.put_artifact(
+        canonical_json_bytes(record.to_dict()),
+        media_type="application/vnd.rich.evidence+json",
+    )
+    store.attach_artifact(run_id, artifact.digest, role="evidence:acceptance")
 
 
 def test_architecture_cannot_be_proposed_before_spec_approval(tmp_path):
@@ -846,3 +895,66 @@ def test_repository_push_needs_a_succeeded_run_and_an_acceptable_target(tmp_path
         control_plane.push_repository(
             run_id=unfinished.run["id"], remote="https://github.com/maya/x.git"
         )
+
+
+
+def test_a_preview_carries_the_migration_set_the_run_verified_and_refuses_another(
+    tmp_path,
+):
+    from datetime import datetime, timedelta, timezone
+
+    from richbuild.preview import migration_digests
+
+    orchestrator = RecordingPreviewOrchestrator()
+    control_plane, prepared, destination = _scaffolded_preview_run(
+        tmp_path, orchestrator
+    )
+    migrations = destination / "packages/db/migrations"
+    assert migrations.is_dir(), "the fixture's architecture has a data component"
+
+    submission = control_plane.request_preview(
+        run_id=prepared.run["id"],
+        source_dir=destination,
+        neon_project_id="neon-project",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    recorded = [entry.as_dict() for entry in migration_digests(destination)]
+    assert submission.preview["request"]["migration_digests"] == recorded
+    assert submission.preview["request"]["gate_engine"].startswith("PostgreSQL 18.3")
+    control_plane.decide_approval(
+        submission.approval["id"], approved=True, actor="founder"
+    )
+    deployed = control_plane.deploy_preview(
+        preview_id=submission.preview["id"], approval_id=submission.approval["id"]
+    )
+    assert deployed.preview["status"] == "ready"
+    request = orchestrator.created[-1]
+    assert [entry.as_dict() for entry in request.migration_digests] == recorded
+    assert request.gate_engine.startswith("PostgreSQL 18.3")
+
+    # A source whose migrations are not the verified set is refused before
+    # anyone is asked to approve. The release snapshot still matches -- the
+    # migration is part of it -- so this is a second, independent hold.
+    other = RecordingPreviewOrchestrator()
+    control_plane, prepared, destination = _scaffolded_preview_run(
+        tmp_path / "other", other
+    )
+    (destination / "packages/db/migrations/0001_more.sql").write_text(
+        'CREATE TABLE "more" (id uuid PRIMARY KEY);\n'
+    )
+    control_plane.store.attach_artifact(
+        prepared.run["id"],
+        control_plane.store.put_artifact(
+            create_deployment_snapshot(destination),
+            media_type="application/vnd.rich.release-source+zip",
+        ).digest,
+        role="source:release-snapshot",
+    )
+    with pytest.raises(ValueError, match="not the set the run verified"):
+        control_plane.request_preview(
+            run_id=prepared.run["id"],
+            source_dir=destination,
+            neon_project_id="neon-project",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+    assert other.created == []

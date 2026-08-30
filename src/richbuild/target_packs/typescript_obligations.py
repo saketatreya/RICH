@@ -26,6 +26,7 @@ something about a whole domain, and running a finite number of cases is not that
 from __future__ import annotations
 
 import json
+import re
 from typing import Iterable, Sequence
 
 from ..models import (
@@ -35,6 +36,7 @@ from ..models import (
     OperationContract,
     ProofObligation,
     ValueType,
+    ValueTypeKind,
 )
 
 
@@ -89,7 +91,11 @@ export type ValueType =
   | { kind: "enum"; members: string[] }
   | { kind: "list"; element: ValueType; min_length?: number; max_length?: number }
   | { kind: "record"; record_fields: { name: string; value_type: ValueType }[] }
-  | { kind: "optional"; element: ValueType };
+  | { kind: "optional"; element: ValueType }
+  | { kind: "identifier"; entity?: string }
+  | { kind: "timestamp" }
+  | { kind: "date" }
+  | { kind: "decimal"; precision: number; scale: number };
 
 export type CharSet =
   | "ascii_digits"
@@ -128,6 +134,12 @@ const ALPHABETS: Record<CharSet, string[]> = {
 // optional halves of a partially bounded range.
 const DEFAULT_MAX_INTEGER = 1_000_000;
 const DEFAULT_MAX_LENGTH = 16;
+// Instants and dates are drawn from one representative century. The range is
+// the sampler's, not the type's: a timestamp admits any real instant.
+const EPOCH_SECONDS_2000 = 946_684_800;
+const EPOCH_SECONDS_2100 = 4_102_444_800;
+const EPOCH_DAYS_2000 = 10_957;
+const EPOCH_DAYS_2100 = 47_482;
 
 /** xorshift32. Small, seedable, and stable across engines and versions. */
 export function makeRandom(seed: number): () => number {
@@ -193,6 +205,102 @@ export function sample(type: ValueType, random: () => number): unknown {
     }
     case "optional":
       return random() < 0.25 ? null : sample(type.element, random);
+    case "identifier": {
+      const alphabet = ALPHABETS.ascii_slug;
+      const length = pick(random, 1, DEFAULT_MAX_LENGTH);
+      let out = "";
+      for (let index = 0; index < length; index += 1) {
+        out += alphabet[pick(random, 0, alphabet.length - 1)];
+      }
+      return out;
+    }
+    case "timestamp":
+      return new Date(
+        pick(random, EPOCH_SECONDS_2000, EPOCH_SECONDS_2100) * 1000,
+      ).toISOString();
+    case "date":
+      return new Date(pick(random, EPOCH_DAYS_2000, EPOCH_DAYS_2100) * 86_400_000)
+        .toISOString()
+        .slice(0, 10);
+    case "decimal": {
+      // Digits, never a number: the value is a string end to end, so nothing
+      // here can round. At most `precision - scale` integer digits and at
+      // most `scale` fractional ones, in any of the spellings the checker
+      // admits.
+      const integerDigits = Math.max(0, type.precision - type.scale);
+      const wholeLength = integerDigits === 0 ? 0 : pick(random, 1, integerDigits);
+      let whole = "";
+      for (let index = 0; index < wholeLength; index += 1) {
+        whole += ASCII_DIGITS[pick(random, index === 0 ? 1 : 0, 9)];
+      }
+      if (whole === "") whole = "0";
+      const fractionLength = pick(random, 0, type.scale);
+      let fraction = "";
+      for (let index = 0; index < fractionLength; index += 1) {
+        fraction += ASCII_DIGITS[pick(random, 0, 9)];
+      }
+      const magnitude = fraction === "" ? whole : `${whole}.${fraction}`;
+      const negative = random() < 0.5 && canonicalDecimal(magnitude) !== "0";
+      return negative ? `-${magnitude}` : magnitude;
+    }
+  }
+}
+
+/**
+ * The canonical form of a value under its type. A decimal loses its leading
+ * and trailing zeros -- "01.50" and "1.5" are one value -- and nothing else
+ * changes. Assertions over a type that carries a decimal compare after this,
+ * because an implementation is right to answer "1.5" where the contract
+ * wrote "1.50".
+ */
+export function normalize(type: ValueType, value: unknown): unknown {
+  switch (type.kind) {
+    case "decimal":
+      return typeof value === "string" ? canonicalDecimal(value) : value;
+    case "optional":
+      return value === null ? null : normalize(type.element, value);
+    case "list":
+      return Array.isArray(value)
+        ? value.map((item) => normalize(type.element, item))
+        : value;
+    case "record": {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return value;
+      }
+      const record = value as Record<string, unknown>;
+      const out: Record<string, unknown> = { ...record };
+      for (const field of type.record_fields) {
+        if (field.name in record) {
+          out[field.name] = normalize(field.value_type, record[field.name]);
+        }
+      }
+      return out;
+    }
+    default:
+      return value;
+  }
+}
+
+function canonicalDecimal(text: string): string {
+  const match = /^(-?)(\\d+)(?:\\.(\\d+))?$/.exec(text);
+  if (match === null) return text;
+  const whole = (match[2] ?? "0").replace(/^0+(?=\\d)/, "");
+  const fraction = (match[3] ?? "").replace(/0+$/, "");
+  const magnitude = fraction === "" ? whole : `${whole}.${fraction}`;
+  return magnitude === "0" || match[1] === "" ? magnitude : `-${magnitude}`;
+}
+
+/**
+ * Run an operation and report what it threw, or null. A totality claim in
+ * one value, and one that reads the same whether the operation answers
+ * synchronously or with a promise.
+ */
+export async function thrown(run: () => unknown): Promise<unknown> {
+  try {
+    await run();
+    return null;
+  } catch (error) {
+    return error === undefined ? new Error("threw undefined") : error;
   }
 }
 
@@ -267,18 +375,55 @@ def _case_binding(obligation: ProofObligation, domain: ValueType) -> str:
     )
 
 
+def _carries_decimal(value_type: ValueType | None) -> bool:
+    if value_type is None:
+        return False
+    if value_type.kind is ValueTypeKind.DECIMAL:
+        return True
+    if value_type.element is not None and _carries_decimal(value_type.element):
+        return True
+    return any(
+        _carries_decimal(record_field.value_type)
+        for record_field in value_type.record_fields
+    )
+
+
+def _shape_binding(value_type: ValueType | None) -> str:
+    """Bind the type an assertion normalises under, when it must.
+
+    Only a type that carries a decimal needs one: "1.5" and "1.50" are one
+    value, and an implementation is right to answer either. Every other
+    type compares structurally, as before, so suites over them are unchanged.
+    """
+
+    if not _carries_decimal(value_type):
+        return ""
+    assert value_type is not None
+    return f"  const shape = {_type_literal(value_type)} as ValueType;\n"
+
+
+def _equal(actual: str, expected: str, value_type: ValueType | None) -> str:
+    if _carries_decimal(value_type):
+        return (
+            f"expect(normalize(shape, {actual}))"
+            f".toEqual(normalize(shape, {expected}))"
+        )
+    # toEqual, not equals(...) collapsed to a boolean: vitest prints the
+    # diff, and "expected false to be true" tells a reader -- or the worker
+    # reading the gate output on its next attempt -- nothing at all.
+    return f"expect({actual}).toEqual({expected})"
+
+
 def _example_test(obligation: ProofObligation, subject: OperationContract) -> str:
     example = obligation.example
     assert example is not None
     return (
         f"it({_literal(f'{obligation.id}: {subject.name} maps a known input')}, "
-        "() => {\n"
-        f"  const actual = operations.{_identifier(subject)}"
+        "async () => {\n"
+        + _shape_binding(subject.output_type)
+        + f"  const actual = await operations.{_identifier(subject)}"
         f"({_literal(example.argument)});\n"
-        # toEqual, not equals(...) collapsed to a boolean: vitest prints the
-        # diff, and "expected false to be true" tells a reader -- or the worker
-        # reading the gate output on its next attempt -- nothing at all.
-        f"  expect(actual).toEqual({_literal(example.result)});\n"
+        f"  {_equal('actual', _literal(example.result), subject.output_type)};\n"
         "});\n"
     )
 
@@ -288,19 +433,22 @@ def _relation_body(
     subject: OperationContract,
     operands: dict[str, OperationContract | None],
 ) -> str:
+    # Every call is awaited. An operation may answer synchronously or with a
+    # promise -- the interface says `O | Promise<O>` -- and `await` of a plain
+    # value is that value, so one spelling serves both.
     relation = obligation.relation
     call = f"operations.{_identifier(subject)}"
     if relation is ObligationRelation.TOTAL:
         guard = operands["guard_operation_id"]
         condition = (
-            f"    if (!operations.{_identifier(guard)}(value)) continue;\n"
+            f"    if (!(await operations.{_identifier(guard)}(value))) continue;\n"
             if guard is not None
             else ""
         )
         return (
             "  for (const value of cases) {\n"
             f"{condition}"
-            f"    expect(() => {call}(value)).not.toThrow();\n"
+            f"    expect(await thrown(() => {call}(value))).toBeNull();\n"
             "  }\n"
         )
     if relation is ObligationRelation.ROUND_TRIP:
@@ -308,16 +456,16 @@ def _relation_body(
         assert witness is not None
         return (
             "  for (const value of cases) {\n"
-            f"    const restored = operations.{_identifier(witness)}"
-            f"({call}(value));\n"
-            "    expect(restored).toEqual(value);\n"
+            f"    const restored = await operations.{_identifier(witness)}"
+            f"(await {call}(value));\n"
+            f"    {_equal('restored', 'value', subject.input_type)};\n"
             "  }\n"
         )
     if relation is ObligationRelation.IDEMPOTENT:
         return (
             "  for (const value of cases) {\n"
-            f"    const once = {call}(value);\n"
-            f"    expect({call}(once)).toEqual(once);\n"
+            f"    const once = await {call}(value);\n"
+            f"    {_equal(f'await {call}(once)', 'once', subject.output_type)};\n"
             "  }\n"
         )
     if relation is ObligationRelation.PRESERVES:
@@ -325,17 +473,17 @@ def _relation_body(
         assert predicate is not None
         return (
             "  for (const value of cases) {\n"
-            f"    if (!operations.{_identifier(predicate)}(value)) continue;\n"
-            f"    expect(operations.{_identifier(predicate)}({call}(value)))"
-            ".toBe(true);\n"
+            f"    if (!(await operations.{_identifier(predicate)}(value))) continue;\n"
+            f"    expect(await operations.{_identifier(predicate)}"
+            f"(await {call}(value))).toBe(true);\n"
             "  }\n"
         )
     predicate = operands["predicate_operation_id"]
     assert predicate is not None
     return (
         "  for (const value of cases) {\n"
-        f"    expect(operations.{_identifier(predicate)}({call}(value)))"
-        ".toBe(true);\n"
+        f"    expect(await operations.{_identifier(predicate)}"
+        f"(await {call}(value))).toBe(true);\n"
         "  }\n"
     )
 
@@ -388,10 +536,21 @@ def compile_obligation_suite(
                 "claim"
             )
         title = _RELATION_TITLES[obligation.relation]
+        compared = (
+            subject.input_type
+            if obligation.relation is ObligationRelation.ROUND_TRIP
+            else subject.output_type
+        )
         blocks.append(
             f"it({_literal(f'{obligation.id}: {subject.name} {title}')}, "
-            "() => {\n"
+            "async () => {\n"
             + _case_binding(obligation, domain)
+            + (
+                _shape_binding(compared)
+                if obligation.relation
+                in (ObligationRelation.ROUND_TRIP, ObligationRelation.IDEMPOTENT)
+                else ""
+            )
             + _relation_body(obligation, subject, operands)
             + "});\n"
         )
@@ -410,12 +569,14 @@ def compile_obligation_suite(
     # Import exactly what the emitted assertions use. A contract with only
     # example obligations draws no cases, and an unused import fails the very
     # typecheck and lint gates this file is supposed to run alongside.
+    # A bare call, never a method: an operation may be named `normalize` or
+    # `equals`, and `operations.normalize(` must not pull the generator's.
     generator_imports = [
         name
-        for name in ("casesFor", "equals")
-        if f"{name}(" in body
+        for name in ("casesFor", "equals", "normalize", "thrown")
+        if re.search(rf"(?<![\w.]){name}\(", body)
     ]
-    if "casesFor(" in body:
+    if "as ValueType" in body:
         generator_imports.append("type ValueType")
     return (
         "// GENERATED BY RICH. Protected input: do not edit.\n"
@@ -425,9 +586,13 @@ def compile_obligation_suite(
         "// reproduces exactly on any machine, forever.\n"
         'import { describe, expect, it } from "vitest";\n'
         "\n"
-        f"import {{ {', '.join(generator_imports)} }} "
-        'from "./rich-value-generator";\n'
-        f'import {{ operations }} from "{relative}";\n'
+        + (
+            f"import {{ {', '.join(generator_imports)} }} "
+            'from "./rich-value-generator";\n'
+            if generator_imports
+            else ""
+        )
+        + f'import {{ operations }} from "{relative}";\n'
         "\n"
         f"describe({_literal(contract.id)}, () => {{\n"
         + "\n".join(f"  {line}" if line else line for line in body.splitlines())
@@ -453,6 +618,10 @@ def compile_operations_interface(
         "// interface in "
         + (operations_module(owned_paths) if owned_paths else "its module")
         + " and export it as `operations`.\n",
+        "//\n",
+        "// Every operation may answer synchronously or with a promise. The\n",
+        "// property gate awaits every call, so a component that reaches a\n",
+        "// database answers with promises and one that does not need not.\n",
     ]
     seen: dict[str, OperationContract] = {}
     for contract in contracts:
@@ -470,6 +639,20 @@ def compile_operations_interface(
                 continue
             seen[operation.name] = operation
 
+    if any(
+        _carries_decimal(operation.input_type) or _carries_decimal(operation.output_type)
+        for operation in seen.values()
+    ):
+        lines.append(
+            "\n"
+            "/**\n"
+            " * An exact number carried as a string, never a float: \"12.50\".\n"
+            " * The declared precision and scale are held by the property gate,\n"
+            " * not the type system. Make one with `value as Decimal`.\n"
+            " */\n"
+            "export type Decimal = string & { readonly __rich_decimal: never };\n"
+        )
+
     lines.append("\nexport interface Operations {\n")
     for name in sorted(seen):
         operation = seen[name]
@@ -478,9 +661,10 @@ def compile_operations_interface(
                 f"operation {operation.id!r} has no declared type, so it cannot "
                 "be pinned as an implementable surface"
             )
+        output = _typescript_type(operation.output_type)
         lines.append(
             f"  {name}(input: {_typescript_type(operation.input_type)}): "
-            f"{_typescript_type(operation.output_type)};\n"
+            f"{output} | Promise<{output}>;\n"
         )
     lines.append("}\n")
     return "".join(lines)
@@ -492,8 +676,13 @@ def _typescript_type(value_type: ValueType) -> str:
         return "boolean"
     if kind == "integer":
         return "number"
-    if kind == "string":
+    if kind in ("string", "identifier", "timestamp", "date"):
+        # An identifier, an instant and a date are strings with a grammar the
+        # gate checks; only a decimal is branded, because a plain string
+        # there would invite a float on the way in.
         return "string"
+    if kind == "decimal":
+        return "Decimal"
     if kind == "enum":
         return " | ".join(_literal(member) for member in value_type.members)
     if kind == "optional":

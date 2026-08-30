@@ -877,3 +877,146 @@ def test_untyped_contracts_remain_valid_so_the_typed_view_can_arrive_gradually()
 
     assert contract.operations[0].input_type is None
     assert contract.obligations[0].example.argument == {"a": 1}
+
+
+# --------------------------------------------------------------------------
+# The persistence kinds: one fixed grammar each, a decimal that is a string
+# --------------------------------------------------------------------------
+
+
+IDENTIFIER = ValueType(kind=ValueTypeKind.IDENTIFIER, entity="Todo")
+TIMESTAMP = ValueType(kind=ValueTypeKind.TIMESTAMP)
+DATE = ValueType(kind=ValueTypeKind.DATE)
+MONEY = ValueType(kind=ValueTypeKind.DECIMAL, precision=5, scale=2)
+
+
+@pytest.mark.parametrize(
+    ("kind", "slot", "value"),
+    [
+        (ValueTypeKind.IDENTIFIER, "max_length", 4),
+        (ValueTypeKind.IDENTIFIER, "precision", 2),
+        (ValueTypeKind.TIMESTAMP, "entity", "Todo"),
+        (ValueTypeKind.DATE, "members", ("a",)),
+        (ValueTypeKind.DECIMAL, "char_set", CharSet.ASCII_DIGITS),
+        (ValueTypeKind.DECIMAL, "entity", "Money"),
+        (ValueTypeKind.STRING, "precision", 2),
+        (ValueTypeKind.INTEGER, "entity", "Todo"),
+    ],
+)
+def test_the_persistence_kinds_keep_the_arity_table_closed(kind, slot, value):
+    base = {ValueTypeKind.DECIMAL: {"precision": 5, "scale": 2}}.get(kind, {})
+    with pytest.raises(ModelValidationError, match="cannot carry"):
+        ValueType(kind=kind, **base, **{slot: value})
+
+
+def test_a_decimal_declares_its_precision_and_scale_and_they_cohere():
+    with pytest.raises(ModelValidationError, match="requires"):
+        ValueType(kind=ValueTypeKind.DECIMAL)
+    with pytest.raises(ModelValidationError, match="requires"):
+        ValueType(kind=ValueTypeKind.DECIMAL, precision=5)
+    with pytest.raises(ModelValidationError, match="scale cannot exceed precision"):
+        ValueType(kind=ValueTypeKind.DECIMAL, precision=2, scale=3)
+    with pytest.raises(ModelValidationError, match="between 1 and 38"):
+        ValueType(kind=ValueTypeKind.DECIMAL, precision=0, scale=0)
+    with pytest.raises(ModelValidationError, match="between 1 and 38"):
+        ValueType(kind=ValueTypeKind.DECIMAL, precision=39, scale=2)
+    with pytest.raises(ModelValidationError, match="entity"):
+        ValueType(kind=ValueTypeKind.IDENTIFIER, entity="not a name")
+    # Bounded by grammar, so sampleable without a declared bound -- and finite
+    # but nowhere near enumerable.
+    for value_type in (IDENTIFIER, TIMESTAMP, DATE, MONEY):
+        assert value_type.is_finitely_sampleable is True
+        assert value_type.cardinality_bound is None
+        assert ValueType.from_dict(value_type.to_dict()) == value_type
+    assert IDENTIFIER.to_dict() == {"kind": "identifier", "entity": "Todo"}
+    assert MONEY.to_dict() == {"kind": "decimal", "precision": 5, "scale": 2}
+
+
+@pytest.mark.parametrize(
+    ("value_type", "value", "accepted"),
+    [
+        (IDENTIFIER, "task-1", True),
+        (IDENTIFIER, "550e8400-e29b-41d4-a716-446655440000", True),
+        (IDENTIFIER, "", False),
+        (IDENTIFIER, "a" * 65, False),
+        (IDENTIFIER, "task 1", False),
+        (IDENTIFIER, 7, False),
+        (TIMESTAMP, "2026-08-29T12:00:00Z", True),
+        (TIMESTAMP, "2026-08-29T12:00:00.250Z", True),
+        (TIMESTAMP, "2026-08-29T12:00:00+05:30", False),
+        (TIMESTAMP, "2026-02-30T00:00:00Z", False),
+        (TIMESTAMP, "2026-08-29", False),
+        (DATE, "2026-08-29", True),
+        (DATE, "2024-02-29", True),
+        (DATE, "2026-02-29", False),
+        (DATE, "2026-08-29T00:00:00Z", False),
+        (MONEY, "12.50", True),
+        (MONEY, "12.5", True),
+        (MONEY, "-0.05", True),
+        (MONEY, "999", True),
+        (MONEY, "0", True),
+        (MONEY, "1234", False),
+        (MONEY, "12.345", False),
+        (MONEY, "1.", False),
+        (MONEY, "1e3", False),
+        (MONEY, 12.5, False),
+        (MONEY, 12, False),
+    ],
+)
+def test_the_persistence_kinds_decide_membership_by_their_grammar(
+    value_type, value, accepted
+):
+    assert value_type.accepts(value) is accepted
+
+
+@pytest.mark.parametrize(
+    ("value_type", "value", "fragment"),
+    [
+        (IDENTIFIER, "task 1", "letters, digits, '-' and '_' only"),
+        (IDENTIFIER, "", "1 to 64"),
+        (TIMESTAMP, "yesterday", "RFC 3339 UTC instant"),
+        (TIMESTAMP, "2026-02-30T00:00:00Z", "not a real instant"),
+        (DATE, "2026-02-29", "not a real calendar date"),
+        (MONEY, 12.5, "got a number"),
+        (MONEY, "12.345", "3 decimal places, over the scale of 2"),
+        (MONEY, "1234", "4 integer digits, over the 3 that precision 5 and scale 2 allow"),
+    ],
+)
+def test_a_persistence_kind_says_why_it_refused(value_type, value, fragment):
+    assert fragment in value_type.explain(value)
+
+
+def test_a_decimal_is_widened_to_admit_its_examples_never_narrowed():
+    # "12.345" needs a third place; "123456" needs six integer digits. Scale
+    # and precision grow to fit both and never shrink below what was declared.
+    fitted = MONEY.fitted_to(["12.345", "123456", "not a decimal", 7])
+    assert (fitted.precision, fitted.scale) == (9, 3)
+    assert fitted.accepts("12.345") and fitted.accepts("123456.999")
+    assert MONEY.fitted_to([]) == MONEY
+    assert MONEY.fitted_to(["1.5"]) == MONEY
+    # An example that would need more than the language allows is left for
+    # inhabitation to refuse, with its reason, rather than fitted past 38.
+    assert MONEY.fitted_to(["1" * 40]) == MONEY
+    assert IDENTIFIER.fitted_to(["anything at all"]) == IDENTIFIER
+    assert TIMESTAMP.fitted_to(["x"]) == TIMESTAMP
+
+
+def test_the_persistence_kinds_project_onto_json_schema():
+    assert IDENTIFIER.json_schema() == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9_-]+$",
+    }
+    assert TIMESTAMP.json_schema() == {"type": "string", "format": "date-time"}
+    assert DATE.json_schema() == {"type": "string", "format": "date"}
+    # A string, and the pattern says so: the precision and scale are the
+    # type's, since JSON Schema has no spelling for them.
+    assert MONEY.json_schema() == {"type": "string", "pattern": r"^-?[0-9]+(?:\.[0-9]+)?$"}
+    line = ValueType(
+        kind=ValueTypeKind.RECORD,
+        record_fields=(RecordField("amount", MONEY), RecordField("id", IDENTIFIER)),
+    )
+    assert line.json_schema()["properties"]["amount"]["type"] == "string"
+    operation = _operation("op.pay", input_type=line, output_type=MONEY)
+    assert operation.input_type == line

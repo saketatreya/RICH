@@ -30,6 +30,8 @@ from .repository import (
     push_snapshot,
 )
 from .preview import (
+    MigrationDigest,
+    PreviewError,
     PreviewOrchestrator,
     PreviewRequest,
     PreviewResult,
@@ -37,6 +39,7 @@ from .preview import (
     create_deployment_snapshot,
     extract_deployment_snapshot,
     environment_secret_resolver,
+    migration_digests,
 )
 from .canonical import canonical_json_bytes
 from .store import Revision, RichStore, StoredArtifact, StoreError
@@ -1091,6 +1094,24 @@ class ControlPlane:
         project = self.store.get_project(run["project_id"])
         project_name = _dns_name(project["name"], fallback=project["id"])
         branch_name = neon_branch_name or _preview_branch_name(run_id)
+        # The migration set the run verified, from its acceptance evidence,
+        # held against the source before anyone is asked to approve: a preview
+        # of a schema the gates never ran is refused here, not at deploy.
+        verified = self._verified_database(run_id)
+        recorded = tuple(
+            MigrationDigest(str(entry["file"]), str(entry["sha256"]))
+            for entry in verified.get("migrations", [])
+        )
+        try:
+            on_disk = migration_digests(source)
+        except PreviewError as exc:
+            raise ValueError(f"preview source migrations are unsafe: {exc}") from exc
+        if on_disk != recorded:
+            raise ValueError(
+                "preview source's migrations are not the set the run verified: "
+                f"source has {[entry.file for entry in on_disk]}, the run "
+                f"recorded {[entry.file for entry in recorded]}"
+            )
         request = PreviewRequest(
             run_id=run_id,
             source_dir=source,
@@ -1103,6 +1124,8 @@ class ControlPlane:
             neon_parent_branch_id=neon_parent_branch_id,
             vercel_project_id=vercel_project_id,
             vercel_team_id=vercel_team_id,
+            migration_digests=recorded,
+            gate_engine=str(verified.get("engine", {}).get("server_version", "")),
         )
         preview_id = f"preview_{uuid4().hex}"
         snapshot_content = create_deployment_snapshot(source)
@@ -1146,6 +1169,8 @@ class ControlPlane:
             "neon_parent_branch_id": request.neon_parent_branch_id,
             "vercel_project_id": request.vercel_project_id,
             "vercel_team_id": request.vercel_team_id,
+            "migration_digests": [entry.as_dict() for entry in request.migration_digests],
+            "gate_engine": request.gate_engine,
         }
         approval_request = {
             "preview_id": preview_id,
@@ -1466,6 +1491,30 @@ class ControlPlane:
             raise RuntimeError("preview providers are not configured")
         return self.preview_orchestrator
 
+    def _verified_database(self, run_id: str) -> dict[str, Any]:
+        """The `database` the run's last passed acceptance evidence recorded:
+        the migration set the gates ran against and the engine that ran it.
+        Empty when the run had no data component."""
+
+        found: dict[str, Any] = {}
+        for attachment in self.store.list_run_artifacts(run_id):
+            if attachment["role"] != "evidence:acceptance":
+                continue
+            try:
+                record = json.loads(
+                    self.store.get_artifact(attachment["digest"]).path.read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(record, dict) or record.get("status") != "passed":
+                continue
+            database = (record.get("metadata") or {}).get("details", {}).get("database")
+            if isinstance(database, dict):
+                found = database
+        return found
+
     def _require_approval(
         self,
         approval_id: str,
@@ -1528,6 +1577,11 @@ def _preview_request(
         ),
         vercel_project_id=_stringified(document.get("vercel_project_id")),
         vercel_team_id=_stringified(document.get("vercel_team_id")),
+        migration_digests=tuple(
+            MigrationDigest(str(entry["file"]), str(entry["sha256"]))
+            for entry in document.get("migration_digests") or ()
+        ),
+        gate_engine=str(document.get("gate_engine") or ""),
     )
 
 

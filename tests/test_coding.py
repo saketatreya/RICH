@@ -1401,3 +1401,238 @@ def test_a_scenario_names_the_pages_the_task_owns(tmp_path):
     assert all("pages" not in s for s in plain["approved_intent"]["acceptance_scenarios"])
     assert plain["pages_to_write"] == []
     assert without.user_prompt.startswith("Produce the smallest")
+
+
+# --------------------------------------------------------------------------
+# Persistence: the data package's factory and migrator are protected, and the
+# factory is handed to the one task that must reach the database through it.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["packages/db/src/database.ts", "packages/db/src/migrate.ts"],
+)
+def test_the_database_boundary_cannot_be_rewritten_by_the_data_worker(path):
+    """Inside the data node's ownership because that is where it must be
+    importable from; protected because a worker that could rewrite the factory
+    could pick an engine the gates never ran, and one that could rewrite the
+    migrator could journal a migration it did not apply."""
+
+    assert coding.is_protected_generation_path(PurePosixPath(path))
+    with pytest.raises(
+        FileBundleValidationError, match="protected verification or toolchain"
+    ):
+        parse_file_bundle(
+            _valid_bundle(
+                files=[{"operation": "replace", "path": path, "content": "export {};\n"}]
+            ),
+            owned_paths=("packages/db",),
+        )
+    # Exactly those two, not the whole package: the schema, the migrations and
+    # the operations are the worker's to write.
+    assert not coding.is_protected_generation_path(PurePosixPath("packages/db/src/schema.ts"))
+    assert not coding.is_protected_generation_path(
+        PurePosixPath("packages/db/migrations/0001_todos.sql")
+    )
+    assert not coding.is_protected_generation_path(PurePosixPath("packages/db/src/operations.ts"))
+    assert not coding.is_protected_generation_path(
+        PurePosixPath("packages/domain/src/database.ts")
+    ), "the rule names the data package, not a filename"
+
+
+def _persisting_fixture(tmp_path):
+    from richbuild.planner import plan_nextjs_architecture
+    from richbuild.target_packs.nextjs import NextJsTargetPack, NextJsTargetPackConfig
+
+    project = ProjectSpec(
+        id="project.todo",
+        name="Todo",
+        goal="Keep a todo list that is stored in the database.",
+        audiences=("members",),
+        requirements=(
+            Requirement(
+                id="requirement.todo",
+                title="Todo list",
+                statement="A member adds a todo and it is stored.",
+            ),
+        ),
+        acceptance_scenarios=(
+            AcceptanceScenario(
+                id="scenario.todo",
+                title="A todo persists",
+                given=("The list is empty.",),
+                when=("A member adds 'Buy milk'.",),
+                then=("'Buy milk' is listed.",),
+                requirement_ids=("requirement.todo",),
+                oracle=(
+                    {"action": "open_requirement"},
+                    {
+                        "action": "assert_visible",
+                        "locator": {"kind": "text", "value": "Buy milk"},
+                    },
+                ),
+            ),
+        ),
+    )
+    architecture = plan_nextjs_architecture(project).architecture
+    assert any(node.kind is NodeKind.DATA for node in architecture.nodes)
+    workspace = tmp_path / "workspace"
+    NextJsTargetPack(
+        NextJsTargetPackConfig(
+            project_name="todo", project_spec=project, architecture=architecture
+        )
+    ).scaffold(workspace)
+    plan = compile_architecture(architecture, project)
+    approval = ApprovalWitness(
+        project_id=project.id,
+        project_revision=project.revision,
+        architecture_id=architecture.id,
+        architecture_revision=architecture.revision,
+    )
+    return workspace, project, architecture, plan, approval
+
+
+def test_the_database_factory_is_shown_only_to_the_task_that_owns_the_data_package(
+    tmp_path,
+):
+    """It is protected, so it is scoped out of current_files; a worker told to
+    persist without being shown the one door to the database would invent a
+    second one."""
+
+    workspace, project, architecture, plan, approval = _persisting_fixture(tmp_path)
+
+    data = build_task_prompt(
+        workspace=workspace,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["data"],
+        approval=approval,
+    )
+    domain = build_task_prompt(
+        workspace=workspace,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["domain"],
+        approval=approval,
+        dependency_summaries={"data": "Stores todos."},
+    )
+
+    assert "pinned_database_factory" in data.user_prompt
+    assert "DATABASE_URL or RICH_DATABASE_DIR is required" in data.user_prompt
+    assert "packages/db/src/database.ts" in data.user_prompt
+    assert "--> statement-breakpoint" in data.user_prompt
+    assert "never assume existing rows" in data.user_prompt
+    # Not one of "your current files": the parser would refuse the edit.
+    assert '"path": "packages/db/src/database.ts", "sha256"' not in data.user_prompt
+    assert "packages/db/src/migrate.ts" not in data.user_prompt
+
+    assert "pinned_database_factory" not in domain.user_prompt
+    assert "force-dynamic" in domain.user_prompt, (
+        "every task in a persisting application is told the build has no database"
+    )
+    assert "importing a database driver" in domain.user_prompt
+    # The first live proof: the web worker satisfied its contract and left the
+    # scaffold's placeholder page, so the browser never found the field.
+    assert "exactly the controls each oracle step names" in domain.user_prompt
+    assert "placeholder page" in domain.user_prompt
+
+
+def test_an_application_without_a_data_component_hears_nothing_about_databases(
+    tmp_path,
+):
+    project, architecture, plan, approval = _fixture()
+    prompt = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=plan.task_index["domain"],
+        approval=approval,
+    )
+
+    assert "force-dynamic" not in prompt.user_prompt
+    assert "pinned_database_factory" not in prompt.user_prompt
+
+
+def test_a_retry_prompt_withholds_the_oldest_failures_rather_than_not_happening(
+    tmp_path,
+):
+    """Three bounded failures beside a large owned tree overflowed the prompt
+    on a live run, so the second and third attempts never happened -- the
+    task failed on PromptLimitError without the model ever reading the gate
+    output. The oldest failures go first, the worker is told how many, and
+    only a prompt that overflows with no failure at all is refused."""
+
+    project, architecture, plan, approval = _fixture()
+    task = plan.task_index["web"]
+    summaries = {"domain": "Exposes a stable getNote operation."}
+    failures = [
+        PriorAttemptFailure(
+            attempt=index,
+            gate="types",
+            summary=f"types exited with {index}",
+            diagnostics=tuple(
+                f"apps/web/note.tsx({line},1): error TS{index}000: failure number {index} "
+                + "x" * 90
+                for line in range(1, 30)
+            ),
+        )
+        for index in range(1, 4)
+    ]
+    base = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=task,
+        approval=approval,
+        dependency_summaries=summaries,
+    )
+    one_failure = len(json.dumps(failures[2].to_dict()).encode("utf-8"))
+    limits = coding.CodingLimits(max_prompt_bytes=base.prompt_bytes + one_failure + 1500)
+
+    retry = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=task,
+        approval=approval,
+        dependency_summaries=summaries,
+        prior_failures=failures,
+        limits=limits,
+    )
+
+    assert retry.prompt_bytes <= limits.max_prompt_bytes
+    assert "failure number 3" in retry.user_prompt, "the most recent is what fits"
+    assert "failure number 2" not in retry.user_prompt
+    assert "failure number 1" not in retry.user_prompt
+    assert '"prior_attempt_failures_withheld":2' in retry.user_prompt
+    assert "2 oldest failure(s) did not fit" in retry.user_prompt
+    assert "observed by the harness" in retry.user_prompt
+
+    # With room for all three, nothing is withheld and nothing says so.
+    roomy = build_task_prompt(
+        workspace=tmp_path,
+        project=project,
+        architecture=architecture,
+        task=task,
+        approval=approval,
+        dependency_summaries=summaries,
+        prior_failures=failures,
+    )
+    assert "failure number 1" in roomy.user_prompt
+    assert "did not fit" not in roomy.user_prompt
+    assert "prior_attempt_failures_withheld" not in roomy.user_prompt
+
+    # A prompt that overflows with no failure at all is still refused: that
+    # is a task too large for the worker, not a retry too large to explain.
+    with pytest.raises(coding.PromptLimitError):
+        build_task_prompt(
+            workspace=tmp_path,
+            project=project,
+            architecture=architecture,
+            task=task,
+            approval=approval,
+            dependency_summaries=summaries,
+            prior_failures=failures,
+            limits=coding.CodingLimits(max_prompt_bytes=base.prompt_bytes - 1),
+        )

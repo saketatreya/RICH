@@ -173,8 +173,11 @@ class DefaultRunExecutor:
                 lint_argv=commands.lint_argv,
                 static_argv=commands.static_argv,
                 unit_argv=commands.unit_argv,
+                property_argv=commands.property_argv,
                 build_argv=commands.build_argv,
                 acceptance_argv=commands.acceptance_argv,
+                database_argv=commands.database_argv,
+                probe_argv=commands.probe_argv,
                 exercised_paths=exercised_pages,
                 execution_lease_seconds=(
                     DEFAULT_EXECUTION_LEASE_SECONDS

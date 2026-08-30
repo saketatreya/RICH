@@ -46,3 +46,24 @@ def require_preview_credentials() -> dict[str, str | None]:
         "vercel_project_id": os.environ.get("RICH_VERCEL_PROJECT_ID") or None,
         "vercel_team_id": os.environ.get("RICH_VERCEL_TEAM_ID") or None,
     }
+
+
+def live_cache_root() -> Path | None:
+    """Where live tests may share the pnpm store and the browsers, if anywhere.
+
+    A cold bootstrap downloads about 2 GiB. ``--basetemp`` is wiped at the
+    start of every run, so a cache that survives between runs has to live
+    elsewhere and be asked for explicitly: ``RICH_LIVE_CACHE_ROOT``. Unset,
+    every live workspace installs into itself, as before. Set, the bootstrap
+    writes the cache under a lock and every gate mounts it read-only -- the
+    same trust rule the product applies to ``<state>/../cache``.
+    """
+
+    import os
+
+    value = os.environ.get("RICH_LIVE_CACHE_ROOT")
+    if not value:
+        return None
+    root = Path(value).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root

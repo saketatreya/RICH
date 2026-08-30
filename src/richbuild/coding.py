@@ -32,7 +32,7 @@ from .fs import fsync_directory
 from .canonical import canonical_json_text as _canonical_json
 from .paths import UnsafePath, is_owned, safe_relative_path
 from .compiler import CompiledTask, compile_architecture
-from .models import ArchitectureSpec, ProjectSpec
+from .models import ArchitectureSpec, NodeKind, ProjectSpec
 from .providers import GenerationRole, ModelGateway, ModelRequest, ModelResponse
 from .scheduler import ProducedArtifact, TaskContext, TaskEvidence, TaskResult
 
@@ -732,6 +732,20 @@ _PROTECTED_DIRECTORY_NAMES = frozenset(
 )
 
 
+_DATABASE_PACKAGE = ("packages", "db", "src")
+_DATABASE_BOUNDARY_NAMES = frozenset({"database.ts", "migrate.ts"})
+
+
+def is_database_boundary_path(path: PurePosixPath) -> bool:
+    """The data package's protected factory and migrator, and nothing else."""
+
+    return (
+        len(path.parts) == 4
+        and path.parts[:3] == _DATABASE_PACKAGE
+        and path.name in _DATABASE_BOUNDARY_NAMES
+    )
+
+
 def is_protected_generation_path(path: PurePosixPath) -> bool:
     """Return whether a model-authored change could weaken its own verifier."""
 
@@ -755,6 +769,15 @@ def is_protected_generation_path(path: PurePosixPath) -> bool:
     # interface. A worker able to rewrite these could change what the
     # application claims to do, which is not a coding decision.
     if path.name == "product-intent.ts" and path.parts[:1] == ("packages",):
+        return True
+    # The data package's engine-selecting factory and its migrator. Inside the
+    # data node's ownership for the same reason as the operations interface --
+    # that is where they must be importable from -- and protected for a
+    # sharper one: a worker that could rewrite the factory could pick an engine
+    # the gates never ran, or a default the environment never set, and a
+    # worker that could rewrite the migrator could journal a migration it did
+    # not apply.
+    if is_database_boundary_path(path):
         return True
     lowered = path.name.lower()
     if (
@@ -1435,6 +1458,42 @@ def _pinned_operations(
         return None
 
 
+def _pinned_database_factory(
+    root: Path, task: CompiledTask, limits: CodingLimits
+) -> tuple[str, str] | None:
+    """Return the protected database factory this task must reach the database
+    through, and its path -- for the task that owns the data package only.
+
+    Same shape as ``_pinned_operations`` and for the same reason: the factory
+    is protected, so it is scoped out of current_files, and a worker told to
+    persist without being shown the one door to the database would invent a
+    second one.
+    """
+
+    for owned in sorted(task.owned_paths):
+        candidate = PurePosixPath(owned) / "src" / "database.ts"
+        if not is_database_boundary_path(candidate):
+            continue
+        source = root.joinpath(*candidate.parts)
+        try:
+            if not source.is_file():
+                continue
+            content = source.read_bytes()
+        except OSError:
+            continue
+        if len(content) > limits.max_current_file_bytes:
+            continue
+        try:
+            return content.decode("utf-8"), candidate.as_posix()
+        except UnicodeError:
+            continue
+    return None
+
+
+def _has_data_component(architecture: ArchitectureSpec) -> bool:
+    return any(node.kind is NodeKind.DATA for node in architecture.nodes)
+
+
 def build_task_prompt(
     *,
     workspace: str | os.PathLike[str],
@@ -1509,6 +1568,8 @@ def build_task_prompt(
     current_files, _ = _read_current_files(root, task.owned_paths, limits)
     pinned = _pinned_operations(root, task, limits)
     obligation_surface = pinned[0] if pinned else None
+    database_factory = _pinned_database_factory(root, task, limits)
+    persists = _has_data_component(architecture)
     requirement_ids = set(task.requirement_ids)
     relevant_node_ids = {
         task.node_id,
@@ -1525,6 +1586,75 @@ def build_task_prompt(
         for node in relevant_nodes
         if node["contract_id"] is not None
     }
+    def render(carried: Sequence[PriorAttemptFailure]) -> tuple[dict[str, Any], str, str]:
+        return _render_task_prompt(
+            project=project,
+            architecture=architecture,
+            task=task,
+            requirement_ids=requirement_ids,
+            relevant_nodes=relevant_nodes,
+            relevant_contract_ids=relevant_contract_ids,
+            relevant_node_ids=relevant_node_ids,
+            normalized_summaries=normalized_summaries,
+            obligation_surface=obligation_surface,
+            pinned=pinned,
+            database_factory=database_factory,
+            persists=persists,
+            current_files=current_files,
+            scenario_pages=scenario_pages,
+            carried=carried,
+            withheld=len(recent_failures) - len(carried),
+        )
+
+    # The gate output a retry is shown is bounded per failure, but three
+    # bounded failures beside a large owned tree can still overflow the
+    # prompt. A retry that cannot see why the last attempt failed is just
+    # another first attempt -- and a retry that never happens because the
+    # failure was too big to show is worse. So the oldest failures are
+    # withheld first, and the worker is told how many, until the prompt fits;
+    # only a prompt that overflows with no failure at all is refused.
+    carried = list(recent_failures)
+    while True:
+        context, system_prompt, user_prompt = render(carried)
+        prompt_bytes = len(system_prompt.encode("utf-8")) + len(
+            user_prompt.encode("utf-8")
+        )
+        if prompt_bytes <= limits.max_prompt_bytes:
+            break
+        if not carried:
+            raise PromptLimitError(
+                f"task prompt is {prompt_bytes} bytes, over the "
+                f"{limits.max_prompt_bytes}-byte limit"
+            )
+        carried = carried[1:]
+    return PromptBundle(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        current_file_count=len(current_files),
+        prompt_bytes=prompt_bytes,
+    )
+
+
+def _render_task_prompt(
+    *,
+    project: ProjectSpec,
+    architecture: ArchitectureSpec,
+    task: CompiledTask,
+    requirement_ids: set[str],
+    relevant_nodes: list[dict[str, Any]],
+    relevant_contract_ids: set[str],
+    relevant_node_ids: set[str],
+    normalized_summaries: dict[str, str],
+    obligation_surface: str | None,
+    pinned: tuple[str, str] | None,
+    database_factory: tuple[str, str] | None,
+    persists: bool,
+    current_files: list[dict[str, Any]],
+    scenario_pages: Callable[[ProjectSpec, Any], Sequence[str]] | None,
+    carried: Sequence[PriorAttemptFailure],
+    withheld: int,
+) -> tuple[dict[str, Any], str, str]:
+    recent_failures = list(carried)
     context = {
         "approved_intent": {
             "project_id": project.id,
@@ -1574,6 +1704,16 @@ def build_task_prompt(
             if obligation_surface
             else {}
         ),
+        **(
+            {
+                "pinned_database_factory": {
+                    "path": database_factory[1],
+                    "content": database_factory[0],
+                }
+            }
+            if database_factory
+            else {}
+        ),
         # Independently observed gate output from earlier attempts, redacted to
         # what this task may read.  Verification stays out of process and the
         # worker still cannot declare itself correct -- this only stops it from
@@ -1582,6 +1722,11 @@ def build_task_prompt(
         "prior_attempt_failures": [
             failure.to_dict() for failure in recent_failures
         ],
+        **(
+            {"prior_attempt_failures_withheld": withheld}
+            if withheld
+            else {}
+        ),
         "current_files": current_files,
         "write_authority": {
             "operations": ["create", "replace"],
@@ -1634,9 +1779,54 @@ def build_task_prompt(
             "run.\n"
         )
     )
+    persistence_guidance = (
+        ""
+        if not persists
+        else (
+            (
+                "This task owns the data package. Reach the database only "
+                "through `database()` from "
+                f"{database_factory[1]!r}, shown under "
+                "pinned_database_factory: it is protected, it selects the "
+                "engine from the environment (Postgres over the wire, or "
+                "PGlite in-process inside the verification gates), and it "
+                "returns a drizzle `Database` over `./schema`. Never import a "
+                "driver yourself and never read DATABASE_URL. Declare tables "
+                "in `src/schema.ts` and write the matching plain-Postgres DDL "
+                "as `migrations/NNNN_name.sql` files -- applied in name order, "
+                "statements separated by a line `--> statement-breakpoint`, "
+                "no `CREATE EXTENSION` (`gen_random_uuid()` is built in). "
+                "The database is created fresh and migrated before every "
+                "gate, so never assume existing rows. Operations that touch "
+                "the database are async; the interface allows "
+                "`O | Promise<O>`.\n"
+                if database_factory
+                else (
+                    "This application persists state through its data "
+                    "component. Reach persisted state only through the "
+                    "contracts of the components you depend on, never by "
+                    "importing a database driver. Any page that shows "
+                    "persisted state must keep "
+                    '`export const dynamic = "force-dynamic"`: the production '
+                    "build runs with no database, and a page that reads one "
+                    "while being prerendered fails the build. Read and write "
+                    "through Server Actions (`<form action={...}>`) so the "
+                    "page needs no client JavaScript. Operations that reach "
+                    "the database are async: await them. The acceptance "
+                    "scenarios under approved_intent are run by a real browser "
+                    "against the pages this application owns: a page must "
+                    "offer exactly the controls each oracle step names -- a "
+                    "field with that label, a button with that name -- and "
+                    "list what was persisted after a reload. A scaffolded "
+                    "placeholder page that only prints the requirement does "
+                    "not pass such a scenario; replace it.\n"
+                )
+            )
+        )
+    )
     retry_guidance = (
         ""
-        if not recent_failures
+        if not recent_failures and not withheld
         else (
             "Earlier attempts at this task failed the gates recorded under "
             "prior_attempt_failures. That output was observed by the harness, "
@@ -1645,6 +1835,12 @@ def build_task_prompt(
             "answer. Diagnostics naming files you do not own are withheld; a "
             "withheld count means you broke a consumer and should re-read your "
             "contract.\n"
+            + (
+                f"The {withheld} oldest failure(s) did not fit this prompt and "
+                "are withheld; the most recent are shown.\n"
+                if withheld
+                else ""
+            )
         )
     )
     pages_to_write = sorted(
@@ -1676,23 +1872,11 @@ def build_task_prompt(
         + "Produce the smallest coherent source change for this task. The control "
         "plane will validate and apply it, and separate workers will verify it.\n"
         + surface_guidance
+        + persistence_guidance
         + retry_guidance
         + _canonical_json(context)
     )
-    prompt_bytes = len(system_prompt.encode("utf-8")) + len(
-        user_prompt.encode("utf-8")
-    )
-    if prompt_bytes > limits.max_prompt_bytes:
-        raise PromptLimitError(
-            f"task prompt is {prompt_bytes} bytes, over the "
-            f"{limits.max_prompt_bytes}-byte limit"
-        )
-    return PromptBundle(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        current_file_count=len(current_files),
-        prompt_bytes=prompt_bytes,
-    )
+    return context, system_prompt, user_prompt
 
 
 def generated_source_artifact_bytes(

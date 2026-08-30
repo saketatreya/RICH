@@ -590,3 +590,18 @@ def test_default_runtime_is_lazy_exact_priced_and_restart_aware(monkeypatch):
         )
     assert oversized.value.request_was_sent is False
     assert transport.calls == []
+
+
+def test_the_cli_route_gives_the_prompt_the_headroom_the_proof_measured():
+    from richbuild.coding import DEFAULT_LIMITS
+    from richbuild.runtime import CLAUDE_CODE_LIMITS
+
+    # Two live measurements, one bound. M7's proof measured the web task of a
+    # four-component persisting application at 25,186 bytes with no failure
+    # carried; the M4 drive's reopened web retry, carrying the failure it was
+    # shown, at 29,332. Both routes now carry the larger number, so the CLI
+    # route pins nothing of its own here.
+    assert DEFAULT_LIMITS.max_prompt_bytes == 48_000
+    assert CLAUDE_CODE_LIMITS.max_prompt_bytes == DEFAULT_LIMITS.max_prompt_bytes
+    assert CLAUDE_CODE_LIMITS.max_prompt_bytes > 29_332
+    assert CLAUDE_CODE_LIMITS.max_prompt_bytes <= CLAUDE_CODE_LIMITS.max_input_tokens
