@@ -18,3 +18,10 @@ whose tables were all empty — failed the run. The invariant held exactly as de
 Two defects it exposed are fixed in faa4799: the prompt forbade the mechanism and not
 the behaviour, and a probe failure named no owner, so the root was regenerated three
 times while the component that held the array was never reopened.
+
+**Second run, 2026-08-30: failed differently, and the fixes are visible in it.** 1504s,
+6 model attempts, $1.96. The web worker wrote a *stateless* operations const, the stray
+lint warning that came with the invented store is gone, acceptance failed honestly, and
+the owner-retry reopened `web` rather than regenerating the root. Both retries then died
+on the route rather than on the work — the per-attempt reservation and the 600s timeout
+([[m7-web-owns-too-much-for-one-attempt]]).
