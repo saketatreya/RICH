@@ -17,3 +17,11 @@ reopen — which is what the page fix bought ([[m4-first-attempt-never-saw-the-p
 It then failed on the step the milestone is named for: the cost was not shown, because
 `ChangeCost` computed nothing until asked, so a customer who had approved a redraft was
 offered Build beside a panel naming a cost it had never computed (`15acad9`).
+
+**Runs 8 and 9 drove the architect instead of the fallback.** The architect allocates per
+requirement — `domain` and `data` serve only `req.workflow`, `web` and `app` serve both —
+so the amendment the drive makes can leave something untouched, which the fallback's shape
+never could. Run 8 stalled because the two routes to an approved design said different
+things (`a39ad91`). Run 9 got four components through the architect and built two of them,
+then `web` burned two attempts on a forty-two-token reservation overage
+([[m4-output-reservation-killed-work-already-done]]).
