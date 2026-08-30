@@ -1633,6 +1633,18 @@ class _VerifiedCodingHandler:
                         summary = f"acceptance passed but {probe.reason}"
                         result_document["status"] = status
                         result_document["observed_acceptance_scenario_ids"] = []
+                        # Every scenario passed in the browser and nothing
+                        # reached the database, so the state the browser saw
+                        # was held somewhere it should not have been. The root
+                        # ran the browser but owns no page: retrying it cannot
+                        # change the outcome. The owners of the pages the
+                        # scenarios exercised are the ones that can, and they
+                        # are named the same way a failing step names them.
+                        attributed = self._acceptance_owners(
+                            (),
+                            expected=command.expected_acceptance_scenario_ids,
+                            observed=(),
+                        )
 
         if preparation is not None:
             result_document["database_preparation"] = preparation.document(

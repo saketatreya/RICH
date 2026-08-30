@@ -2714,6 +2714,47 @@ def test_a_data_component_that_persisted_nothing_fails_acceptance_closed(tmp_pat
     assert "run.succeeded" not in events
 
 
+def test_a_probe_failure_is_attributed_to_the_owners_of_the_pages_the_browser_ran(
+    tmp_path,
+):
+    """M7's live proof: told only not to import a database driver, the web
+    worker kept the todos in a `globalThis` array. `next start` is one
+    long-lived process, so the array survived `page.reload()`, every browser
+    step passed, and only the probe -- reading a database whose tables were
+    all empty -- caught it. The root ran the browser but owns no page, so
+    retrying it three times could never change the outcome. The owners of the
+    pages the scenarios exercised are the ones that can."""
+
+    from richbuild.run_engine import RunEngine, RunEngineConfig
+    from richbuild.target_packs.nextjs import exercised_pages
+
+    state = _persisting_state(tmp_path)
+    provider = OwnedPathProvider()
+    runner = DatabaseAwareRunner(tables={"projects": 0, "todos": 0})
+    engine = RunEngine(
+        state["store"],
+        gateway=_gateway(provider),
+        command_runner=runner,
+        provider=provider.name,
+        model="fake-code-model",
+        config=RunEngineConfig(
+            max_task_attempts=1, exercised_paths=exercised_pages
+        ),
+    )
+
+    report = engine.execute(run_id=state["run"]["id"], workspace=state["workspace"])
+
+    assert not report.succeeded
+    verification = _artifacts_with_role(state, "verification:acceptance")[-1]
+    assert verification["metadata"]["status"] == "failed"
+    # `web` owns apps/web, where the scenario's page lives. The acceptance
+    # command itself passed, so there is no failing step to name an owner:
+    # the probe's verdict has to name them from the pages the browser opened.
+    assert verification["metadata"]["attributed_node_ids"] == ["web"]
+    acceptance = _evidence_record(state, "acceptance")
+    assert "persisted nothing" in acceptance["metadata"]["summary"]
+
+
 def test_a_migration_report_that_disagrees_with_the_files_on_disk_fails_the_gate(
     tmp_path,
 ):

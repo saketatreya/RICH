@@ -1536,6 +1536,15 @@ def test_the_database_factory_is_shown_only_to_the_task_that_owns_the_data_packa
     # scaffold's placeholder page, so the browser never found the field.
     assert "exactly the controls each oracle step names" in domain.user_prompt
     assert "placeholder page" in domain.user_prompt
+    # M7's live proof: told only not to import a driver, the web worker kept
+    # the todos in a `globalThis` array. `next start` is one long-lived
+    # process, so the array survived `page.reload()`, every browser step
+    # passed, and only the trusted probe -- reading a database whose tables
+    # were all empty -- caught it. Forbidding the mechanism was not enough;
+    # the behaviour has to be named.
+    assert "hold no state of your own" in domain.user_prompt
+    assert "no module-level or global mutable value" in domain.user_prompt
+    assert "survives a reload" in domain.user_prompt
 
 
 def test_an_application_without_a_data_component_hears_nothing_about_databases(
