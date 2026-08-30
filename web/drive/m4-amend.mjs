@@ -107,9 +107,20 @@ const approveSpec = async () => {
   await page.getByRole('button', { name: /^Approve/ }).first().click()
   await page.getByText('Product specification approved.').waitFor()
 }
-const approvePlannedArchitecture = async () => {
-  await page.getByRole('button', { name: 'Use the deterministic plan' }).click()
-  await page.getByText('The architecture is ready for your approval').waitFor()
+// The architect, not the deterministic fallback. The fallback allocates every
+// requirement to every layer -- that is what a layered decomposition means --
+// so under it no component can ever be untouched by an amendment and the cost
+// this drive exists to check is always "all of them". Driving the fallback and
+// asserting locality was asserting something the shape cannot provide.
+const approveArchitectedDesign = async () => {
+  await page.getByRole('button', { name: 'Draft with the architect →' }).click()
+  await page
+    .getByRole('button', { name: 'Apply as a new revision' })
+    .waitFor({ timeout: 300_000 })
+  await page.getByRole('button', { name: 'Apply as a new revision' }).click()
+  await page.getByText('The architecture is ready for your approval').waitFor({
+    timeout: 60_000,
+  })
   await page.getByRole('button', { name: /^Approve/ }).first().click()
   await page.getByText('Architecture approved.').waitFor()
 }
@@ -128,8 +139,8 @@ await step('create a project and approve the example specification', async () =>
   await approveSpec()
 })
 
-await step('plan the architecture deterministically and approve it', async () => {
-  await approvePlannedArchitecture()
+await step('the architect designs the decomposition and it is approved', async () => {
+  await approveArchitectedDesign()
 })
 
 await step('build the example with a $10 ceiling', async () => {
@@ -150,7 +161,7 @@ await step('amend one quality constraint and approve the new specification', asy
 })
 
 await step('the architecture is drafted again and approved', async () => {
-  await approvePlannedArchitecture()
+  await approveArchitectedDesign()
 })
 
 await step('the cost is shown before any money moves: domain is untouched', async () => {
