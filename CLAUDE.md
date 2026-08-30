@@ -54,6 +54,13 @@ python -m pytest --run-live --basetemp=.rich/locality \
 # ^ build, amend a requirement one component does not serve, rebuild: that
 #   component replays its memo while the ones that do serve it are rewritten,
 #   and every gate runs again. ~9 min, two model-backed builds.
+RICH_LIVE_CACHE_ROOT=.rich/live-cache python -m pytest --run-live \
+  --basetemp=.rich/live-m7 tests/test_persistence_live.py
+# ^ M7's proof: a real model builds a todo list with a data component; every
+#   gate that runs the software gets a fresh migrated PGlite first, the probe
+#   counts the row the browser created, the evidence carries the migration
+#   digest set. RICH_LIVE_CACHE_ROOT shares the pnpm store and browsers
+#   between live runs (any live test honours it); ~5 min, a few dollars.
 ```
 
 ## What this repo is

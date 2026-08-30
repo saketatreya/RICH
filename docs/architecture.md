@@ -723,6 +723,16 @@ The public-runtime live test creates a fresh approved spec/architecture/scaffold
 the frozen dependency graph and Chromium inside Bubblewrap, and runs the six independent
 gates. It does not use a model credential.
 
+Two more live tests carry persistence. `tests/test_persistence_spike_live.py` runs the
+pack's own protected factory, migrator and probe under the gate policy with only a
+worker's authorship laid over the scaffold — no model. `tests/test_persistence_live.py`
+is M7's proof: a real model over the `claude-code` route builds a todo list with a data
+component, and the run must succeed with exact coverage, a probe that counted the row the
+browser created, the migration digest set on the acceptance evidence, and the data
+component's property suite run against the in-sandbox database. Both honour
+`RICH_LIVE_CACHE_ROOT`, a host directory that shares the pnpm store and the browsers
+between live runs the way `<state>/../cache` does for the product.
+
 The Canvas frontend is checked independently:
 
 ```bash
