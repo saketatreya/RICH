@@ -2233,6 +2233,82 @@ def test_reopened_owner_reads_the_acceptance_failure_it_caused(tmp_path):
     assert read(task("domain", "packages/domain"), 2) == ()
 
 
+def test_a_reopened_owner_reads_the_probe_verdict_not_a_log_full_of_passes(
+    tmp_path,
+):
+    """A probe verdict has no failing step, and the acceptance command's own
+    log truthfully says every scenario passed. Handed that, a reopened owner
+    would be told "acceptance failed on pages you own" beside a log of passes
+    and would have nothing to act on. The probe's reason is what reopened it,
+    so the probe's reason is what it is shown."""
+
+    from richbuild.run_engine import _prior_failure_source
+
+    state = _prepared_state(tmp_path)
+    store = state["store"]
+    run_id = state["run"]["id"]
+    document = {
+        "schema_version": "rich.command-verification/v1",
+        "kind": "acceptance",
+        "status": "failed",
+        "returncode": 0,
+        "stdout": "  ✓  1 [chromium] › scenarios/todo.spec.ts › A todo persists\n",
+        "stderr": "",
+        "failed_steps": [],
+        "database_probe": {
+            "kind": "database-probe",
+            "status": "failed",
+            "reason": (
+                "the data component persisted nothing: every table is empty "
+                "after the browser ran every scenario"
+            ),
+            "stdout": (
+                'RICH_DATABASE_PROBE {"tables":{"projects":0,"todos":0}}\n'
+            ),
+            "stderr": "",
+        },
+    }
+    artifact = store.put_artifact(
+        json.dumps(document).encode(),
+        media_type="application/vnd.rich.command-verification+json",
+        metadata={
+            "kind": "acceptance",
+            "status": "failed",
+            "node_id": "app",
+            "attempt": 1,
+            "attributed_node_ids": ["web"],
+        },
+    )
+    store.attach_artifact(
+        run_id,
+        artifact.digest,
+        role="verification:acceptance",
+        task_id=f"{run_id}:implement:app",
+    )
+
+    read = _prior_failure_source(store, run_id)
+    (failure,) = read(
+        CompiledTask(
+            task_id="implement:web",
+            node_id="web",
+            order=0,
+            contract_id="contract.web",
+            dependency_ids=(),
+            consumer_ids=("app",),
+            requirement_ids=("requirement.behavior",),
+            owned_paths=("apps/web",),
+        ),
+        2,
+    )
+    assert "persisted nothing" in failure.summary
+    assert "ran every scenario in the browser" in failure.summary
+    assert "failed acceptance on pages this task owns" not in failure.summary
+    assert "persisted nothing" in failure.diagnostics[0]
+    assert any("todos" in line for line in failure.diagnostics)
+    # The passing browser log is not what it needs to read.
+    assert not any("A todo persists" in line for line in failure.diagnostics)
+
+
 def test_attribution_spares_the_owner_of_a_page_that_passed(tmp_path):
     """Two scenarios on two pages with two owners; only the failing one's owner
     is named. The coverage line of a failed run is read leniently for this and

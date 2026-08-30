@@ -1058,15 +1058,41 @@ def _prior_failure_source(
                 ).strip()[:400]
                 for entry in steps[:_MAX_NAMED_STEPS_IN_PROMPT]
             )
+            # A probe verdict has no failing step and its command's own log
+            # says every scenario passed, which is true and useless. Without
+            # the probe's reason a reopened task would be told "acceptance
+            # failed on pages you own" and shown a log full of passes.
+            probe = document.get("database_probe")
+            probe_reason = (
+                str(probe.get("reason") or "")
+                if isinstance(probe, Mapping) and probe.get("status") == "failed"
+                else ""
+            )
+            if probe_reason:
+                summary = (
+                    f"the assembled application ({metadata.get('node_id')}, "
+                    f"attempt {earlier}) ran every scenario in the browser "
+                    f"against pages this task owns and then {probe_reason}"
+                )
+                probe_lines = tuple(
+                    line
+                    for stream in ("stdout", "stderr")
+                    for line in str(probe.get(stream) or "").splitlines()
+                    if line.strip()
+                )[:_MAX_NAMED_STEPS_IN_PROMPT]
+                diagnostics = (probe_reason, *probe_lines)
+                withheld = 0
+            else:
+                summary = (
+                    f"the assembled application ({metadata.get('node_id')}, "
+                    f"attempt {earlier}) failed {kind} on pages this task "
+                    f"owns; {len(steps)} step(s) named"
+                )
             failures.append(
                 PriorAttemptFailure(
                     attempt=max(attempt - 1, 1),
                     gate=kind,
-                    summary=(
-                        f"the assembled application ({metadata.get('node_id')}, "
-                        f"attempt {earlier}) failed {kind} on pages this task "
-                        f"owns; {len(steps)} step(s) named"
-                    ),
+                    summary=summary,
                     diagnostics=(*named, *diagnostics),
                     withheld_line_count=withheld,
                 )
